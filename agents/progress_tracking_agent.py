@@ -1,5 +1,7 @@
+import os
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
+from utils.overleaf_connector import OverleafConnector
 
 class ProgressTrackingAgent(BaseAgent):
     """
@@ -10,22 +12,27 @@ class ProgressTrackingAgent(BaseAgent):
     def __init__(self, overleaf_projects: list):
         super().__init__(agent_name="ProgressTrackingAgent")
         self.overleaf_projects = overleaf_projects
-        self.library = LibraryManager()  # Instantiate the library manager
+        self.library = LibraryManager()
+        self.connector = OverleafConnector()
         self.logger.info("ProgressTrackingAgent initialized with %d projects.", len(self.overleaf_projects))
 
     def check_text_changes(self, project: str) -> dict:
         """
-        Check for new text changes in the given Overleaf project.
+        Reads the actual text from the local Drop Folder.
         """
-        self.logger.info("Checking for text changes in project: %s", project)
-        dummy_new_text = (
-            "The results of the AI model were very good. We saw that it works fast. "
-            "It is better than the old model because it uses less memory and gives right answers."
-        )
-        return {"has_changes": True, "new_text": dummy_new_text}
+        self.logger.info("Reading text from local Drop Folder for project: %s", project)
+        project_path = os.path.join(self.connector.base_storage_path, project)
+        
+        # Read the real text using our connector
+        real_text = self.connector.read_and_clean_tex_file(project_path, "main.tex")
+        
+        if not real_text:
+            self.logger.warning("No text found for %s. Make sure 'main.tex' is in the folder.", project)
+            return {"has_changes": False, "new_text": ""}
+            
+        return {"has_changes": True, "new_text": real_text}
 
     def provide_feedback(self, text: str) -> str:
-        """Ask the LLM to provide feedback on the newly added text."""
         self.logger.info("Analyzing changes to provide feedback...")
         prompt = f"""
         You are an expert academic reviewer. Review the following draft text added to a research paper:
@@ -38,7 +45,6 @@ class ProgressTrackingAgent(BaseAgent):
         return response
 
     def suggest_improvements(self, text: str) -> str:
-        """Ask the LLM to suggest writing improvements."""
         self.logger.info("Generating writing suggestions...")
         prompt = f"""
         You are an expert academic editor. Review the following draft text:
@@ -52,7 +58,6 @@ class ProgressTrackingAgent(BaseAgent):
         return response
 
     def run(self):
-        """Main execution flow for tracking project progress."""
         self.logger.info("Starting the progress tracking cycle.")
         for project in self.overleaf_projects:
             print(f"\n{'-'*40}\n📂 Evaluating Project: {project}\n{'-'*40}")
@@ -63,7 +68,6 @@ class ProgressTrackingAgent(BaseAgent):
                 feedback = self.provide_feedback(new_text)
                 suggestions = self.suggest_improvements(new_text)
                 
-                # Save the feedback and suggestions to a file
                 self.library.save_feedback(project, feedback, suggestions)
                 self.logger.info("Saved feedback and suggestions for %s.", project)
                 

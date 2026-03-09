@@ -8,9 +8,9 @@ def main():
     Simulates the Scheduler activating the agents.
     """
     
-    # Dummy data for testing
-    lab_topics = ["Autonomous AI Agents", "Machine Learning"]
-    active_projects = ["Project_Alpha_Overleaf", "Project_Beta_Overleaf"]
+    # Dummy data for testing (taken from a dummy research by me)
+    lab_topics = ["AI In Modern World"]
+    active_projects = ["MyFreeTestProject"]
     
     print("--- Initializing All Agents ---")
     lit_agent = LiteratureResearchAgent(research_topics=lab_topics)

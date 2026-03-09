@@ -1,39 +1,46 @@
+import os
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
+from utils.overleaf_connector import OverleafConnector
 
 class ResearchEnhancementAgent(BaseAgent):
     """
     Agent responsible for periodic research enhancement.
-    Simulates external article review, extracts action items, and tracks innovation.
+    Generates a simulated peer-review based on REAL text, extracts action items, and tracks innovation.
     """
     
     def __init__(self, overleaf_projects: list):
         super().__init__(agent_name="ResearchEnhancementAgent")
         self.overleaf_projects = overleaf_projects
-        self.library = LibraryManager()  # Instantiate the library manager
+        self.library = LibraryManager()
+        self.connector = OverleafConnector()
         self.logger.info("ResearchEnhancementAgent initialized with %d projects.", len(self.overleaf_projects))
 
-    def export_to_pdf(self, project: str) -> str:
-        self.logger.info("Exporting project to PDF: %s", project)
-        return f"{project}_draft.pdf"
+    def get_project_text(self, project: str) -> str:
+        """Reads the full cleaned text from the project folder."""
+        self.logger.info("Reading project text for peer review: %s", project)
+        project_path = os.path.join(self.connector.base_storage_path, project)
+        return self.connector.read_and_clean_tex_file(project_path, "main.tex")
 
-    def send_for_review(self, pdf_path: str) -> str:
-        self.logger.info("Simulating external review for %s...", pdf_path)
-        dummy_review = (
-            "The paper presents an interesting approach to Autonomous AI agents. "
-            "However, the methodology section lacks detail on the specific LLM parameters used. "
-            "Furthermore, the literature review misses several key papers from 2025 regarding "
-            "multi-agent reinforcement learning. The results are promising, but statistical "
-            "significance tests are missing. Overall innovation is moderate."
-        )
-        return dummy_review
+    def send_for_review(self, text: str) -> str:
+        """Uses the LLM to generate a harsh peer-review based on the actual manuscript text."""
+        self.logger.info("Simulating external peer review via LLM...")
+        prompt = f"""
+        You are a strict and rigorous academic peer reviewer for a top-tier journal. 
+        Read the following manuscript draft and provide a harsh but constructive peer review (1-2 paragraphs).
+        Highlight missing elements, methodological flaws, lack of citations, or lack of depth.
+        ---\n{text}\n---
+        """
+        response = self.ask_llm(prompt)
+        print(f"\n📨 Simulated Peer Review:\n{response}\n")
+        return response
 
     def extract_tasks(self, review_text: str) -> str:
         self.logger.info("Extracting tasks from the review data...")
         prompt = f"""
-        You are a rigorous academic project manager. Read the following external peer-review:
+        You are a rigorous academic project manager. Read the following peer-review:
         ---\n{review_text}\n---
-        Extract a clear, actionable To-Do list (bullet points) for the research team.
+        Extract a clear, actionable To-Do list (bullet points) for the research team to fix the paper.
         """
         response = self.ask_llm(prompt)
         print(f"\n📋 Actionable Tasks:\n{response}\n")
@@ -51,17 +58,18 @@ class ResearchEnhancementAgent(BaseAgent):
         return response
 
     def run(self):
-        """Main execution flow for research enhancement."""
         self.logger.info("Starting the research enhancement cycle.")
         for project in self.overleaf_projects:
             print(f"\n{'='*40}\n🔬 Enhancing Project: {project}\n{'='*40}")
-            pdf_path = self.export_to_pdf(project)
-            review_text = self.send_for_review(pdf_path)
             
+            text = self.get_project_text(project)
+            if not text:
+                continue
+                
+            review_text = self.send_for_review(text)
             tasks = self.extract_tasks(review_text)
             innovation = self.compare_innovation(review_text)
             
-            # Save the action items and innovation analysis to a file
             self.library.save_enhancement_tasks(project, tasks, innovation)
             self.logger.info("Saved enhancement plan for %s.", project)
             
