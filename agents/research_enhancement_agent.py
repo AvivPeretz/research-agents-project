@@ -2,8 +2,8 @@ from agents.base_agent import BaseAgent
 
 class ResearchEnhancementAgent(BaseAgent):
     """
-    Agent responsible for periodic research enhancement, including PDF generation,
-    external article review, extracting action items, and tracking innovation.
+    Agent responsible for periodic research enhancement.
+    Simulates external article review, extracts action items, and tracks innovation.
     """
     
     def __init__(self, overleaf_projects: list):
@@ -11,36 +11,67 @@ class ResearchEnhancementAgent(BaseAgent):
         self.overleaf_projects = overleaf_projects
         self.logger.info("ResearchEnhancementAgent initialized with %d projects.", len(self.overleaf_projects))
 
-    def export_to_pdf(self, project: str):
+    def export_to_pdf(self, project: str) -> str:
         """
-        Save the current state of the Overleaf project as a PDF file.
+        Simulate saving the current state of the Overleaf project as a PDF file.
         """
         self.logger.info("Exporting project to PDF: %s", project)
-        # TODO: Implement Overleaf export functionality
-        return "dummy_path.pdf"
+        # Placeholder: In the future, connect to Overleaf API to download the actual PDF.
+        return f"{project}_draft.pdf"
 
-    def send_for_review(self, pdf_path: str):
+    def send_for_review(self, pdf_path: str) -> str:
         """
-        Send the PDF to an external article review website.
+        Simulate sending the PDF to an external article review website and receiving a critique.
         """
-        self.logger.info("Sending %s for external review...", pdf_path)
-        # TODO: Implement API call to the review website (e.g., Stanford)
-        return {"review_text": "dummy review data"}
+        self.logger.info("Simulating external review for %s...", pdf_path)
+        
+        # Simulated review received from an external academic source
+        dummy_review = (
+            "The paper presents an interesting approach to Autonomous AI agents. "
+            "However, the methodology section lacks detail on the specific LLM parameters used. "
+            "Furthermore, the literature review misses several key papers from 2025 regarding "
+            "multi-agent reinforcement learning. The results are promising, but statistical "
+            "significance tests (e.g., p-values) are missing. Overall innovation is moderate, "
+            "building mostly on existing RAG (Retrieval-Augmented Generation) architectures."
+        )
+        return dummy_review
 
-    def extract_tasks(self, review_data: dict):
+    def extract_tasks(self, review_text: str) -> str:
         """
-        Extract actionable tasks from the received article review.
+        Use the LLM to extract actionable tasks from the received article review.
         """
         self.logger.info("Extracting tasks from the review data...")
-        # TODO: Use LLM to parse the review and generate a task list
+        
+        prompt = f"""
+        You are a rigorous academic project manager. Read the following external peer-review of our paper:
+        ---
+        {review_text}
+        ---
+        Extract a clear, actionable To-Do list (bullet points) for the research team so they can address the reviewer's concerns.
+        """
+        
+        response = self.ask_llm(prompt)
+        print(f"\n📋 Actionable Tasks Extracted:\n{response}\n")
+        return response
 
-    def compare_innovation(self):
+    def compare_innovation(self, review_text: str) -> str:
         """
-        Perform a periodic comparison to track and improve innovation 
-        based on the accumulated article reviews.
+        Use the LLM to analyze the innovation level based on the review and suggest improvements.
         """
-        self.logger.info("Comparing innovation metrics over time...")
-        # TODO: Implement historical comparison logic
+        self.logger.info("Analyzing innovation metrics...")
+        
+        prompt = f"""
+        Based on the following paper review, provide a brief summary of the paper's current innovation level 
+        and provide ONE concrete, ambitious suggestion on how to push the boundaries of this research 
+        to make it highly groundbreaking.
+        ---
+        {review_text}
+        ---
+        """
+        
+        response = self.ask_llm(prompt)
+        print(f"\n🚀 Innovation Analysis & Strategy:\n{response}\n")
+        return response
 
     def run(self):
         """
@@ -49,10 +80,16 @@ class ResearchEnhancementAgent(BaseAgent):
         self.logger.info("Starting the research enhancement cycle.")
         
         for project in self.overleaf_projects:
-            pdf_path = self.export_to_pdf(project)
-            review = self.send_for_review(pdf_path)
-            self.extract_tasks(review)
+            print(f"\n{'='*40}")
+            print(f"🔬 Enhancing Project: {project}")
+            print(f"{'='*40}")
             
-        self.compare_innovation()
-        
+            # 1. Export and Review
+            pdf_path = self.export_to_pdf(project)
+            review_text = self.send_for_review(pdf_path)
+            
+            # 2. Process the review with LLM
+            self.extract_tasks(review_text)
+            self.compare_innovation(review_text)
+            
         self.logger.info("Research enhancement cycle completed.")

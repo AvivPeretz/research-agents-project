@@ -1,10 +1,11 @@
 import os
+import time
 import logging
 from abc import ABC, abstractmethod
 from dotenv import load_dotenv
-from google import genai  # The new and updated Google GenAI SDK
+from groq import Groq  # The new Groq SDK
 
-# Load environment variables from the .env file
+# Load environment variables
 load_dotenv()
 
 class BaseAgent(ABC):
@@ -35,31 +36,39 @@ class BaseAgent(ABC):
 
     def _setup_llm(self):
         """
-        Initialize the connection to the Gemini API using the new google-genai SDK.
+        Initialize the connection to the Groq API.
         """
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            self.logger.error("GEMINI_API_KEY not found in environment variables.")
+            self.logger.error("GROQ_API_KEY not found in environment variables.")
             raise ValueError("API Key is missing. Please check your .env file.")
         
-        # Initialize the new client using the secure API key
-        self.client = genai.Client(api_key=api_key)
-        self.logger.info("LLM connection established successfully using the new SDK.")
+        # Initialize the Groq client
+        self.client = Groq(api_key=api_key)
+        self.logger.info("LLM connection established successfully using Groq.")
 
     def ask_llm(self, prompt: str) -> str:
         """
         A helper method to send a prompt to the LLM and return its response.
-        Child classes will use this to generate summaries, feedback, etc.
         """
         try:
-            self.logger.info("Sending prompt to LLM...")
+            self.logger.info("Sending prompt to LLM (Groq)...")
             
-            # Using the new SDK syntax and the latest, most capable flash model
-            response = self.client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt
+            # Groq is very fast and has high limits, but a small 1-second sleep is good practice
+            time.sleep(1) 
+            
+            # Groq uses the standard OpenAI-like chat completion structure
+            chat_completion = self.client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                model="llama-3.3-70b-versatile",  # You can also try 'mixtral-8x7b-32768'
             )
-            return response.text
+            
+            return chat_completion.choices[0].message.content
             
         except Exception as e:
             self.logger.error("Error communicating with LLM: %s", str(e))
