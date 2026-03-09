@@ -69,19 +69,22 @@ class OverleafConnector:
         """
         self.logger.info("Cleaning LaTeX formatting to extract plain text...")
         
-        # 1. Remove comments (anything after a % sign)
+        # 1. Remove comments
         clean_text = re.sub(r'%.*$', '', raw_tex, flags=re.MULTILINE)
         
-        # 2. Remove standard formatting commands but keep the text inside (e.g., \textbf{Hello} -> Hello)
+        # 2. Remove entire setup commands and environments we don't need to read
+        clean_text = re.sub(r'\\documentclass\[.*?\]\{.*?\}|\\documentclass\{.*?\}', '', clean_text)
+        clean_text = re.sub(r'\\usepackage\[.*?\]\{.*?\}|\\usepackage\{.*?\}', '', clean_text)
+        clean_text = re.sub(r'\\begin\{document\}|\\end\{document\}', '', clean_text)
+        
+        # 3. Extract text from formatting commands (e.g., \textbf{Hello} -> Hello)
         clean_text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', clean_text)
         
-        # 3. Remove standalone commands (like \maketitle, \clearpage, \begin{...}, \end{...})
+        # 4. Remove standalone commands (like \maketitle, \clearpage)
         clean_text = re.sub(r'\\[a-zA-Z]+\*?', '', clean_text)
         
-        # 4. Remove extra curly braces
+        # 5. Clean up multiple empty lines and curly braces
         clean_text = clean_text.replace('{', '').replace('}', '')
-        
-        # 5. Clean up multiple empty lines
         clean_text = re.sub(r'\n\s*\n', '\n\n', clean_text)
         
         return clean_text.strip()
