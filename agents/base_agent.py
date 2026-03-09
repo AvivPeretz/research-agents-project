@@ -2,7 +2,7 @@ import os
 import logging
 from abc import ABC, abstractmethod
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai  # The new and updated Google GenAI SDK
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -35,19 +35,16 @@ class BaseAgent(ABC):
 
     def _setup_llm(self):
         """
-        Initialize the connection to the Gemini API using the key from .env.
+        Initialize the connection to the Gemini API using the new google-genai SDK.
         """
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             self.logger.error("GEMINI_API_KEY not found in environment variables.")
             raise ValueError("API Key is missing. Please check your .env file.")
         
-        # Configure the Google Generative AI library with our secure key
-        genai.configure(api_key=api_key)
-        
-        # Initialize the model (using gemini-1.5-flash for fast and cost-effective text generation)
-        self.llm = genai.GenerativeModel('gemini-1.5-flash')
-        self.logger.info("LLM connection established successfully.")
+        # Initialize the new client using the secure API key
+        self.client = genai.Client(api_key=api_key)
+        self.logger.info("LLM connection established successfully using the new SDK.")
 
     def ask_llm(self, prompt: str) -> str:
         """
@@ -56,8 +53,14 @@ class BaseAgent(ABC):
         """
         try:
             self.logger.info("Sending prompt to LLM...")
-            response = self.llm.generate_content(prompt)
+            
+            # Using the new SDK syntax and the latest, most capable flash model
+            response = self.client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
             return response.text
+            
         except Exception as e:
             self.logger.error("Error communicating with LLM: %s", str(e))
             return f"Error: {str(e)}"
