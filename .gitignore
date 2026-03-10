@@ -1,2 +1,23 @@
-/venv
+# Security & Credentials
 .env
+
+# Virtual Environment
+venv/
+/venv/
+env/
+
+# Web Scraper State & Sessions (DO NOT COMMIT!)
+overleaf_state.json
+sync_registry.json
+
+# Downloaded Data & Generated Outputs
+overleaf_projects/
+research_library/
+
+# Python Cache Files
+__pycache__/
+*.pyc
+*.pyo
+
+# Mac OS specific
+.DS_Store
