@@ -24,8 +24,3 @@ The system is built on a modular, extensible architecture utilizing a shared `Ba
 ### Utility Modules
 * **Library Manager:** Automates the creation of directories and the saving of outputs (Markdown, CSV) to maintain a clean `research_library` ecosystem.
 * **Overleaf Connector:** Handles the ingestion and cleaning of `.tex` files from a local Drop Folder, preparing plain text for LLM consumption.
-
-## 🛠️ Prerequisites
-
-* Python 3.8+
-* A Groq API Key
