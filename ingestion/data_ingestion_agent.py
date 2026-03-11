@@ -11,7 +11,7 @@ load_dotenv()
 class DataIngestionAgent:
     """
     Data Ingestion Agent: Performs a Delta Sync.
-    Downloads both the source ZIP (for text delta extraction) and the compiled PDF (for external reviews).
+    Downloads ONLY the source ZIP for text delta extraction and fast processing.
     """
     def __init__(self):
         self.email = os.getenv("OVERLEAF_EMAIL")
@@ -88,7 +88,6 @@ class DataIngestionAgent:
                 print("🌐 Navigating to dashboard...")
                 page.goto("https://www.overleaf.com/project")
                 
-                # Wait for at least one project link to render
                 page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=20000)
                 time.sleep(2)
                 
@@ -117,7 +116,7 @@ class DataIngestionAgent:
                         
                         print(f"🔄 [{reason}] '{project_name}' requires sync.")
                         
-                        # --- 1. DOWNLOAD ZIP SOURCE ---
+                        # --- DOWNLOAD ZIP SOURCE ONLY ---
                         zip_download_url = f"https://www.overleaf.com{href}/download/zip"
                         print(f"   📦 Downloading ZIP source...")
                         with page.expect_download() as zip_download_info:
@@ -135,24 +134,10 @@ class DataIngestionAgent:
                             zip_ref.extractall(extract_path)
                             
                         os.remove(zip_path)
-
-                        # --- 2. DOWNLOAD COMPILED PDF ---
-                        pdf_download_url = f"https://www.overleaf.com{href}/output/output.pdf"
-                        print(f"   📄 Downloading compiled PDF...")
-                        try:
-                            # We set a timeout because sometimes uncompiled projects don't have a PDF
-                            with page.expect_download(timeout=15000) as pdf_download_info:
-                                page.evaluate(f"window.location.href = '{pdf_download_url}'")
-                            pdf_download = pdf_download_info.value
-                            # Save the PDF clearly inside the extracted folder
-                            pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
-                            pdf_download.save_as(pdf_path)
-                            print(f"✅ Synced '{project_name}' (ZIP + PDF).")
-                        except Exception as e:
-                            print(f"⚠️ PDF not found or not compiled for '{project_name}'. Synced ZIP only.")
                         
                         registry[project_name] = last_modified_text
                         updated_projects.append(project_name)
+                        print(f"✅ Synced '{project_name}'.")
                     else:
                         print(f"⏭️  [SKIPPED] '{project_name}' is up to date.")
 

@@ -3,6 +3,7 @@ from agents.literature_research_agent import LiteratureResearchAgent
 from agents.progress_tracking_agent import ProgressTrackingAgent
 from agents.research_enhancement_agent import ResearchEnhancementAgent
 from ingestion.data_ingestion_agent import DataIngestionAgent
+from agents.notification_agent import NotificationAgent
 
 def get_all_active_projects() -> list:
     """
@@ -53,7 +54,12 @@ def main():
         
         print("\n--- 3. Running Research Enhancement Agent ---")
         enhancement_agent.run()
-    
+        
+    print("\n--- 4. Running Notification Agent ---")
+    # We pass only the updated_projects so we don't spam the researcher 
+    # with emails if they didn't change anything in their paper today!
+    notifier_agent = NotificationAgent(updated_projects=updated_projects)
+    notifier_agent.run()
     print("\n--- All Executions Finished Successfully ---")
 
 if __name__ == "__main__":
