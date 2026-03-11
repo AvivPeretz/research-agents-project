@@ -1,6 +1,8 @@
 import os
 import smtplib
 import json
+import markdown
+import re
 from email.message import EmailMessage
 from dotenv import load_dotenv
 from agents.base_agent import BaseAgent
@@ -10,22 +12,20 @@ load_dotenv()
 class NotificationAgent(BaseAgent):
     """
     Agent responsible for communicating with the human researchers.
-    It collects the generated Markdown reports and sends them as attachments 
-    via a beautifully formatted HTML email.
+    It compiles the generated Markdown reports into a single, beautifully 
+    styled HTML email body, and attaches the raw files with clean display names.
     """
     def __init__(self, updated_projects: list):
         super().__init__(agent_name="NotificationAgent")
         self.projects = updated_projects
-        self.sender_email = os.getenv("OVERLEAF_EMAIL") # Using the dummy account to send
+        self.sender_email = os.getenv("OVERLEAF_EMAIL") 
         self.sender_password = os.getenv("EMAIL_APP_PASSWORD")
         self.map_file = "researchers_map.json"
         
         self._ensure_map_file()
 
     def _ensure_map_file(self):
-        """Creates a default mapping file if it doesn't exist."""
         if not os.path.exists(self.map_file):
-            # Defaulting to the sender email for testing purposes
             default_map = {
                 "AI TEST RESEARCH": self.sender_email,
                 "Machine Learning Research": self.sender_email
@@ -34,28 +34,33 @@ class NotificationAgent(BaseAgent):
                 json.dump(default_map, f, indent=4)
 
     def get_researcher_email(self, project_name: str) -> str:
-        """Looks up the target email for a specific project."""
         try:
             with open(self.map_file, 'r', encoding='utf-8') as f:
                 mapping = json.load(f)
-            return mapping.get(project_name, self.sender_email) # Fallback to dummy
+            return mapping.get(project_name, self.sender_email) 
         except Exception:
             return self.sender_email
 
     def _get_latest_file(self, folder_path: str) -> str:
-        """Utility to find the most recently created file in a given directory."""
         if not os.path.exists(folder_path): 
             return None
-            
         files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.md')]
         if not files: 
             return None
-            
-        # Return the file with the newest creation/modification time
         return max(files, key=os.path.getctime)
 
+    def _format_display_title(self, filename: str) -> str:
+        """
+        Cleans the filename to create a beautiful human-readable title.
+        Example: 2026-03-11_19-10-58_literature_summary.md -> Literature Summary
+        """
+        raw_name = filename.replace('.md', '')
+        # Regex to remove datetime patterns (YYYY-MM-DD_HH-MM-SS_ or YYYY-MM-DD_)
+        clean_name = re.sub(r'\d{4}-\d{2}-\d{2}(_\d{2}-\d{2}-\d{2})?_', '', raw_name)
+        # Replace underscores with spaces and capitalize each word
+        return clean_name.replace('_', ' ').title()
+
     def collect_attachments(self, project_name: str) -> list:
-        """Gathers the latest reports (Literature, Tracking, Enhancement) for the project."""
         safe_name = project_name.replace(" ", "_")
         attachments = []
         base_lib = "research_library"
@@ -74,7 +79,6 @@ class NotificationAgent(BaseAgent):
         return attachments
 
     def send_email(self, project_name: str, recipient: str, attachments: list):
-        """Constructs and sends the HTML email with attachments via Gmail SMTP."""
         if not self.sender_email or not self.sender_password:
             self.logger.error("Email credentials missing in .env file!")
             return
@@ -84,43 +88,87 @@ class NotificationAgent(BaseAgent):
         msg['From'] = f"AI Research Copilot 🤖 <{self.sender_email}>"
         msg['To'] = recipient
 
-        # Beautiful HTML Body
-        html_content = f"""
+        # 1. Compile the reports into beautifully styled HTML sections
+        reports_html = ""
+        for file_path in attachments:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    md_content = f.read()
+                
+                # Convert markdown to HTML
+                html_body = markdown.markdown(md_content)
+                
+                # Create a beautiful title
+                filename = os.path.basename(file_path)
+                display_title = self._format_display_title(filename)
+                
+                # Wrap each report in a nice visual box
+                reports_html += f"""
+                <div style="margin-top: 30px; padding: 25px; border-left: 5px solid #3498db; background-color: #f8f9fa; border-radius: 4px;">
+                    <h3 style="color: #2980b9; margin-top: 0; font-size: 18px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">📄 {display_title}</h3>
+                    <div style="font-size: 15px; color: #444;">
+                        {html_body}
+                    </div>
+                </div>
+                """
+            except Exception as e:
+                self.logger.error("Could not process %s: %s", file_path, str(e))
+
+        # 2. Build the main Email HTML layout
+        email_html = f"""
+        <!DOCTYPE html>
         <html>
-            <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
-                <h2 style="color: #2c3e50;">Hello Researcher,</h2>
-                <p>The <b>AI Research Copilot</b> has completed a new analysis cycle for your project: <strong>{project_name}</strong>.</p>
-                <p>We detected recent modifications in your Overleaf manuscript or found new relevant literature in your field.</p>
-                <p>Please find your detailed AI feedback, literature summaries, and enhancement tasks attached to this email.</p>
-                <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-                <p style="font-size: 0.9em; color: #7f8c8d;">
+        <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; background-color: #eaeff2; padding: 20px; }}
+                .container {{ max-width: 800px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
+                h2 {{ color: #2c3e50; font-size: 24px; }}
+                h1, h2, h3, h4 {{ color: #2c3e50; font-weight: 600; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2>Hello Researcher,</h2>
+                <p style="font-size: 16px;">The <b>AI Research Copilot</b> has completed a new analysis cycle for your project: <strong>{project_name}</strong>.</p>
+                <p style="font-size: 16px;">Below is your detailed AI feedback, literature summaries, and enhancement tasks:</p>
+                
+                {reports_html}
+                
+                <hr style="border: none; border-top: 1px solid #eee; margin: 40px 0 20px 0;">
+                <p style="font-size: 14px; color: #7f8c8d; text-align: center;">
                     Keep pushing the boundaries of science! 🚀<br>
                     <i>- Your Automated Lab Assistant</i>
                 </p>
-            </body>
+            </div>
+        </body>
         </html>
         """
+        
         msg.set_content("Please enable HTML to view this message.")
-        msg.add_alternative(html_content, subtype='html')
+        msg.add_alternative(email_html, subtype='html')
 
-        # Attach the Markdown files
+        # 3. Attach the original .md files with CLEAN names
         for file_path in attachments:
             try:
                 with open(file_path, 'rb') as f:
                     file_data = f.read()
-                    file_name = os.path.basename(file_path)
-                # Attach as a general binary file so the user can download it easily
-                msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
+                
+                original_filename = os.path.basename(file_path)
+                clean_title = self._format_display_title(original_filename)
+                clean_filename = f"{clean_title.replace(' ', '_')}.md"
+                
+                msg.add_attachment(file_data, maintype='text', subtype='plain', filename=clean_filename)
             except Exception as e:
                 self.logger.error(f"Could not attach {file_path}: {e}")
 
-        # Send the Email using Google's secure SMTP server
+        # 4. Send the Email
         try:
             self.logger.info("Connecting to Gmail SMTP server...")
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                 smtp.login(self.sender_email, self.sender_password)
                 smtp.send_message(msg)
-            self.logger.info("✅ Email successfully sent to %s with %d attachments.", recipient, len(attachments))
+            self.logger.info("✅ Email successfully sent to %s with embedded reports.", recipient)
         except Exception as e:
             self.logger.error("❌ Failed to send email: %s", str(e))
 
@@ -128,13 +176,10 @@ class NotificationAgent(BaseAgent):
         self.logger.info("Starting Notification Agent cycle.")
         for project in self.projects:
             attachments = self.collect_attachments(project)
-            
             if not attachments:
-                self.logger.info("No new reports found for %s. Skipping email.", project)
                 continue
             
             recipient = self.get_researcher_email(project)
-            self.logger.info("Preparing to send update for '%s' to '%s'...", project, recipient)
             self.send_email(project, recipient, attachments)
             
         self.logger.info("Notification cycle completed.")
