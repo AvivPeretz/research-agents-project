@@ -8,10 +8,10 @@ from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
-class OverleafScraper:
+class DataIngestionAgent:
     """
     Data Ingestion Agent: Performs a Delta Sync.
-    Uses Direct Endpoint Navigation to bypass UI rendering issues and download ZIPs instantly.
+    Downloads both the source ZIP (for text delta extraction) and the compiled PDF (for external reviews).
     """
     def __init__(self):
         self.email = os.getenv("OVERLEAF_EMAIL")
@@ -90,7 +90,7 @@ class OverleafScraper:
                 
                 # Wait for at least one project link to render
                 page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=20000)
-                time.sleep(2) # Give the table a moment to render
+                time.sleep(2)
                 
                 rows = page.locator('tr:has(a[href^="/project/"]), li:has(a[href^="/project/"])').all()
                 print(f"📊 Found {len(rows)} potential project rows on the dashboard.")
@@ -111,21 +111,21 @@ class OverleafScraper:
                     
                     if is_new or is_modified:
                         reason = "NEW" if is_new else "MODIFIED"
+                        safe_project_name = project_name.replace(" ", "_")
                         
-                        # --- DIRECT DOWNLOAD MAGIC ---
-                        # Get the URL path (e.g., /project/12345678)
                         href = link.get_attribute("href").rstrip('/')
-                        # Construct the direct backend download URL
-                        download_url = f"https://www.overleaf.com{href}/download/zip"
-                        print(f"🔄 [{reason}] '{project_name}' requires sync. Bypassing UI and downloading directly...")
                         
-                        # Trigger the download directly via Javascript without leaving the dashboard
-                        with page.expect_download() as download_info:
-                            page.evaluate(f"window.location.href = '{download_url}'")
+                        print(f"🔄 [{reason}] '{project_name}' requires sync.")
+                        
+                        # --- 1. DOWNLOAD ZIP SOURCE ---
+                        zip_download_url = f"https://www.overleaf.com{href}/download/zip"
+                        print(f"   📦 Downloading ZIP source...")
+                        with page.expect_download() as zip_download_info:
+                            page.evaluate(f"window.location.href = '{zip_download_url}'")
                             
-                        download = download_info.value
-                        zip_path = os.path.join(self.download_dir, f"{project_name}.zip")
-                        download.save_as(zip_path)
+                        zip_download = zip_download_info.value
+                        zip_path = os.path.join(self.download_dir, f"{safe_project_name}.zip")
+                        zip_download.save_as(zip_path)
                         
                         extract_path = os.path.join(self.download_dir, project_name)
                         if os.path.exists(extract_path):
@@ -135,10 +135,24 @@ class OverleafScraper:
                             zip_ref.extractall(extract_path)
                             
                         os.remove(zip_path)
+
+                        # --- 2. DOWNLOAD COMPILED PDF ---
+                        pdf_download_url = f"https://www.overleaf.com{href}/output/output.pdf"
+                        print(f"   📄 Downloading compiled PDF...")
+                        try:
+                            # We set a timeout because sometimes uncompiled projects don't have a PDF
+                            with page.expect_download(timeout=15000) as pdf_download_info:
+                                page.evaluate(f"window.location.href = '{pdf_download_url}'")
+                            pdf_download = pdf_download_info.value
+                            # Save the PDF clearly inside the extracted folder
+                            pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
+                            pdf_download.save_as(pdf_path)
+                            print(f"✅ Synced '{project_name}' (ZIP + PDF).")
+                        except Exception as e:
+                            print(f"⚠️ PDF not found or not compiled for '{project_name}'. Synced ZIP only.")
                         
                         registry[project_name] = last_modified_text
                         updated_projects.append(project_name)
-                        print(f"✅ Synced '{project_name}'.")
                     else:
                         print(f"⏭️  [SKIPPED] '{project_name}' is up to date.")
 
@@ -155,5 +169,5 @@ class OverleafScraper:
         return updated_projects
 
 if __name__ == "__main__":
-    scraper = OverleafScraper()
-    scraper.sync_all_projects()
+    agent = DataIngestionAgent()
+    agent.sync_all_projects()

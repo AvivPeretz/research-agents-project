@@ -6,7 +6,8 @@ from utils.overleaf_connector import OverleafConnector
 class ResearchEnhancementAgent(BaseAgent):
     """
     Agent responsible for periodic research enhancement.
-    Generates a simulated peer-review based on REAL text, extracts action items, and tracks innovation.
+    Generates a simulated peer-review based on REAL text using the local LLM, 
+    extracts action items, and tracks innovation.
     """
     
     def __init__(self, overleaf_projects: list):
@@ -64,6 +65,7 @@ class ResearchEnhancementAgent(BaseAgent):
             
             text = self.get_project_text(project)
             if not text:
+                self.logger.warning("No text found for %s. Skipping enhancement.", project)
                 continue
                 
             review_text = self.send_for_review(text)

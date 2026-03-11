@@ -2,7 +2,7 @@ import os
 from agents.literature_research_agent import LiteratureResearchAgent
 from agents.progress_tracking_agent import ProgressTrackingAgent
 from agents.research_enhancement_agent import ResearchEnhancementAgent
-from ingestion.overleaf_scraper import OverleafScraper
+from ingestion.data_ingestion_agent import DataIngestionAgent
 
 def get_all_active_projects() -> list:
     """
@@ -22,7 +22,7 @@ def main():
     """
     
     print("--- 0. Running Data Ingestion (Delta Sync) ---")
-    scraper = OverleafScraper()
+    scraper = DataIngestionAgent()
     # The agent connects, downloads only deltas, and returns updated project names
     updated_projects = scraper.sync_all_projects()
     
