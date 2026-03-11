@@ -1,65 +1,133 @@
+import datetime
+import json
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
-import datetime
 
 class LiteratureResearchAgent(BaseAgent):
     """
-    Agent responsible for conducting literature reviews, summarizing new articles, 
-    and updating comparison tables for the lab's research topics.
+    Agent responsible for conducting literature reviews based on downloaded projects.
+    It infers keywords, simulates searching academic databases, and maintains a global rolling table.
     """
     
     def __init__(self, research_topics: list):
+        # Note: 'research_topics' is actually the list of project names passed from main.py
         super().__init__(agent_name="LiteratureResearchAgent")
-        self.research_topics = research_topics
-        self.library = LibraryManager()  # Instantiate the library manager
-        self.logger.info("LiteratureResearchAgent initialized with %d topics.", len(self.research_topics))
+        self.projects = research_topics 
+        self.library = LibraryManager()
+        
+        # --- INFRASTRUCTURE PREPARATION ---
+        # Future URLs for scraping actual academic official papers
+        self.academic_databases = [
+            "https://arxiv.org/",
+            "https://pubmed.ncbi.nlm.nih.gov/",
+            "https://scholar.google.com/"
+        ]
+        
+        self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
 
-    def search_new_articles(self, topic: str) -> str:
+    def extract_project_metadata(self, project_name: str) -> dict:
         """
-        Query the LLM to find recent advancements or key papers on the given topic.
+        Uses the LLM to infer the exact research field and search keywords from the project name.
         """
-        self.logger.info("Searching for new articles on topic: %s", topic)
+        self.logger.info("Extracting research field and keywords for: %s", project_name)
         prompt = f"""
-        You are an expert academic research assistant. 
-        Please provide a brief summary of the most recent and significant advancements 
-        or key papers related to the following research topic: '{topic}'.
-        Keep the response concise (up to 2-3 paragraphs) and focus strictly on academic innovation.
+        Analyze the following academic project name: '{project_name}'.
+        Provide a valid JSON response with two keys:
+        1. "field": The broad academic research field.
+        2. "keywords": A short list of 3-4 specific keywords for searching academic databases.
+        
+        Respond strictly with JSON. Example:
+        {{"field": "Computer Science", "keywords": ["Machine Learning", "Neural Networks"]}}
         """
         response_text = self.ask_llm(prompt)
-        print(f"\n{'='*40}\n🔬 Results for: {topic}\n{'='*40}\n{response_text}\n")
+        
+        # Clean the response in case the LLM wrapped it in markdown code blocks
+        clean_json = response_text.replace("```json", "").replace("```", "").strip()
+        try:
+            return json.loads(clean_json)
+        except Exception as e:
+            self.logger.error(f"Failed to parse metadata JSON for {project_name}: {e}")
+            return {"field": "General Research", "keywords": [project_name]}
+
+    def search_new_articles(self, project_name: str, metadata: dict) -> str:
+        """
+        Simulates querying academic databases to find recent advancements based on keywords.
+        """
+        field = metadata.get("field", "Unknown Field")
+        keywords = ", ".join(metadata.get("keywords", []))
+        db_list = ", ".join(self.academic_databases)
+        
+        self.logger.info("Simulating search in (%s) using keywords: %s", db_list, keywords)
+        
+        prompt = f"""
+        You are an expert academic research assistant. 
+        Simulate a search across the following academic databases: {db_list}.
+        The research project is titled '{project_name}' in the field of '{field}'.
+        Keywords: {keywords}.
+        
+        Please provide a brief summary (2-3 paragraphs) of the most recent and significant 
+        academic advancements or key papers published recently in this specific area.
+        Focus strictly on academic innovation.
+        """
+        response_text = self.ask_llm(prompt)
+        print(f"\n{'='*40}\n🔬 Literature Search Results for: {project_name}\n{'='*40}\n{response_text}\n")
         return response_text
 
-    def summarize_and_save(self, topic: str, article_data: str):
+    def generate_comparison_entry(self, project_name: str, metadata: dict, search_results: str) -> dict:
         """
-        Summarize the found article and save it to the research library.
+        Generates the rich data row for the global rolling comparison table.
         """
-        self.logger.info("Saving article summary for topic: %s", topic)
-        # Use the library manager to save the LLM's text to a markdown file
-        self.library.save_summary(topic, article_data)
-
-    def update_comparison_table(self, topic: str):
-        """
-        Build or update a rolling comparison table for the research articles.
-        """
-        self.logger.info("Updating the rolling comparison table for %s...", topic)
+        field = metadata.get("field", "Unknown Field")
         
-        # Create some structured data to save in our CSV table
-        new_data = {
-            "Date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "Topic": topic,
-            "Action": "Literature Review Conducted",
-            "Status": "Success"
+        # Ask LLM to extract a single paragraph summarizing the "delta" / innovation
+        prompt = f"""
+        Based on the following recent literature search results for '{project_name}':
+        {search_results}
+        
+        Write a single, concise paragraph summarizing what is the new trend or main 
+        innovation discovered in this literature review compared to previous knowledge.
+        """
+        innovation_summary = self.ask_llm(prompt).strip()
+        
+        # Note: Researcher name is a placeholder until we extract actual author names from LaTeX
+        researcher_name = "Dr. Aviv Peretz" 
+        now = datetime.datetime.now()
+        
+        return {
+            "Date & Time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "Project Name": project_name,
+            "Researcher Name": researcher_name,
+            "Research Field": field,
+            "Recent Innovations & Changes": innovation_summary
         }
-        self.library.update_comparison_table(topic, new_data)
+
+    def summarize_and_save(self, project_name: str, article_data: str):
+        """
+        Summarize the found article and save it to the specific project's folder.
+        """
+        self.logger.info("Saving literature summary for project: %s", project_name)
+        self.library.save_summary(project_name, article_data)
 
     def run(self):
         """
         The main execution flow of the agent.
         """
         self.logger.info("Starting the literature research cycle.")
-        for topic in self.research_topics:
-            llm_result = self.search_new_articles(topic)
-            self.summarize_and_save(topic, llm_result)
-            self.update_comparison_table(topic)
+        
+        for project in self.projects:
+            # 1. Infer metadata (field & keywords)
+            metadata = self.extract_project_metadata(project)
+            
+            # 2. Search for articles (with DB infrastructure)
+            llm_result = self.search_new_articles(project, metadata)
+            
+            # 3. Save the full literature summary to the project's folder
+            self.summarize_and_save(project, llm_result)
+            
+            # 4. Generate rich data and append to the GLOBAL comparison table
+            table_entry = self.generate_comparison_entry(project, metadata, llm_result)
+            
+            self.logger.info("Updating the global rolling comparison table for %s...", project)
+            self.library.update_comparison_table(table_entry)
             
         self.logger.info("Literature research cycle completed successfully.")

@@ -37,26 +37,25 @@ class LibraryManager:
             
         return filepath
 
-    def update_comparison_table(self, project_name: str, new_data: dict):
+    def update_comparison_table(self, new_data: dict):
         """
-        Updates a rolling CSV comparison table for a specific project.
+        Updates a single, global rolling CSV comparison table for ALL projects.
         """
-        safe_project_name = project_name.replace(" ", "_")
-        project_dir = os.path.join(self.base_path, "comparison_tables", safe_project_name)
-        self._create_directory(project_dir)
+        table_dir = os.path.join(self.base_path, "comparison_table")
+        self._create_directory(table_dir)
         
-        # The filename is static so it appends to the same rolling table over time
-        filepath = os.path.join(project_dir, "rolling_comparison.csv")
+        # This single file will hold the history of all projects
+        filepath = os.path.join(table_dir, "global_comparison_tracking.csv")
         
         df_new = pd.DataFrame([new_data])
         
         if os.path.exists(filepath):
-            # Append to existing rolling table
+            # Append to the existing global table
             df_existing = pd.read_csv(filepath)
             df_combined = pd.concat([df_existing, df_new], ignore_index=True)
             df_combined.to_csv(filepath, index=False)
         else:
-            # Create a new rolling table
+            # Create the global table for the first time
             df_new.to_csv(filepath, index=False)
 
     def save_feedback(self, project_name: str, feedback: str, suggestions: str):
