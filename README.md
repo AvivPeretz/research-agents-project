@@ -1,23 +1,26 @@
 # Academic Research Multi-Agent System 🔬🤖
 
-A Python-based, multi-agent artificial intelligence system designed to automate and enhance academic research workflows. This project utilizes the Groq LLM API, browser automation, and strict Object-Oriented Programming (OOP) principles to create an autonomous, decoupled pipeline that fetches real-time data, assists researchers with literature reviews, tracks progress, enhances manuscripts, and delivers beautifully formatted email reports.
+A Python-based, multi-agent artificial intelligence system designed to automate and enhance academic research workflows. This project utilizes the Groq LLM API, browser automation (Playwright), and strict Object-Oriented Programming (OOP) principles to create an autonomous, decoupled pipeline that fetches real-time data, conducts targeted Google Scholar literature reviews, tracks progress, enhances manuscripts, and delivers beautifully formatted email reports.
 
 ## 🌟 Features & Architecture
 
-The system is built on a modular, scalable architecture separating data ingestion from LLM processing. It operates a preliminary web-scraping agent followed by four specialized AI agents, all utilizing a shared `BaseAgent` class for robust API connectivity and centralized logging.
+The system is built on a modular, scalable architecture separating data ingestion from LLM processing. It operates a preliminary web-scraping agent followed by four specialized AI agents, all utilizing a shared `BaseAgent` class for robust API connectivity and centralized logging. 
+
+A core feature of the system is its **Dual-Email Architecture**: It utilizes an official University Microsoft 365 account for academic credibility (e.g., retrieving source files and external submissions) while employing a decoupled Gmail relay account to safely dispatch internal notifications, successfully bypassing strict institutional SMTP blocks.
 
 ### Phase 0: Data Ingestion (Delta Sync)
 **Data Ingestion Agent:**
 * Operates completely autonomously using Microsoft's **Playwright** framework.
 * Incorporates **Session Persistence** to securely bypass login screens and CAPTCHA after an initial manual authentication.
-* Implements a **Delta Sync** mechanism: Scans the researcher's Overleaf dashboard and downloads *only* new or recently modified projects, saving bandwidth and processing time.
-* Uses direct endpoint navigation to reliably download ZIP archives, immune to front-end UI changes.
+* Implements a **Delta Sync** mechanism: Scans the researcher's Overleaf dashboard and downloads *only* new or recently modified projects (fetching both ZIP source codes and compiled PDFs), saving bandwidth and processing time.
+* Uses direct endpoint navigation to reliably download archives, immune to front-end UI changes.
 
-### Phase 1: Global Research
+### Phase 1: Global Research & Data Extraction
 **Literature Research Agent:**
-* Autonomously extracts precise research fields and keywords dynamically from the project's name and context.
-* Queries the LLM for the latest academic advancements, simulating searches across ArXiv, PubMed, and Google Scholar.
-* Generates comprehensive summaries and maintains a rolling tracking table (CSV) of all researched topics to monitor trends over time.
+* Autonomously reads the actual `.tex` manuscript text to dynamically extract highly targeted research keywords.
+* Navigates **Google Scholar** using Playwright (with session persistence) to actively scrape the latest relevant publications.
+* Uses the LLM to extract structured metadata from the findings, automatically populating a **14-Column Rolling CSV Comparison Table** per project (tracking precise metrics like dataset types, sample size, reproducibility, and privacy issues).
+* Generates comprehensive markdown summaries featuring direct, clickable URLs to the discovered papers.
 
 ### Phase 2: Manuscript Analysis
 **Progress Tracking Agent (Triggered only on new data):**
@@ -27,7 +30,7 @@ The system is built on a modular, scalable architecture separating data ingestio
 
 ### Phase 3: Peer-Review & Innovation
 **Research Enhancement Agent (Triggered only on new data):**
-* Simulates a rigorous external peer-review process based on the manuscript's entire text using an in-house LLM architecture (ensuring maximum IP privacy and system stability without third-party SPOFs).
+* Simulates a rigorous external peer-review process based on the manuscript's entire text using an in-house LLM architecture (ensuring maximum IP privacy and system stability).
 * Translates harsh academic critiques into an actionable, supportive To-Do list for the research team.
 * Evaluates the innovation level of the paper and suggests highly ambitious, novel directions to push the boundaries of the research.
 
@@ -35,9 +38,9 @@ The system is built on a modular, scalable architecture separating data ingestio
 **Notification Agent:**
 * Acts as the system's external communication hub, ensuring researchers are instantly updated without manual system checks.
 * Uses a dynamic routing map (`researchers_map.json`) to direct specific project feedback to the appropriate researcher's inbox.
-* Translates the raw Markdown reports generated by the other agents into beautifully styled, professional HTML layouts.
-* Automatically sends an executive summary via a secure SMTP connection, with full detailed reports embedded directly in the email body and attached for archival.
+* Translates the raw Markdown reports generated by the other agents into beautifully styled, professional HTML layouts (including clickable academic links).
+* Automatically sends an executive summary via a secure SMTP relay connection, with full detailed reports embedded directly in the email body and attached for archival.
 
 ## 🛠️ Utility Modules
-* **Library Manager:** Automates the creation of directory structures and handles file I/O operations (Markdown, CSV) to maintain a pristine `research_library` ecosystem.
+* **Library Manager:** Automates the creation of an organized directory structure (`literature_reviews`, `project_tracking`, `project_enhancement`, and `comparison_tables`) and handles file I/O operations to maintain a pristine `research_library` ecosystem.
 * **Overleaf Connector:** Extracts the downloaded ZIP files and uses highly optimized Regular Expressions (RegEx) to strip heavy LaTeX formatting, delivering clean plain text to the LLM agents.
