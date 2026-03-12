@@ -18,11 +18,12 @@ class ProgressTrackingAgent(BaseAgent):
         self.connector = OverleafConnector()
         self.logger.info("ProgressTrackingAgent initialized with %d projects.", len(self.overleaf_projects))
 
-    def _get_state_file_path(self, project: str) -> str:
-        """Returns the path to the hidden state file that remembers the last seen text."""
-        safe_project = project.replace(" ", "_")
-        project_dir = os.path.join(self.library.base_path, "project_tracking", safe_project)
-        self.library._create_directory(project_dir)
+    def _get_state_file_path(self, project_name: str) -> str:
+        safe_project = project_name.replace(" ", "_")
+        project_dir = os.path.join(self.library.base_dir, "project_tracking", safe_project)
+        # Using Python's built-in os.makedirs instead of the old library method
+        if not os.path.exists(project_dir):
+            os.makedirs(project_dir)
         return os.path.join(project_dir, ".last_seen_text.txt")
 
     def _get_last_seen_text(self, project: str) -> str:
@@ -126,7 +127,7 @@ class ProgressTrackingAgent(BaseAgent):
                 feedback = self.provide_feedback(delta_text)
                 suggestions = self.suggest_improvements(delta_text)
                 
-                self.library.save_feedback(project, feedback, suggestions)
+                self.library.save_tracking_feedback(project, feedback, suggestions)
                 self.logger.info("Saved focused feedback and suggestions for %s.", project)
             else:
                 self.logger.info("No actionable new text found for %s. Skipping LLM analysis.", project)

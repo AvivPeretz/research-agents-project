@@ -36,7 +36,7 @@ def main():
     if all_projects:
         print(f"\n--- 1. Running Literature Research Agent for all active projects ---")
         # We pass the actual project names from the disk instead of hardcoded topics!
-        lit_agent = LiteratureResearchAgent(research_topics=all_projects)
+        lit_agent = LiteratureResearchAgent(active_projects=all_projects)
         lit_agent.run()
     else:
         print("\n--- No projects available for Literature Research. ---")
@@ -54,7 +54,7 @@ def main():
         
         print("\n--- 3. Running Research Enhancement Agent ---")
         enhancement_agent.run()
-        
+
     print("\n--- 4. Running Notification Agent ---")
     # We pass only the updated_projects so we don't spam the researcher 
     # with emails if they didn't change anything in their paper today!

@@ -1,91 +1,79 @@
 import os
-import json
-from datetime import datetime
 import pandas as pd
+from datetime import datetime
 
 class LibraryManager:
     """
-    A utility class responsible for saving the outputs of the agents 
-    into strictly organized files and folders based on the Project Name.
+    Manages the local file system (I/O) for the multi-agent system.
+    Creates structured directories and saves structured CSVs per project.
     """
-    def __init__(self, base_path: str = "research_library"):
-        self.base_path = base_path
-        self._create_directory(self.base_path)
+    def __init__(self, base_dir="research_library"):
+        self.base_dir = os.path.abspath(base_dir)
+        self._ensure_base_dirs()
 
-    def _create_directory(self, path: str):
-        """Helper method to create directories if they don't exist."""
+    def _ensure_base_dirs(self):
+        """Creates the main library directories if they do not exist."""
+        # Added 'comparison_tables' to the architecture!
+        folders = ["literature_reviews", "project_tracking", "project_enhancement", "comparison_tables"]
+        for folder in folders:
+            path = os.path.join(self.base_dir, folder)
+            if not os.path.exists(path):
+                os.makedirs(path)
+
+    def _get_project_dir(self, category: str, project_name: str) -> str:
+        """Returns and ensures a project-specific subfolder exists."""
+        safe_name = project_name.replace(" ", "_")
+        path = os.path.join(self.base_dir, category, safe_name)
         if not os.path.exists(path):
             os.makedirs(path)
+        return path
 
-    def save_summary(self, project_name: str, content: str):
-        """
-        Saves the literature review summary as a Markdown file inside the project's folder.
-        """
-        safe_project_name = project_name.replace(" ", "_")
-        project_dir = os.path.join(self.base_path, "literature_reviews", safe_project_name)
-        self._create_directory(project_dir)
-        
-        # Using a clear timestamp and naming convention
+    def _save_markdown(self, category: str, project_name: str, filename_prefix: str, content: str):
+        """Helper to save markdown files with a timestamp."""
+        project_dir = self._get_project_dir(category, project_name)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"{timestamp}_literature_summary.md"
+        filename = f"{timestamp}_{filename_prefix}.md"
         filepath = os.path.join(project_dir, filename)
         
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"# Literature Review for: {project_name}\n\n")
-            f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d')}\n\n")
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
-            
         return filepath
 
-    def update_comparison_table(self, new_data: dict):
-        """
-        Updates a single, global rolling CSV comparison table for ALL projects.
-        """
-        table_dir = os.path.join(self.base_path, "comparison_table")
-        self._create_directory(table_dir)
-        
-        # This single file will hold the history of all projects
-        filepath = os.path.join(table_dir, "global_comparison_tracking.csv")
-        
-        df_new = pd.DataFrame([new_data])
-        
-        if os.path.exists(filepath):
-            # Append to the existing global table
-            df_existing = pd.read_csv(filepath)
-            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-            df_combined.to_csv(filepath, index=False)
-        else:
-            # Create the global table for the first time
-            df_new.to_csv(filepath, index=False)
+    def save_literature_summary(self, project_name: str, summary: str):
+        return self._save_markdown("literature_reviews", project_name, "literature_summary", summary)
 
-    def save_feedback(self, project_name: str, feedback: str, suggestions: str):
-         """
-         Saves the feedback and suggestions for an Overleaf project.
-         """
-         safe_project_name = project_name.replace(" ", "_")
-         project_dir = os.path.join(self.base_path, "project_tracking", safe_project_name)
-         self._create_directory(project_dir)
-         
-         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-         filepath = os.path.join(project_dir, f"{timestamp}_feedback.md")
-         
-         with open(filepath, "w", encoding="utf-8") as f:
-             f.write(f"# Progress Tracking: {project_name}\n\n")
-             f.write(f"## Feedback\n{feedback}\n\n")
-             f.write(f"## Suggestions\n{suggestions}\n")
+    def save_tracking_feedback(self, project_name: str, feedback: str, suggestions: str):
+        content = f"# Feedback\n{feedback}\n\n# Suggestions\n{suggestions}"
+        return self._save_markdown("project_tracking", project_name, "tracking_feedback", content)
 
     def save_enhancement_tasks(self, project_name: str, tasks: str, innovation: str):
-         """
-         Saves the actionable tasks and innovation analysis for a project.
-         """
-         safe_project_name = project_name.replace(" ", "_")
-         project_dir = os.path.join(self.base_path, "project_enhancement", safe_project_name)
-         self._create_directory(project_dir)
-         
-         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-         filepath = os.path.join(project_dir, f"{timestamp}_enhancement_plan.md")
-         
-         with open(filepath, "w", encoding="utf-8") as f:
-             f.write(f"# Enhancement Plan: {project_name}\n\n")
-             f.write(f"## Actionable Tasks\n{tasks}\n\n")
-             f.write(f"## Innovation Strategy\n{innovation}\n")
+        content = f"# Actionable Tasks\n{tasks}\n\n# Innovation Analysis\n{innovation}"
+        return self._save_markdown("project_enhancement", project_name, "enhancement_plan", content)
+
+    def append_to_project_literature_table(self, project_name: str, paper_data: dict):
+        """
+        Appends a new paper's details to the project-specific rolling CSV table.
+        Saves it inside the dedicated 'comparison_tables' folder.
+        """
+        # Changed the target folder from 'literature_reviews' to 'comparison_tables'
+        project_dir = self._get_project_dir("comparison_tables", project_name)
+        safe_name = project_name.replace(" ", "_")
+        csv_path = os.path.join(project_dir, f"{safe_name}_rolling_table.csv")
+
+        columns = [
+            "paper name", "cited", "source", "year published", 
+            "types of available data", "number of samples", "number of features", 
+            "number of classes", "location", "for how long", 
+            "is it reproducible?", "how complicated it is?", 
+            "is there privacy issues?", "can i control the application collected"
+        ]
+
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path)
+        else:
+            df = pd.DataFrame(columns=columns)
+
+        new_row = {col: paper_data.get(col, "N/A") for col in columns}
+        
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        df.to_csv(csv_path, index=False)
