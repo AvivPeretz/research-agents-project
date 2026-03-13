@@ -11,7 +11,7 @@ load_dotenv()
 class DataIngestionAgent:
     """
     Data Ingestion Agent: Performs a Delta Sync.
-    Downloads ONLY the source ZIP for text delta extraction and fast processing.
+    Downloads BOTH the source ZIP (for text delta extraction) AND the compiled PDF (for Stanford review).
     """
     def __init__(self):
         self.email = os.getenv("OVERLEAF_EMAIL")
@@ -116,7 +116,7 @@ class DataIngestionAgent:
                         
                         print(f"🔄 [{reason}] '{project_name}' requires sync.")
                         
-                        # --- DOWNLOAD ZIP SOURCE ONLY ---
+                        # --- 1. DOWNLOAD ZIP SOURCE ---
                         zip_download_url = f"https://www.overleaf.com{href}/download/zip"
                         print(f"   📦 Downloading ZIP source...")
                         with page.expect_download() as zip_download_info:
@@ -134,6 +134,20 @@ class DataIngestionAgent:
                             zip_ref.extractall(extract_path)
                             
                         os.remove(zip_path)
+                        
+                        # --- 2. DOWNLOAD COMPILED PDF ---
+                        pdf_download_url = f"https://www.overleaf.com{href}/output/output.pdf"
+                        print(f"   📄 Downloading compiled PDF...")
+                        try:
+                            with page.expect_download(timeout=15000) as pdf_download_info:
+                                page.evaluate(f"window.location.href = '{pdf_download_url}'")
+                            pdf_download = pdf_download_info.value
+                            # Save PDF directly into the extracted folder
+                            pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
+                            pdf_download.save_as(pdf_path)
+                            print(f"   ✅ PDF downloaded successfully.")
+                        except Exception as e:
+                            print(f"   ⚠️ Could not download PDF (it might not be compiled in Overleaf): {e}")
                         
                         registry[project_name] = last_modified_text
                         updated_projects.append(project_name)
