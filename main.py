@@ -35,29 +35,30 @@ def main():
     # --- 1. Literature Research Agent (Runs on ALL projects) ---
     if all_projects:
         print(f"\n--- 1. Running Literature Research Agent for all active projects ---")
-        # We pass the actual project names from the disk instead of hardcoded topics!
         lit_agent = LiteratureResearchAgent(active_projects=all_projects)
         lit_agent.run()
     else:
         print("\n--- No projects available for Literature Research. ---")
 
-    # --- 2 & 3. Analysis Agents (Run ONLY on updated projects) ---
-    if not updated_projects:
-        print("\n--- No Overleaf projects were updated. Skipping project analysis agents. 😴 ---")
-    else:
-        print(f"\n--- Waking up project analysis agents for: {updated_projects} 🚀 ---")
+    # --- 2. Progress Tracking Agent (Depends on Overleaf updates) ---
+    if updated_projects:
+        print(f"\n--- 2. Running Progress Tracking Agent for: {updated_projects} 🚀 ---")
         prog_agent = ProgressTrackingAgent(overleaf_projects=updated_projects)
-        enhancement_agent = ResearchEnhancementAgent(overleaf_projects=updated_projects)
-        
-        print("\n--- 2. Running Progress Tracking Agent ---")
         prog_agent.run()
-        
-        print("\n--- 3. Running Research Enhancement Agent ---")
-        enhancement_agent.run()
+    else:
+        print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
 
+    # --- 3. Research Enhancement Agent (Always runs to check async emails) ---
+    if all_projects:
+        print(f"\n--- 3. Running Research Enhancement Agent for all active projects 🚀 ---")
+        enhancement_agent = ResearchEnhancementAgent(overleaf_projects=all_projects)
+        enhancement_agent.run()
+    else:
+        print("\n--- No projects available for Research Enhancement. ---")
+
+    # --- 4. Running Notification Agent ---
     print("\n--- 4. Running Notification Agent ---")
-    # We pass only the updated_projects so we don't spam the researcher 
-    # with emails if they didn't change anything in their paper today!
+    # Note: Currently runs on updated_projects. Future iterations will decouple this!
     notifier_agent = NotificationAgent(updated_projects=updated_projects)
     notifier_agent.run()
     print("\n--- All Executions Finished Successfully ---")
