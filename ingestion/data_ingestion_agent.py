@@ -135,19 +135,42 @@ class DataIngestionAgent:
                             
                         os.remove(zip_path)
                         
-                        # --- 2. DOWNLOAD COMPILED PDF ---
-                        pdf_download_url = f"https://www.overleaf.com{href}/output/output.pdf"
-                        print(f"   📄 Downloading compiled PDF...")
+                        # --- 2. DOWNLOAD COMPILED PDF (VIA FILE MENU) ---
+                        print(f"   📄 Opening editor to download PDF via the 'File' menu...")
                         try:
-                            with page.expect_download(timeout=15000) as pdf_download_info:
-                                page.evaluate(f"window.location.href = '{pdf_download_url}'")
+                            # 1. Navigate into the project editor
+                            editor_url = f"https://www.overleaf.com{href}"
+                            page.goto(editor_url)
+                            
+                            # Give it 8 seconds to load the editor and start compiling
+                            page.wait_for_timeout(8000)
+                            
+                            # 2. Click the 'File' menu at the top left
+                            print("   📂 Clicking the 'File' menu...")
+                            file_btn = page.locator('text="File"').first
+                            file_btn.click()
+                            
+                            # Wait a moment for the dropdown menu to open
+                            page.wait_for_timeout(1500)
+                            
+                            # 3. Click the 'Download as PDF' option
+                            print("   📥 Clicking 'Download as PDF'...")
+                            pdf_btn = page.locator('text="Download as PDF"').first
+                            
+                            with page.expect_download(timeout=30000) as pdf_download_info:
+                                pdf_btn.click()
+                                
                             pdf_download = pdf_download_info.value
-                            # Save PDF directly into the extracted folder
                             pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
                             pdf_download.save_as(pdf_path)
                             print(f"   ✅ PDF downloaded successfully.")
+                            
                         except Exception as e:
-                            print(f"   ⚠️ Could not download PDF (it might not be compiled in Overleaf): {e}")
+                            print(f"   ⚠️ Exception during PDF download via File menu: {e}")
+                        finally:
+                            # 4. Return to dashboard
+                            page.goto("https://www.overleaf.com/project")
+                            page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=20000)
                         
                         registry[project_name] = last_modified_text
                         updated_projects.append(project_name)
