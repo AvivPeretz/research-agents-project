@@ -3,7 +3,6 @@ from agents.literature_research_agent import LiteratureResearchAgent
 from agents.progress_tracking_agent import ProgressTrackingAgent
 from agents.research_enhancement_agent import ResearchEnhancementAgent
 from ingestion.data_ingestion_agent import DataIngestionAgent
-from agents.notification_agent import NotificationAgent
 
 def get_all_active_projects() -> list:
     """
@@ -56,11 +55,6 @@ def main():
     else:
         print("\n--- No projects available for Research Enhancement. ---")
 
-    # --- 4. Running Notification Agent ---
-    print("\n--- 4. Running Notification Agent ---")
-    # Note: Currently runs on updated_projects. Future iterations will decouple this!
-    notifier_agent = NotificationAgent(updated_projects=updated_projects)
-    notifier_agent.run()
     print("\n--- All Executions Finished Successfully ---")
 
 if __name__ == "__main__":

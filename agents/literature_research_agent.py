@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
+from agents.notification_agent import NotificationAgent
 
 load_dotenv()
 
@@ -18,6 +19,7 @@ class LiteratureResearchAgent(BaseAgent):
         super().__init__(agent_name="LiteratureResearchAgent")
         self.projects = active_projects
         self.library = LibraryManager()
+        self.notifier = NotificationAgent() # <--- NEW: Initialize the Notification Service
         
         # We will use the dummy Gmail account for Scholar authentication
         self.dummy_email = os.getenv("NOTIFICATION_SENDER_EMAIL")
@@ -221,7 +223,6 @@ class LiteratureResearchAgent(BaseAgent):
                 continue
                 
             # 4. Save the textual summary for the email notification
-            # Build a robust Markdown list of clickable links directly from the scraped data
             links_section = "\n\n### 🔗 Direct Links to Found Papers:\n"
             for item in scholar_data:
                 links_section += f"* [{item['title']}]({item['link']})\n"
@@ -236,5 +237,17 @@ class LiteratureResearchAgent(BaseAgent):
             for paper in papers_list:
                 self.library.append_to_project_literature_table(project, paper)
                 self.logger.info("Appended paper '%s' to rolling CSV table.", paper.get("paper name", "Unknown"))
+                
+            # --- 6. Trigger the Notification Agent ---
+            # Construct the exact path based on your LibraryManager structure
+            safe_name = project.replace(" ", "_")
+            csv_file_path = os.path.join("research_library", "comparison_tables", safe_name, f"{safe_name}_rolling_table.csv")
+            
+            self.logger.info("Sending literature update email for %s...", project)
+            self.notifier.send_literature_update(
+                project_name=project,
+                md_content=summary_text,
+                csv_path=csv_file_path if os.path.exists(csv_file_path) else None
+            )
                 
         self.logger.info("Literature research cycle completed successfully.")
