@@ -30,7 +30,7 @@ def main():
     all_projects = get_all_active_projects()
     
     print("\n--- Initializing AI Agents ---")
-    '''
+    
     # --- 1. Literature Research Agent (Runs on ALL projects) ---
     if all_projects:
         print(f"\n--- 1. Running Literature Research Agent for all active projects ---")
@@ -38,7 +38,7 @@ def main():
         lit_agent.run()
     else:
         print("\n--- No projects available for Literature Research. ---")
-    '''
+    
     # --- 2. Progress Tracking Agent (Depends on Overleaf updates) ---
     if updated_projects:
         print(f"\n--- 2. Running Progress Tracking Agent for: {updated_projects} 🚀 ---")
@@ -46,7 +46,7 @@ def main():
         prog_agent.run()
     else:
         print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
-    '''
+    
     # --- 3. Research Enhancement Agent (Always runs to check async emails) ---
     if all_projects:
         print(f"\n--- 3. Running Research Enhancement Agent for all active projects 🚀 ---")
@@ -54,7 +54,7 @@ def main():
         enhancement_agent.run()
     else:
         print("\n--- No projects available for Research Enhancement. ---")
-    '''
+    
     print("\n--- All Executions Finished Successfully ---")
 
 if __name__ == "__main__":

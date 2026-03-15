@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
+from agents.notification_agent import NotificationAgent
 
 load_dotenv()
 
@@ -21,7 +22,7 @@ class ResearchEnhancementAgent(BaseAgent):
         super().__init__(agent_name="ResearchEnhancementAgent")
         self.projects = overleaf_projects
         self.library = LibraryManager()
-        
+        self.notifier = NotificationAgent() # <--- NEW: Initialize the Notification Service
         # Emails
         self.uni_email = os.getenv("OVERLEAF_EMAIL") 
         self.dummy_email = os.getenv("NOTIFICATION_SENDER_EMAIL")
@@ -267,7 +268,6 @@ class ResearchEnhancementAgent(BaseAgent):
                     
             elif state["status"] == "WAITING_FOR_REVIEW":
                 print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
-                # We now pass the specific project name to the email fetcher!
                 token = self._get_stanford_token_from_email(project)
                 
                 if token:
@@ -278,6 +278,13 @@ class ResearchEnhancementAgent(BaseAgent):
                             state["status"] = "REVIEW_COMPLETED" 
                             self._save_state(project, state)
                             print("✅ Phase 2 complete. Tasks generated and state updated to REVIEW_COMPLETED.")
+                            
+                            # --- NEW: Trigger the Notification Agent ---
+                            self.logger.info("Sending Stanford task list email for %s...", project)
+                            self.notifier.send_stanford_tasks(
+                                project_name=project,
+                                md_content=tasks
+                            )
                 else:
                     print("   ⏭️ Review email not yet received or token not found. Will try again next run.")
                     
