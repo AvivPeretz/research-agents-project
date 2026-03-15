@@ -3,6 +3,7 @@ import difflib
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
 from utils.overleaf_connector import OverleafConnector
+from agents.notification_agent import NotificationAgent
 
 class ProgressTrackingAgent(BaseAgent):
     """
@@ -16,6 +17,7 @@ class ProgressTrackingAgent(BaseAgent):
         self.overleaf_projects = overleaf_projects
         self.library = LibraryManager()
         self.connector = OverleafConnector()
+        self.notifier = NotificationAgent() # <--- NEW: Initialize the Notification Service
         self.logger.info("ProgressTrackingAgent initialized with %d projects.", len(self.overleaf_projects))
 
     def _get_state_file_path(self, project_name: str) -> str:
@@ -129,6 +131,14 @@ class ProgressTrackingAgent(BaseAgent):
                 
                 self.library.save_tracking_feedback(project, feedback, suggestions)
                 self.logger.info("Saved focused feedback and suggestions for %s.", project)
+                
+                # --- NEW: Trigger the Notification Agent ---
+                combined_md = f"### 📝 Progress Feedback\n{feedback}\n\n### 💡 Targeted Suggestions\n{suggestions}"
+                self.logger.info("Sending progress feedback email for %s...", project)
+                self.notifier.send_progress_feedback(
+                    project_name=project,
+                    md_content=combined_md
+                )
             else:
                 self.logger.info("No actionable new text found for %s. Skipping LLM analysis.", project)
                 
