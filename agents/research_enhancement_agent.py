@@ -172,29 +172,38 @@ class ResearchEnhancementAgent(BaseAgent):
                 page.wait_for_load_state("networkidle")
                 
                 print("   🔑 Entering the access token...")
-                # Find the first VISIBLE input field (prevents targeting hidden CSRF tokens)
                 token_input = page.locator('input:visible').first
-                token_input.click() # Focus the input like a human
+                token_input.click()
                 token_input.fill(token)
-                
-                page.wait_for_timeout(1000) # Wait a second for React to register the input
+                page.wait_for_timeout(1000)
                 
                 print("   🚀 Submitting token to view review...")
-                # Pressing Enter directly inside the input field is much safer than guessing the button selector
                 token_input.press("Enter")
+                page.wait_for_timeout(1000)
                 
-                print("   ⏳ Waiting for the review page to load...")
-                page.wait_for_timeout(5000) 
+                buttons = page.locator('button:visible')
+                if buttons.count() > 0:
+                    buttons.first.click()
                 
-                # Check if we got an invalid token error
-                if page.locator('text="Invalid Token"').count() > 0 or page.locator('text="Error"').count() > 0:
-                    print("   ❌ Error: The website rejected the token.")
-                    return None
+                print("   ⏳ Waiting for the 'Summary' or 'Strengths' sections to load...")
+                # Smart wait: Wait explicitly for the review content to appear (max 15 seconds)
+                try:
+                    page.locator('text="Summary"').first.wait_for(state="visible", timeout=15000)
+                except:
+                    print("   ⚠️ Timed out waiting for 'Summary'. Checking for 'Invalid Token' error...")
+                    if page.locator('text="Invalid Token"').count() > 0 or page.locator('text="Error"').count() > 0:
+                        print("   ❌ Error: The website rejected the token.")
+                        return None
                 
-                # Scrape all text from the body to ensure we get the full review
+                # Scrape all text. Inner text naturally keeps the structure of the headers.
                 review_text = page.locator('body').inner_text()
-                print("   ✅ Review scraped successfully!")
-                return review_text
+                
+                if len(review_text) < 400:
+                    print("   ⚠️ Warning: The scraped text is very short. It might still be on the login screen.")
+                    return None
+                else:
+                    print(f"   ✅ Review scraped successfully! (Length: {len(review_text)} characters)")
+                    return review_text
             except Exception as e:
                 self.logger.error("Failed to scrape review: %s", str(e))
                 return None
@@ -213,10 +222,13 @@ class ResearchEnhancementAgent(BaseAgent):
         {review_text}
         ---
         
-        Please provide a structured Markdown response containing:
-        1. **Novelty & Innovation Check**: Evaluate if the paper is considered innovative based on this feedback compared to standard baseline research.
-        2. **Actionable Task List**: Break down the reviewer's critiques into a practical, numbered To-Do list for the researcher.
-        3. **Deadlines**: Assign a reasonable academic deadline for each task (e.g., "Within 3 days", "Within 1 week").
+        Please read the entire review carefully and provide a structured Markdown response containing:
+        1. **Novelty & Innovation Check**: Summarize what the reviewer thought about the paper's innovation.
+        2. **Actionable Task List**: Extract specific critiques and turn them into a practical, numbered To-Do list. 
+           For EACH task, you MUST provide:
+           - **Task Description**: What specifically needs to be fixed or added. Avoid heavy LaTeX blocks if standard text/Unicode can explain it cleanly.
+           - **Estimated Effort**: Analyze the complexity of the task (e.g., "Requires writing a new mathematical proof", "Simple typo correction", "Running new simulations"). Estimate the actual working time required (e.g., "~15 hours of focused work", "~2 hours").
+           - **Recommended Deadline**: Suggest a specific deadline within the next 30-day sprint based on the effort required.
         """
         
         try:
