@@ -3,6 +3,7 @@ from agents.literature_research_agent import LiteratureResearchAgent
 from agents.progress_tracking_agent import ProgressTrackingAgent
 from agents.research_enhancement_agent import ResearchEnhancementAgent
 from ingestion.data_ingestion_agent import DataIngestionAgent
+from utils.garbage_collector import GarbageCollector
 
 def get_all_active_projects() -> list:
     """
@@ -55,6 +56,11 @@ def main():
     else:
         print("\n--- No projects available for Research Enhancement. ---")
     
+    # --- 4. System Cleanup (Garbage Collector) ---
+    print(f"\n--- 4. Running System Cleanup (Retention Policy: 30 days) 🧹 ---")
+    gc = GarbageCollector(retention_days=30)
+    gc.run()
+
     print("\n--- All Executions Finished Successfully ---")
 
 if __name__ == "__main__":
