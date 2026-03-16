@@ -7,6 +7,7 @@ from playwright.sync_api import sync_playwright
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
 from agents.notification_agent import NotificationAgent
+import requests
 
 load_dotenv()
 
@@ -154,10 +155,10 @@ class LiteratureResearchAgent(BaseAgent):
         
         prompt = f"""
         Act as an expert academic research assistant. 
-        I have scraped Google Scholar for recent papers related to the project: '{project}'.
+        I have scraped recent papers related to the project: '{project}'.
         Keywords used: {keywords}
         
-        Here are the top results:
+        Here are the enriched results (containing full abstracts, exact citation counts, and venues):
         {data_str}
 
         You MUST return your response as a valid JSON object with EXACTLY the following structure:
@@ -166,26 +167,28 @@ class LiteratureResearchAgent(BaseAgent):
             "papers": [
                 {{
                     "paper name": "Title of the paper",
-                    "cited": "V (if highly cited based on your knowledge) or N/A",
-                    "source": "Journal or Conference (guess based on your knowledge, or N/A)",
-                    "year published": "YYYY",
-                    "types of available data": "e.g., PCAP, Images (or N/A)",
-                    "number of samples": "e.g., 20000 (or N/A)",
-                    "number of features": "e.g., 14 (or N/A)",
-                    "number of classes": "e.g., 5 (or N/A)",
-                    "location": "e.g., In-lab testbed (or N/A)",
+                    "cited": "Use the 'citationCount' from the data (e.g., '15' or 'N/A')",
+                    "source": "Use the 'venue' from the data (e.g., 'IEEE Transactions...' or 'N/A')",
+                    "year published": "Use the 'year' from the data",
+                    "types of available data": "Describe data type based on abstract. IF this is a Theoretical/Mathematical paper, explicitly write 'Theoretical Paper - No Dataset'",
+                    "number of samples": "e.g., 20000. IF theoretical, write 'N/A (Theoretical)'",
+                    "number of features": "e.g., 14. IF theoretical, write 'N/A (Theoretical)'",
+                    "number of classes": "e.g., 5. IF theoretical, write 'N/A (Theoretical)'",
+                    "location": "e.g., In-lab testbed. IF theoretical, write 'N/A (Theoretical)'",
                     "for how long": "e.g., 3 weeks (or N/A)",
                     "is it reproducible?": "Yes/No (or N/A)",
-                    "how complicated it is?": "e.g., Moderate (or N/A)",
-                    "is there privacy issues?": "e.g., Minimal (or N/A)",
+                    "how complicated it is?": "e.g., High/Moderate/Low based on abstract analysis",
+                    "is there privacy issues?": "e.g., Minimal/High (or N/A)",
                     "can i control the application collected": "Yes/No (or N/A)"
                 }}
             ]
         }}
         Important constraints:
-        1. If a specific data point for the 14 columns is not explicitly in the snippet, use "N/A".
-        2. ESCAPE ALL STRINGS. Do NOT use raw newlines (\\n) or unescaped quotes inside the JSON string values.
-        3. Ensure the JSON is perfectly valid. Do not use markdown blocks like ```json.
+        1. Keep the EXACT JSON keys as defined above. Do not change the column names under any circumstances.
+        2. Read the FULL 'abstract' provided in the data to determine the research type and extract detailed features.
+        3. If a specific data point is truly missing, use "N/A".
+        4. ESCAPE ALL STRINGS. Do NOT use raw newlines (\\n) or unescaped quotes inside the JSON string values.
+        5. Ensure the JSON is perfectly valid. Do not use markdown blocks like ```json.
         """
         
         response = self.ask_llm(prompt)
@@ -200,6 +203,49 @@ class LiteratureResearchAgent(BaseAgent):
             self.logger.error("Failed to parse the structured JSON from LLM: %s", str(e))
             return None
 
+    #A method to enrich LLM fill out of the table. Uses Semantic-Scholar API.        
+    def enrich_with_semantic_scholar(self, scholar_data: list) -> list:
+        """Takes Google Scholar results and fetches full abstracts & metadata from Semantic Scholar API."""
+        self.logger.info("Enriching Google Scholar results with Semantic Scholar API...")
+        enriched_data = []
+        
+        for item in scholar_data:
+            title = item['title']
+            query = urllib.parse.quote_plus(title)
+            # Fetch abstract, year, citation count, and journal/venue
+            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit=1&fields=title,abstract,year,citationCount,venue"
+            
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('data') and len(data['data']) > 0:
+                        paper_info = data['data'][0]
+                        # Overwrite with enriched data, fallback to Google Scholar snippet if abstract is missing
+                        item['abstract'] = paper_info.get('abstract') or item['snippet']
+                        item['year'] = paper_info.get('year') or "N/A"
+                        item['citationCount'] = paper_info.get('citationCount') or "N/A"
+                        item['venue'] = paper_info.get('venue') or "N/A"
+                        self.logger.info(f"Successfully enriched: {title[:30]}...")
+                    else:
+                        self._apply_fallback_data(item)
+                else:
+                    self._apply_fallback_data(item)
+            except Exception as e:
+                self.logger.warning(f"Semantic Scholar API failed for '{title}': {e}")
+                self._apply_fallback_data(item)
+                
+            enriched_data.append(item)
+            
+        return enriched_data
+
+    def _apply_fallback_data(self, item: dict):
+        """Helper to safely fallback to Google Scholar data if Semantic Scholar fails."""
+        item['abstract'] = item['snippet']
+        item['year'] = "N/A"
+        item['citationCount'] = "N/A"
+        item['venue'] = "N/A"    
+
     def run(self):
         self.logger.info("Starting the literature research cycle.")
         for project in self.projects:
@@ -209,15 +255,18 @@ class LiteratureResearchAgent(BaseAgent):
             text = self._read_project_text(project)
             keywords = self.extract_keywords_from_text(project, text) if text else project
             
-            # 2. Scrape Scholar
+            # 2. Scrape Scholar (Google)
             scholar_data = self.scrape_google_scholar(keywords)
             
             if not scholar_data:
                 self.logger.warning("No data scraped for %s. Skipping.", project)
                 continue
                 
+            # --- NEW: 2.5 Enrich with Semantic Scholar API ---
+            enriched_data = self.enrich_with_semantic_scholar(scholar_data)
+                
             # 3. Process into 14 columns & Summary
-            research_data = self.process_results_with_llm(project, keywords, scholar_data)
+            research_data = self.process_results_with_llm(project, keywords, enriched_data)
             
             if not research_data:
                 continue
