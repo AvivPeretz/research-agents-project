@@ -47,7 +47,7 @@ def main():
         prog_agent.run()
     else:
         print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
-    
+    '''
     # --- 3. Research Enhancement Agent (Always runs to check async emails) ---
     if all_projects:
         print(f"\n--- 3. Running Research Enhancement Agent for all active projects 🚀 ---")
@@ -55,7 +55,7 @@ def main():
         enhancement_agent.run()
     else:
         print("\n--- No projects available for Research Enhancement. ---")
-    
+    '''
     # --- 4. System Cleanup (Garbage Collector) ---
     print(f"\n--- 4. Running System Cleanup (Retention Policy: 30 days) 🧹 ---")
     gc = GarbageCollector(retention_days=30)

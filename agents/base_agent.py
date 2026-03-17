@@ -1,9 +1,10 @@
 import os
 import time
 import logging
+import logging.handlers # <--- NEW: For RotatingFileHandler
 from abc import ABC, abstractmethod
 from dotenv import load_dotenv
-from groq import Groq  # The new Groq SDK
+from groq import Groq
 
 # Load environment variables
 load_dotenv()
@@ -22,15 +23,38 @@ class BaseAgent(ABC):
     def _setup_logger(self):
         """
         Configure internal logging to track agent activities.
+        Outputs to BOTH the console and a dedicated rotating log file.
         """
         logger = logging.getLogger(self.agent_name)
         logger.setLevel(logging.INFO)
         
+        # Prevent adding handlers multiple times if instantiated again
         if not logger.handlers:
+            # 1. Console Handler (Keeps terminal output working)
             ch = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             ch.setFormatter(formatter)
             logger.addHandler(ch)
+            
+            # --- NEW: 2. File Handler (Rotating) ---
+            # Ensure the logs directory exists
+            log_dir = os.path.join(os.getcwd(), "logs")
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+                
+            # Define the log file path based on the specific agent's name
+            log_file = os.path.join(log_dir, f"{self.agent_name}.log")
+            
+            # Create a RotatingFileHandler: 
+            # maxBytes=5MB, backupCount=3 (keeps the last 3 files, deletes older ones)
+            fh = logging.handlers.RotatingFileHandler(
+                log_file, 
+                maxBytes=5 * 1024 * 1024, # 5 MB per file
+                backupCount=3,            # Keep 3 backups (e.g., agent.log.1, agent.log.2)
+                encoding='utf-8'          # Crucial for preventing crashes with special chars
+            )
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
             
         return logger
 
@@ -65,7 +89,7 @@ class BaseAgent(ABC):
                         "content": prompt,
                     }
                 ],
-                model="llama-3.3-70b-versatile",  # You can also try 'mixtral-8x7b-32768'
+                model="llama-3.3-70b-versatile",  
             )
             
             return chat_completion.choices[0].message.content
