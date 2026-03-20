@@ -1,4 +1,0 @@
-2026-03-16 13:43:00,794 - NotificationAgent - INFO - LLM connection established successfully using Groq.
-2026-03-16 13:43:00,794 - NotificationAgent - INFO - Agent 'NotificationAgent' initialized.
-2026-03-16 13:43:09,125 - NotificationAgent - INFO - Connecting to Gmail SMTP server as a relay...
-2026-03-16 13:43:11,751 - NotificationAgent - INFO - ✅ Email successfully sent to aviv.peretz1@msmail.ariel.ac.il.

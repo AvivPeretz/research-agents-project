@@ -21,3 +21,7 @@ __pycache__/
 
 # Mac OS specific
 .DS_Store
+
+#tells git to ignore log files
+logs/
+*.log
