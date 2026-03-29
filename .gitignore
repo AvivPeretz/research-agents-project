@@ -9,6 +9,7 @@ env/
 # Web Scraper State & Sessions (DO NOT COMMIT!)
 overleaf_state.json
 sync_registry.json
+scholar_state.json
 
 # Downloaded Data & Generated Outputs
 overleaf_projects/
