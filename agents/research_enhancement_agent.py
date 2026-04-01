@@ -18,11 +18,11 @@ class ResearchEnhancementAgent(BaseAgent):
     Agent responsible for uploading manuscripts to paperreview.ai, 
     reading the feedback via IMAP safely, and generating actionable tasks.
     """
-    def __init__(self, overleaf_projects: list):
+    def __init__(self, overleaf_projects: list, notifier: NotificationAgent):
         super().__init__(agent_name="ResearchEnhancementAgent")
         self.projects = overleaf_projects
         self.library = LibraryManager()
-        self.notifier = NotificationAgent()
+        self.notifier = notifier # <--- DEPENDENCY INJECTION
         
         # Use Config for credentials
         self.uni_email = Config.OVERLEAF_EMAIL 

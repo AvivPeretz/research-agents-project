@@ -16,11 +16,11 @@ class LiteratureResearchAgent(BaseAgent):
     Agent responsible for analyzing the current research text, generating keywords,
     scraping Google Scholar via Playwright, and extracting data into a 14-column structure.
     """
-    def __init__(self, active_projects: list):
+    def __init__(self, active_projects: list, notifier: NotificationAgent):
         super().__init__(agent_name="LiteratureResearchAgent")
         self.projects = active_projects
         self.library = LibraryManager()
-        self.notifier = NotificationAgent() 
+        self.notifier = notifier # <--- DEPENDENCY INJECTION
         
         # Use Config for credentials and state paths
         self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL

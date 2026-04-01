@@ -15,12 +15,12 @@ class ProgressTrackingAgent(BaseAgent):
     saving LLM tokens and providing highly focused feedback.
     """
     
-    def __init__(self, overleaf_projects: list):
+    def __init__(self, overleaf_projects: list, notifier: NotificationAgent):
         super().__init__(agent_name="ProgressTrackingAgent")
         self.overleaf_projects = overleaf_projects
         self.library = LibraryManager()
         self.connector = OverleafConnector()
-        self.notifier = NotificationAgent() 
+        self.notifier = notifier # <--- DEPENDENCY INJECTION
         self.logger.info("ProgressTrackingAgent initialized with %d projects.", len(self.overleaf_projects))
 
     def _get_state_file_path(self, project_name: str) -> str:
