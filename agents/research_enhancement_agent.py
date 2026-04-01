@@ -5,13 +5,13 @@ import imaplib
 import email
 import re
 from datetime import datetime
-from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+
+# Import the centralized configuration
+from config import Config
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
 from agents.notification_agent import NotificationAgent
-
-load_dotenv()
 
 class ResearchEnhancementAgent(BaseAgent):
     """
@@ -22,16 +22,18 @@ class ResearchEnhancementAgent(BaseAgent):
         super().__init__(agent_name="ResearchEnhancementAgent")
         self.projects = overleaf_projects
         self.library = LibraryManager()
-        self.notifier = NotificationAgent() # <--- NEW: Initialize the Notification Service
-        # Emails
-        self.uni_email = os.getenv("OVERLEAF_EMAIL") 
-        self.dummy_email = os.getenv("NOTIFICATION_SENDER_EMAIL")
-        self.dummy_password = os.getenv("NOTIFICATION_SENDER_PASSWORD")
+        self.notifier = NotificationAgent()
+        
+        # Use Config for credentials
+        self.uni_email = Config.OVERLEAF_EMAIL 
+        self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL
+        self.dummy_password = Config.NOTIFICATION_SENDER_PASSWORD
         
         self.logger.info("ResearchEnhancementAgent initialized for %d projects.", len(self.projects))
 
     def _get_project_pdf_path(self, project_name: str) -> str:
-        project_dir = os.path.join(os.path.abspath("overleaf_projects"), project_name)
+        # Use Config directory instead of hardcoded path
+        project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
         if os.path.exists(project_dir):
             for root, _, files in os.walk(project_dir):
                 for file in files:
@@ -41,7 +43,8 @@ class ResearchEnhancementAgent(BaseAgent):
 
     def _get_state_file(self, project_name: str) -> str:
         safe_name = project_name.replace(" ", "_")
-        project_dir = os.path.join(self.library.base_dir, "project_enhancement", safe_name)
+        # Use Config directory instead of self.library.base_dir for consistency
+        project_dir = os.path.join(Config.LIBRARY_DIR, "project_enhancement", safe_name)
         if not os.path.exists(project_dir):
             os.makedirs(project_dir)
         return os.path.join(project_dir, "stanford_state.json")
@@ -49,16 +52,27 @@ class ResearchEnhancementAgent(BaseAgent):
     def _get_state(self, project_name: str) -> dict:
         state_file = self._get_state_file(project_name)
         if os.path.exists(state_file):
-            with open(state_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                self.logger.warning("Could not read state file for %s: %s", project_name, str(e))
         return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
 
     def _save_state(self, project_name: str, state: dict):
-        with open(self._get_state_file(project_name), 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=4)
+        try:
+            with open(self._get_state_file(project_name), 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=4)
+        except Exception as e:
+            self.logger.error("Failed to save state for %s: %s", project_name, str(e))
 
     def upload_to_stanford(self, project_name: str, pdf_path: str) -> bool:
         """Phase 1: Uploads the PDF to paperreview.ai using Playwright."""
+        # Defensive check
+        if not pdf_path or not os.path.exists(pdf_path):
+            self.logger.error("Invalid PDF path provided for upload: %s", pdf_path)
+            return False
+            
         self.logger.info("Initiating Phase 1: Uploading '%s' to paperreview.ai...", project_name)
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False) 
@@ -105,7 +119,8 @@ class ResearchEnhancementAgent(BaseAgent):
         """Phase 2a: Connects to Gmail and extracts the token specifically for this project."""
         print(f"   🔍 Checking Gmail for Stanford review token for '{project_name}'...")
         try:
-            mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+            # Use IMAP config from Config file
+            mail = imaplib.IMAP4_SSL(Config.IMAP_SERVER, Config.IMAP_PORT)
             mail.login(self.dummy_email, self.dummy_password)
             mail.select("INBOX")
             
@@ -118,7 +133,6 @@ class ResearchEnhancementAgent(BaseAgent):
                         if isinstance(response_part, tuple):
                             msg = email.message_from_bytes(response_part[1])
                             
-                            # 1. Match the Project Name in the Subject!
                             subject = str(msg.get("Subject", "")).replace('\r', '').replace('\n', '')
                             clean_proj_name = project_name.strip().lower()
                             
@@ -127,7 +141,6 @@ class ResearchEnhancementAgent(BaseAgent):
                                 
                             print(f"   📧 Found matching email subject: {subject}")
                             
-                            # 2. Extract the body (handle both plain text and HTML)
                             body = ""
                             if msg.is_multipart():
                                 for part in msg.walk():
@@ -140,15 +153,12 @@ class ResearchEnhancementAgent(BaseAgent):
                             else:
                                 body = msg.get_payload(decode=True).decode(errors='ignore')
                             
-                            # 3. Clean HTML tags and normalize whitespace to ensure Regex works
-                            clean_body = re.sub(r'<[^>]+>', ' ', body)  # Remove HTML tags
-                            clean_body = re.sub(r'\s+', ' ', clean_body) # Remove extra spaces/newlines
+                            clean_body = re.sub(r'<[^>]+>', ' ', body)
+                            clean_body = re.sub(r'\s+', ' ', clean_body)
                             
-                            # 4. Exact Regex Match (Catch ANY character until the next space)
                             match = re.search(r'Your Access Token:\s*([^\s]{20,})', clean_body, re.IGNORECASE)
                             if match:
                                 token = match.group(1).strip()
-                                # Print the FULL token and its length so we can debug it
                                 print(f"   ✅ Found Correct Stanford Token: {token} (Length: {len(token)})")
                                 mail.logout()
                                 return token
@@ -163,6 +173,11 @@ class ResearchEnhancementAgent(BaseAgent):
 
     def _fetch_review_from_stanford(self, token: str) -> str:
         """Phase 2b: Uses Playwright to submit the token and scrape the review."""
+        # Defensive check
+        if not token or str(token).strip() == "":
+            self.logger.error("Empty token provided to Stanford scraper.")
+            return None
+            
         print("   🌐 Navigating to paperreview.ai/review to fetch feedback...")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -187,7 +202,6 @@ class ResearchEnhancementAgent(BaseAgent):
                     buttons.first.click()
                 
                 print("   ⏳ Waiting for the 'Summary' or 'Strengths' sections to load...")
-                # Smart wait: Wait explicitly for the review content to appear (max 15 seconds)
                 try:
                     page.locator('text="Summary"').first.wait_for(state="visible", timeout=15000)
                 except:
@@ -196,7 +210,6 @@ class ResearchEnhancementAgent(BaseAgent):
                         print("   ❌ Error: The website rejected the token.")
                         return None
                 
-                # Scrape all text. Inner text naturally keeps the structure of the headers.
                 review_text = page.locator('body').inner_text()
                 
                 if len(review_text) < 400:
@@ -214,6 +227,11 @@ class ResearchEnhancementAgent(BaseAgent):
 
     def _generate_actionable_tasks(self, project_name: str, review_text: str) -> str:
         """Phase 2c: Uses Groq to parse the review and generate tasks with deadlines."""
+        # Defensive check
+        if not review_text or str(review_text).strip() == "":
+            self.logger.error("Empty review text provided for task generation.")
+            return None
+            
         print("   🧠 Sending Stanford review to LLM for task generation & novelty check...")
         prompt = f"""
         You are a rigorous Academic Research Manager. You have received an external peer-review from Stanford for the project '{project_name}'.
@@ -233,18 +251,20 @@ class ResearchEnhancementAgent(BaseAgent):
         """
         
         try:
+            # ask_llm will raise a RuntimeError if it completely fails
             tasks = self.ask_llm(prompt)
             
             safe_name = project_name.replace(" ", "_")
-            save_path = os.path.join(self.library.base_dir, "project_enhancement", safe_name, "stanford_tasks.md")
+            save_path = os.path.join(Config.LIBRARY_DIR, "project_enhancement", safe_name, "stanford_tasks.md")
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(tasks)
                 
             print(f"   ✅ Tasks generated and saved to {save_path}")
             return tasks
-        except Exception as e:
+        except RuntimeError as e:
             self.logger.error("LLM Generation failed: %s", str(e))
-            return None
+            # Fallback message instead of crashing
+            return "⚠️ *System Note: The AI assistant was unable to generate actionable tasks at this time due to a temporary connection issue. Please review the raw feedback manually.*"
 
     def run(self):
         self.logger.info("Starting Research Enhancement cycle.")
@@ -279,7 +299,6 @@ class ResearchEnhancementAgent(BaseAgent):
                             self._save_state(project, state)
                             print("✅ Phase 2 complete. Tasks generated and state updated to REVIEW_COMPLETED.")
                             
-                            # --- NEW: Trigger the Notification Agent ---
                             self.logger.info("Sending Stanford task list email for %s...", project)
                             self.notifier.send_stanford_tasks(
                                 project_name=project,
