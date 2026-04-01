@@ -1,6 +1,6 @@
 # Academic Research Multi-Agent System 🔬🤖
 
-A Python-based, multi-agent artificial intelligence system designed to automate and enhance academic research workflows. This project utilizes the Groq LLM API, browser automation (Playwright), and strict Object-Oriented Programming (OOP) principles to create an autonomous, decoupled pipeline that fetches real-time data, conducts targeted Google Scholar literature reviews, tracks progress, enhances manuscripts, and delivers beautifully formatted email reports.
+A Python-based, multi-agent artificial intelligence system designed to automate and enhance academic research workflows. This project utilizes the Groq LLM API, browser automation (Playwright), strict Object-Oriented Programming (OOP) principles, and Defensive Programming to create an autonomous, decoupled pipeline that fetches real-time data, conducts targeted Google Scholar literature reviews, tracks progress, enhances manuscripts, and delivers beautifully formatted email reports.
 
 ## 🌟 Features & Architecture
 
@@ -36,13 +36,16 @@ A core feature of the system is its **Dual-Email Architecture**: It utilizes an 
 * Uses Groq LLM to translate harsh academic critiques into an actionable, supportive To-Do list with estimated effort hours and strict deadlines for the research team.
 
 ### Phase 4: Communication & Alerting
-**Notification Agent (Event-Driven):**
+**Notification Agent (Event-Driven & Injected):**
 * Acts as the system's external communication hub. Completely decoupled from the main execution flow, it is triggered via an **Event-Driven Architecture** the moment any agent finalizes a task.
+* Implements **Dependency Injection (DI)**: The Orchestrator (`main.py`) instantiates a single shared notification service and injects it into all operational agents, preventing tight coupling and redundant connections.
 * Uses a dynamic routing map (`researchers_map.json`) to direct specific project feedback to the appropriate researcher's inbox.
 * Translates raw Markdown reports into beautifully styled, professional HTML layouts dynamically branded per agent (e.g., green for literature, purple for project management).
 * Automatically sends an executive summary via a secure SMTP relay connection, with full detailed reports embedded directly in the email body.
 
 ## 🛠️ Utility Modules & Infrastructure
+* **Centralized Configuration (`config.py`):** Acts as the Single Source of Truth for the entire system. Eliminates "magic numbers" and hardcoded paths by centrally managing all environment variables, API limits, UI timeouts, models, and directory structures.
+* **Defensive Programming & Resilience:** Built into the `BaseAgent`, featuring strict validation for all LLM inputs and outputs. It implements **Exponential Backoff** for API rate limits, secure JSON parsing with graceful fallbacks, and real exception bubbling (`RuntimeError`) to prevent silent systemic crashes.
 * **Library Manager:** Automates the creation of an organized directory structure and handles file I/O operations to maintain a pristine `research_library` ecosystem.
 * **Overleaf Connector:** Extracts downloaded ZIP files and uses highly optimized Regular Expressions (RegEx) to strip heavy LaTeX formatting, delivering clean plain text to the LLM agents.
 * **Garbage Collector:** Implements a strict Data Retention Policy (TTL). Safely scans specific directories to automatically purge outdated markdown reports older than 30 days, preventing disk space exhaustion while preserving critical rolling CSVs and system state files.
