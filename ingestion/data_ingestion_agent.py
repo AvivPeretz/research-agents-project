@@ -3,29 +3,42 @@ import json
 import shutil
 import zipfile
 import time
-from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-load_dotenv()
+# Import centralized configuration
+from config import Config
 
 class DataIngestionAgent:
     """
     Data Ingestion Agent: Performs a Delta Sync.
     Downloads BOTH the source ZIP (for text delta extraction) AND the compiled PDF (for Stanford review).
     """
-    def __init__(self):
+    def __init__(self, notifier=None):
         self.email = os.getenv("OVERLEAF_EMAIL")
         self.password = os.getenv("OVERLEAF_PASSWORD")
-        self.state_file = "overleaf_state.json"
-        self.registry_file = "sync_registry.json"
-        self.download_dir = os.path.abspath("overleaf_projects")
+        
+        # Dependency Injection for sending admin alerts
+        self.notifier = notifier
+        
+        # Use Config for paths
+        self.state_file = Config.OVERLEAF_STATE_PATH
+        self.registry_file = Config.SYNC_REGISTRY_PATH
+        self.download_dir = Config.OVERLEAF_DIR
         
         if not os.path.exists(self.download_dir):
             os.makedirs(self.download_dir)
 
     def _perform_manual_login(self):
-        """Fallback method: Opens browser for user to log in."""
-        print("\n🛑 No saved session found! Initiating manual login...")
+        """Fallback method: Opens browser for user to log in and alerts admin."""
+        print("\n🛑 No saved session found or session expired! Initiating manual login...")
+        
+        # Send critical alert to Admin!
+        if self.notifier:
+            self.notifier.send_admin_alert(
+                subject="Overleaf Manual Login Required",
+                message="The Overleaf session has expired or is missing. The system has opened a browser window and is pausing for 90 seconds. Please log in manually."
+            )
+            
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
             context = browser.new_context(
@@ -40,15 +53,18 @@ class DataIngestionAgent:
                 page.fill("input[name='password']", self.password)
                 
             print("\n🚨 ACTION REQUIRED: Please log in manually and solve the reCAPTCHA if it appears.")
-            print("⏳ Waiting up to 60 seconds for you to reach the dashboard...")
+            print("⏳ Waiting up to 90 seconds for you to reach the dashboard...")
             
             try:
-                page.wait_for_url("**/project**", timeout=60000)
+                # Increased timeout to 90 seconds to allow human interaction
+                page.wait_for_url("**/project", timeout=90000)
                 print("✅ Reached dashboard! Saving session securely...")
                 context.storage_state(path=self.state_file)
                 time.sleep(2)
+            except PlaywrightTimeoutError:
+                print("❌ Login timed out. You did not reach the dashboard in time.")
             except Exception as e:
-                print(f"❌ Login failed or timed out: {e}")
+                print(f"❌ Login failed: {e}")
             finally:
                 context.close()
                 browser.close()
@@ -88,7 +104,22 @@ class DataIngestionAgent:
                 print("🌐 Navigating to dashboard...")
                 page.goto("https://www.overleaf.com/project")
                 
-                page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=20000)
+                # We check if we actually reached the dashboard. If not, the session is dead.
+                try:
+                    page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
+                except PlaywrightTimeoutError:
+                    print("⚠️ Timeout waiting for projects. The session might be invalid.")
+                    context.close()
+                    browser.close()
+                    
+                    # Delete the bad state file so it triggers manual login next time
+                    if os.path.exists(self.state_file):
+                        os.remove(self.state_file)
+                        
+                    # Recursively try ONE more time to trigger the manual login process
+                    print("🔄 Retrying sync cycle to prompt manual login...")
+                    return self.sync_all_projects()
+                
                 time.sleep(2)
                 
                 rows = page.locator('tr:has(a[href^="/project/"]), li:has(a[href^="/project/"])').all()
@@ -138,22 +169,17 @@ class DataIngestionAgent:
                         # --- 2. DOWNLOAD COMPILED PDF (VIA FILE MENU) ---
                         print(f"   📄 Opening editor to download PDF via the 'File' menu...")
                         try:
-                            # 1. Navigate into the project editor
                             editor_url = f"https://www.overleaf.com{href}"
                             page.goto(editor_url)
                             
-                            # Give it 8 seconds to load the editor and start compiling
                             page.wait_for_timeout(8000)
                             
-                            # 2. Click the 'File' menu at the top left
                             print("   📂 Clicking the 'File' menu...")
                             file_btn = page.locator('text="File"').first
                             file_btn.click()
                             
-                            # Wait a moment for the dropdown menu to open
                             page.wait_for_timeout(1500)
                             
-                            # 3. Click the 'Download as PDF' option
                             print("   📥 Clicking 'Download as PDF'...")
                             pdf_btn = page.locator('text="Download as PDF"').first
                             
@@ -168,9 +194,8 @@ class DataIngestionAgent:
                         except Exception as e:
                             print(f"   ⚠️ Exception during PDF download via File menu: {e}")
                         finally:
-                            # 4. Return to dashboard
                             page.goto("https://www.overleaf.com/project")
-                            page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=20000)
+                            page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
                         
                         registry[project_name] = last_modified_text
                         updated_projects.append(project_name)
@@ -189,7 +214,3 @@ class DataIngestionAgent:
                 
         print(f"🎉 Ingestion complete! {len(updated_projects)} projects were downloaded.")
         return updated_projects
-
-if __name__ == "__main__":
-    agent = DataIngestionAgent()
-    agent.sync_all_projects()

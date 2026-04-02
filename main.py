@@ -28,15 +28,19 @@ def main():
     Triggers agents based on available data and acts as a central control hub.
     """
     
-    # --- NEW: Instantiate the Notification Agent ONCE (Dependency Injection) ---
+    # --- NEW: Instantiate Shared Services ---
     print("--- Initializing Shared Services (Notification Agent) ---")
-    notifier = NotificationAgent()
     db = DatabaseManager()
-    # Run the one-time migration from the old JSON mapping to the SQL database
+    notifier = NotificationAgent(db=db)
+
+    '''''
+    # Initialize DB and run migration
     db.migrate_from_json(Config.RESEARCHERS_MAP_PATH)
+    print("\n--- DB Migration Test Completed ---")
+    '''''
 
     print("\n--- 0. Running Data Ingestion (Delta Sync) ---")
-    scraper = DataIngestionAgent()
+    scraper = DataIngestionAgent(notifier=notifier)
     # The agent connects, downloads only deltas, and returns updated project names
     updated_projects = scraper.sync_all_projects()
     
@@ -53,7 +57,7 @@ def main():
         lit_agent.run()
     else:
         print("\n--- No projects available for Literature Research. ---")
-    
+    '''''
     # --- 2. Progress Tracking Agent (Depends on Overleaf updates) ---
     if updated_projects:
         print(f"\n--- 2. Running Progress Tracking Agent for: {updated_projects} 🚀 ---")
@@ -71,7 +75,7 @@ def main():
         enhancement_agent.run()
     else:
         print("\n--- No projects available for Research Enhancement. ---")
-        
+    '''''
     # --- 4. System Cleanup (Garbage Collector) ---
     # Use Config for retention policy instead of magic numbers
     print(f"\n--- 4. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")

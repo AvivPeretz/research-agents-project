@@ -1,58 +1,61 @@
 import os
 import smtplib
-import json
 import markdown
 from email.message import EmailMessage
-from dotenv import load_dotenv
-from agents.base_agent import BaseAgent
 
-load_dotenv()
+# Import centralized configuration
+from config import Config
+from agents.base_agent import BaseAgent
+# Import DatabaseManager type for type hinting
+from utils.database_manager import DatabaseManager
 
 class NotificationAgent(BaseAgent):
     """
     A utility service agent responsible for formatting and sending
-    agent-specific emails to the human researchers.
+    agent-specific emails to the human researchers, using the SQLite DB for routing.
     """
-    def __init__(self):
-        # Notice we don't take lists of projects anymore. It's a stateless service.
+    def __init__(self, db: DatabaseManager = None):
         super().__init__(agent_name="NotificationAgent")
         
-        # The GMAIL account that physically SENDS the email
-        self.sender_email = os.getenv("NOTIFICATION_SENDER_EMAIL") 
-        self.sender_password = os.getenv("NOTIFICATION_SENDER_PASSWORD")
+        # We now accept the DatabaseManager instance via Dependency Injection
+        self.db = db
+        
+        # Use Config for credentials
+        self.sender_email = Config.NOTIFICATION_SENDER_EMAIL 
+        self.sender_password = Config.NOTIFICATION_SENDER_PASSWORD
         
         # The UNIVERSITY account that RECEIVES the email (default fallback)
-        self.target_email = os.getenv("OVERLEAF_EMAIL") 
-        
-        self.map_file = "researchers_map.json"
-        self._ensure_map_file()
-
-    def _ensure_map_file(self):
-        if not os.path.exists(self.map_file):
-            default_map = {
-                "AI Reasearch Project": self.target_email,
-                "Machine Learning Research": self.target_email
-            }
-            with open(self.map_file, 'w', encoding='utf-8') as f:
-                json.dump(default_map, f, indent=4)
+        self.target_email = Config.OVERLEAF_EMAIL 
 
     def get_researcher_email(self, project_name: str) -> str:
+        """
+        Queries the SQLite database to find the assigned researcher's email.
+        Falls back to the default university email if not found.
+        """
+        if not self.db:
+            self.logger.warning("No database connection provided. Using fallback email.")
+            return self.target_email
+            
         try:
-            with open(self.map_file, 'r', encoding='utf-8') as f:
-                mapping = json.load(f)
-            return mapping.get(project_name, self.target_email) 
-        except Exception:
+            config = self.db.get_project_config(project_name)
+            if config and config.get('ResearcherEmail'):
+                return config['ResearcherEmail']
+            else:
+                self.logger.info("Project '%s' not found in DB. Routing to default email.", project_name)
+                return self.target_email
+        except Exception as e:
+            self.logger.error("Database query failed: %s", str(e))
             return self.target_email
 
     def _dispatch_email(self, msg: EmailMessage, recipient: str):
         """Helper method to handle the physical SMTP sending."""
         if not self.sender_email or not self.sender_password:
-            self.logger.error("Sender credentials missing in .env file!")
+            self.logger.error("Sender credentials missing in configuration!")
             return
 
         try:
             self.logger.info("Connecting to Gmail SMTP server as a relay...")
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            with smtplib.SMTP_SSL(Config.SMTP_SERVER, Config.SMTP_PORT) as smtp:
                 smtp.login(self.sender_email, self.sender_password)
                 smtp.send_message(msg)
             self.logger.info("✅ Email successfully sent to %s.", recipient)
@@ -92,7 +95,6 @@ class NotificationAgent(BaseAgent):
         msg.set_content("Please enable HTML to view this message.")
         msg.add_alternative(email_html, subtype='html')
 
-        # Attach the CSV if provided
         if csv_path and os.path.exists(csv_path):
             try:
                 with open(csv_path, 'rb') as f:
@@ -164,6 +166,15 @@ class NotificationAgent(BaseAgent):
         msg.add_alternative(email_html, subtype='html')
         self._dispatch_email(msg, recipient)
 
+    def send_admin_alert(self, subject: str, message: str):
+        """Sends a critical system alert directly to the system administrator."""
+        msg = EmailMessage()
+        msg['Subject'] = f"🚨 System Alert: {subject}"
+        msg['From'] = f"System Administrator 🤖 <{self.sender_email}>"
+        msg['To'] = self.sender_email # Sending to the dummy/personal email itself
+
+        msg.set_content(message)
+        self._dispatch_email(msg, self.sender_email)
+
     def run(self):
-        # We keep this just to satisfy the BaseAgent abstract method, but it won't be used directly anymore.
         pass
