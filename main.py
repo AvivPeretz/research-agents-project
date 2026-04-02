@@ -8,6 +8,7 @@ from agents.research_enhancement_agent import ResearchEnhancementAgent
 from ingestion.data_ingestion_agent import DataIngestionAgent
 from utils.garbage_collector import GarbageCollector
 from agents.notification_agent import NotificationAgent
+from utils.database_manager import DatabaseManager
 
 def get_all_active_projects() -> list:
     """
@@ -30,7 +31,10 @@ def main():
     # --- NEW: Instantiate the Notification Agent ONCE (Dependency Injection) ---
     print("--- Initializing Shared Services (Notification Agent) ---")
     notifier = NotificationAgent()
-    
+    db = DatabaseManager()
+    # Run the one-time migration from the old JSON mapping to the SQL database
+    db.migrate_from_json(Config.RESEARCHERS_MAP_PATH)
+
     print("\n--- 0. Running Data Ingestion (Delta Sync) ---")
     scraper = DataIngestionAgent()
     # The agent connects, downloads only deltas, and returns updated project names
