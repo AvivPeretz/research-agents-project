@@ -10,6 +10,8 @@ from config import Config
 from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
 from agents.notification_agent import NotificationAgent
+from pydantic import ValidationError
+from domain.schemas import LiteratureReport
 
 class LiteratureResearchAgent(BaseAgent):
     """
@@ -217,7 +219,7 @@ class LiteratureResearchAgent(BaseAgent):
         item['venue'] = "N/A"    
 
     def process_results_with_llm(self, project: str, keywords: str, scholar_data: list) -> dict:
-        """Feeds the scraped data to the LLM to generate the 14-column JSON and a summary."""
+        """Feeds the scraped data to the LLM and validates the output strictly against Pydantic schemas."""
         # Defensive programming: Fallback structure
         fallback_data = {
             "summary": "The LLM was unable to generate a valid summary for these papers due to a formatting error.",
@@ -228,9 +230,10 @@ class LiteratureResearchAgent(BaseAgent):
             self.logger.warning("No scholar data provided to LLM processing.")
             return fallback_data
             
-        self.logger.info("Processing scraped Scholar data via LLM...")
+        self.logger.info("Processing scraped Scholar data via LLM with Pydantic validation...")
         data_str = json.dumps(scholar_data, indent=2)
         
+        # Notice how the JSON keys now perfectly match our Pydantic variables and aliases
         prompt = f"""
         Act as an expert academic research assistant. 
         I have scraped recent papers related to the project: '{project}'.
@@ -244,33 +247,30 @@ class LiteratureResearchAgent(BaseAgent):
             "summary": "A 1-2 paragraph engaging summary describing how these specific papers relate to the project. Embed the Markdown links to the papers in the text (e.g., [Paper Title](url)).",
             "papers": [
                 {{
-                    "paper name": "Title of the paper",
+                    "paper_name": "Title of the paper",
                     "cited": "Use the 'citationCount' from the data (e.g., '15' or 'N/A')",
                     "source": "Use the 'venue' from the data (e.g., 'IEEE Transactions...' or 'N/A')",
-                    "year published": "Use the 'year' from the data",
+                    "year_published": "Use the 'year' from the data",
                     "types of available data": "Describe data type based on abstract. IF this is a Theoretical/Mathematical paper, explicitly write 'Theoretical Paper - No Dataset'",
                     "number of samples": "e.g., 20000. IF theoretical, write 'N/A (Theoretical)'",
                     "number of features": "e.g., 14. IF theoretical, write 'N/A (Theoretical)'",
                     "number of classes": "e.g., 5. IF theoretical, write 'N/A (Theoretical)'",
                     "location": "e.g., In-lab testbed. IF theoretical, write 'N/A (Theoretical)'",
                     "for how long": "e.g., 3 weeks (or N/A)",
-                    "is it reproducible?": "Yes/No (or N/A)",
-                    "how complicated it is?": "e.g., High/Moderate/Low based on abstract analysis",
-                    "is there privacy issues?": "e.g., Minimal/High (or N/A)",
-                    "can i control the application collected": "Yes/No (or N/A)"
+                    "reproducible": "Must be EXACTLY 'Yes', 'No', or 'N/A'",
+                    "complexity": "Must be EXACTLY 'High', 'Moderate', 'Low', or 'N/A'",
+                    "is there privacy issues?": "Must be EXACTLY 'Yes', 'No', 'Minimal', 'High', or 'N/A'",
+                    "can i control the application collected": "Must be EXACTLY 'Yes', 'No', or 'N/A'"
                 }}
             ]
         }}
         Important constraints:
-        1. Keep the EXACT JSON keys as defined above. Do not change the column names under any circumstances.
-        2. Read the FULL 'abstract' provided in the data to determine the research type and extract detailed features.
-        3. If a specific data point is truly missing, use "N/A".
-        4. ESCAPE ALL STRINGS. Do NOT use raw newlines (\\n) or unescaped quotes inside the JSON string values.
-        5. Ensure the JSON is perfectly valid. Do not use markdown blocks like ```json.
+        1. Keep the EXACT JSON keys as defined above.
+        2. Obey the strict EXACTLY string match rules for dropdown fields (like reproducible, complexity).
+        3. ESCAPE ALL STRINGS properly. Do NOT use markdown blocks like ```json.
         """
         
         try:
-            # ask_llm now handles internal retries and raises RuntimeError on complete failure
             response = self.ask_llm(prompt)
             
             start = response.find('{')
@@ -279,18 +279,20 @@ class LiteratureResearchAgent(BaseAgent):
             if start == -1 or end == 0:
                  raise ValueError("LLM response did not contain JSON brackets.")
                  
-            parsed_data = json.loads(response[start:end], strict=False)
+            raw_json = response[start:end]
             
-            # Defensive check: Ensure the parsed JSON has the expected keys
-            if "summary" not in parsed_data or "papers" not in parsed_data:
-                self.logger.warning("LLM JSON is missing required keys. Using fallback.")
-                return fallback_data
-                
-            return parsed_data
+            # --- NEW: Pydantic Strict Validation ---
+            validated_report = LiteratureReport.model_validate_json(raw_json)
             
+            # Convert back to dict using aliases so LibraryManager CSV creation works seamlessly
+            return validated_report.model_dump(by_alias=True)
+            
+        except ValidationError as e:
+            # This catches hallucinations: missing keys, wrong types, or invalid Enums
+            self.logger.error("Pydantic Schema Validation Failed! LLM hallucinated bad structure: %s", str(e))
+            return fallback_data
         except (RuntimeError, ValueError, json.JSONDecodeError) as e:
-            self.logger.error("Failed to parse the structured JSON from LLM: %s", str(e))
-            # Return the safe fallback structure instead of None to prevent cascading crashes
+            self.logger.error("Failed to parse or extract JSON from LLM: %s", str(e))
             return fallback_data
 
     def run(self):
