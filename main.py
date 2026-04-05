@@ -57,12 +57,12 @@ def main():
         lit_agent.run()
     else:
         print("\n--- No projects available for Literature Research. ---")
-    '''''
+    
     # --- 2. Progress Tracking Agent (Depends on Overleaf updates) ---
     if updated_projects:
         print(f"\n--- 2. Running Progress Tracking Agent for: {updated_projects} 🚀 ---")
         # Inject the notifier instance
-        prog_agent = ProgressTrackingAgent(overleaf_projects=updated_projects, notifier=notifier)
+        prog_agent = ProgressTrackingAgent(overleaf_projects=updated_projects, notifier=notifier,db=db)
         prog_agent.run()
     else:
         print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
@@ -75,7 +75,7 @@ def main():
         enhancement_agent.run()
     else:
         print("\n--- No projects available for Research Enhancement. ---")
-    '''''
+    
     # --- 4. System Cleanup (Garbage Collector) ---
     # Use Config for retention policy instead of magic numbers
     print(f"\n--- 4. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
