@@ -1,6 +1,7 @@
 import os
 import smtplib
 import markdown
+import logging
 from email.message import EmailMessage
 
 # Import centralized configuration
@@ -15,17 +16,26 @@ class NotificationAgent(BaseAgent):
     agent-specific emails to the human researchers, using the SQLite DB for routing.
     """
     def __init__(self, db: DatabaseManager = None):
-        super().__init__(agent_name="NotificationAgent")
-        
+        # Do NOT call BaseAgent.__init__() because NotificationAgent does not use the LLM.
+        # Initialize logger and minimal attributes manually.
+        self.agent_name = "NotificationAgent"
+        self.logger = logging.getLogger(self.agent_name)
+        if not self.logger.handlers:
+            ch = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            ch.setFormatter(formatter)
+            self.logger.addHandler(ch)
+            self.logger.setLevel(logging.INFO)
+
         # We now accept the DatabaseManager instance via Dependency Injection
         self.db = db
-        
+
         # Use Config for credentials
-        self.sender_email = Config.NOTIFICATION_SENDER_EMAIL 
+        self.sender_email = Config.NOTIFICATION_SENDER_EMAIL
         self.sender_password = Config.NOTIFICATION_SENDER_PASSWORD
-        
+
         # The UNIVERSITY account that RECEIVES the email (default fallback)
-        self.target_email = Config.OVERLEAF_EMAIL 
+        self.target_email = Config.OVERLEAF_EMAIL
 
     def get_researcher_email(self, project_name: str) -> str:
         """
@@ -38,8 +48,9 @@ class NotificationAgent(BaseAgent):
             
         try:
             config = self.db.get_project_state(project_name) # Changed to get_project_state
-            if config and config.get('ResearcherEmail'):
-                return config['ResearcherEmail']
+            # Use canonical snake_case key from DB schema
+            if config and config.get('researcher_email'):
+                return config['researcher_email']
             else:
                 self.logger.info("Project '%s' not found in DB. Routing to default email.", project_name)
                 return self.target_email
@@ -51,7 +62,7 @@ class NotificationAgent(BaseAgent):
         """Helper method to handle the physical SMTP sending."""
         if not self.sender_email or not self.sender_password:
             self.logger.error("Sender credentials missing in configuration!")
-            return
+            return False
 
         try:
             self.logger.info("Connecting to Gmail SMTP server as a relay...")
@@ -59,8 +70,10 @@ class NotificationAgent(BaseAgent):
                 smtp.login(self.sender_email, self.sender_password)
                 smtp.send_message(msg)
             self.logger.info("✅ Email successfully sent to %s.", recipient)
+            return True
         except Exception as e:
             self.logger.error("❌ Failed to send email: %s", str(e))
+            return False
 
     # ==========================================
     # AGENT-SPECIFIC EMAIL FUNCTIONS

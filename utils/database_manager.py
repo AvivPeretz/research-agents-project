@@ -26,7 +26,8 @@ class DatabaseManager:
         self._create_tables()
 
     def _get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        # Add a short timeout to avoid indefinite locks
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row 
         return conn
 
@@ -167,3 +168,70 @@ class DatabaseManager:
                 conn.commit()
         except sqlite3.Error as e:
             self.logger.error("Failed to log agent run: %s", str(e))
+
+    def migrate_from_json(self, json_path: str):
+        """
+        Safely migrate projects from a legacy researchers_map.json file into the
+        `project_state` table. This operation is idempotent (uses INSERT OR IGNORE
+        in add_project) and will not raise on missing or malformed input.
+        """
+        if not json_path:
+            self.logger.info("No json_path provided to migrate_from_json(). Skipping.")
+            return
+
+        if not os.path.exists(json_path):
+            self.logger.info("Migration file not found at %s. Nothing to migrate.", json_path)
+            return
+
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            self.logger.error("Failed to read migration JSON %s: %s", json_path, str(e))
+            return
+
+        def _process_entry(project_name, val):
+            # Determine email from several possible shapes
+            email = None
+            if isinstance(val, str):
+                email = val
+            elif isinstance(val, dict):
+                # try common keys
+                email = val.get('researcher_email') or val.get('ResearcherEmail') or val.get('email')
+            elif isinstance(val, list):
+                # list of emails or objects — pick first plausible
+                for item in val:
+                    if isinstance(item, str):
+                        email = item
+                        break
+                    if isinstance(item, dict):
+                        email = item.get('researcher_email') or item.get('email') or email
+                        if email:
+                            break
+
+            if not email:
+                email = Config.OVERLEAF_EMAIL
+
+            try:
+                self.add_project(project_name, email)
+            except Exception as e:
+                # Never crash migration; log and continue
+                self.logger.error("Failed to add migrated project %s: %s", project_name, str(e))
+
+        # Support several top-level shapes for backwards compatibility
+        try:
+            if isinstance(data, dict):
+                # If dict maps project_name -> email or -> object
+                for proj, val in data.items():
+                    _process_entry(proj, val)
+            elif isinstance(data, list):
+                # A list of records; try to extract project_name and email
+                for record in data:
+                    if isinstance(record, dict):
+                        proj = record.get('project_name') or record.get('project') or record.get('name')
+                        if proj:
+                            _process_entry(proj, record)
+            else:
+                self.logger.info("Migration JSON has unsupported top-level structure. Skipping.")
+        except Exception as e:
+            self.logger.error("Unexpected error during migration: %s", str(e))

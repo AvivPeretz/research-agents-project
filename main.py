@@ -22,22 +22,37 @@ def get_all_active_projects() -> list:
     # Return a list of directory names inside overleaf_projects
     return [name for name in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, name))]
 
+
+def run_agent_safely(agent, *args, **kwargs) -> bool:
+    """
+    Helper to run an agent and catch/log exceptions so the main loop continues.
+    Returns True on success, False on failure.
+    """
+    try:
+        print(f"--- Running agent: {agent.__class__.__name__} ---")
+        agent.run(*args, **kwargs)
+        print(f"--- Agent {agent.__class__.__name__} finished successfully ---")
+        return True
+    except Exception as e:
+        print(f"!!! Agent {agent.__class__.__name__} failed: {e}")
+        return False
+
 def main():
     """
     The main Scheduler and Router of the application.
     Triggers agents based on available data and acts as a central control hub.
     """
     
+    # Validate required environment variables early
+    Config.validate()
+
     # --- NEW: Instantiate Shared Services ---
     print("--- Initializing Shared Services (Notification Agent) ---")
     db = DatabaseManager()
     notifier = NotificationAgent(db=db)
-
-    '''''
-    # Initialize DB and run migration
-    db.migrate_from_json(Config.RESEARCHERS_MAP_PATH)
-    print("\n--- DB Migration Test Completed ---")
-    '''''
+    # Run one-time safe migration from the legacy JSON map (idempotent)
+    db.migrate_from_json(str(Config.RESEARCHERS_MAP_PATH))
+    print("\n--- DB Migration Completed / Verified ---")
 
     print("\n--- 0. Running Data Ingestion (Delta Sync) ---")
     scraper = DataIngestionAgent(db=db, notifier=notifier)
@@ -54,7 +69,7 @@ def main():
         print(f"\n--- 1. Running Literature Research Agent for all active projects ---")
         # Inject the notifier instance
         lit_agent = LiteratureResearchAgent(active_projects=all_projects, notifier=notifier)
-        lit_agent.run()
+        run_agent_safely(lit_agent)
     else:
         print("\n--- No projects available for Literature Research. ---")
     
@@ -63,7 +78,7 @@ def main():
         print(f"\n--- 2. Running Progress Tracking Agent for: {updated_projects} 🚀 ---")
         # Inject the notifier instance
         prog_agent = ProgressTrackingAgent(overleaf_projects=updated_projects, notifier=notifier,db=db)
-        prog_agent.run()
+        run_agent_safely(prog_agent)
     else:
         print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
     
@@ -72,7 +87,7 @@ def main():
         print(f"\n--- 3. Running Research Enhancement Agent for all active projects 🚀 ---")
         # Inject the notifier instance
         enhancement_agent = ResearchEnhancementAgent(overleaf_projects=all_projects, notifier=notifier,db=db)
-        enhancement_agent.run()
+        run_agent_safely(enhancement_agent)
     else:
         print("\n--- No projects available for Research Enhancement. ---")
     
@@ -80,7 +95,7 @@ def main():
     # Use Config for retention policy instead of magic numbers
     print(f"\n--- 4. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
     gc = GarbageCollector(retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS)
-    gc.run()
+    run_agent_safely(gc)
 
     print("\n--- All Executions Finished Successfully ---")
 

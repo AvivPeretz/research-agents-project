@@ -24,6 +24,9 @@ class Config:
     # 2. State & Data Files 
     # ==========================================
     SYNC_REGISTRY_PATH = BASE_DIR / "sync_registry.json"
+    # NOTE: `researchers_map.json` is provided for migration only
+    # and should NOT be treated as the live source of truth once
+    # the application has migrated data into the SQLite DB.
     RESEARCHERS_MAP_PATH = BASE_DIR / "researchers_map.json"
     SCHOLAR_STATE_PATH = BASE_DIR / "scholar_state.json"
     OVERLEAF_STATE_PATH = BASE_DIR / "overleaf_state.json"
@@ -51,6 +54,8 @@ class Config:
     
     # The UNIVERSITY account that RECEIVES the email (default fallback)
     OVERLEAF_EMAIL = os.getenv("OVERLEAF_EMAIL")
+    # Overleaf account password (used for scraping / automation). May be None in some deployments.
+    OVERLEAF_PASSWORD = os.getenv("OVERLEAF_PASSWORD")
     
     SMTP_SERVER = "smtp.gmail.com"
     SMTP_PORT = 465
@@ -67,3 +72,21 @@ class Config:
     # 7. System & Maintenance
     # ==========================================
     GARBAGE_COLLECTION_TTL_DAYS = 30
+
+    @classmethod
+    def validate(cls):
+        """
+        Validate that required environment variables are present.
+        Raises ValueError listing any missing variables.
+        """
+        required = [
+            ("GROQ_API_KEY", cls.GROQ_API_KEY),
+            ("NOTIFICATION_SENDER_EMAIL", cls.NOTIFICATION_SENDER_EMAIL),
+            ("NOTIFICATION_SENDER_PASSWORD", cls.NOTIFICATION_SENDER_PASSWORD),
+            ("OVERLEAF_EMAIL", cls.OVERLEAF_EMAIL),
+            ("OVERLEAF_PASSWORD", cls.OVERLEAF_PASSWORD),
+        ]
+
+        missing = [name for name, val in required if not val]
+        if missing:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")

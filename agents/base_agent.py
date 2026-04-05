@@ -108,8 +108,8 @@ class BaseAgent(ABC):
                 self.logger.warning("LLM communication failed on attempt %d: %s", attempt + 1, str(e))
                 
                 if attempt < max_retries - 1:
-                    # Exponential backoff: sleep for 1, 2, 4... seconds
-                    sleep_time = 2 ** attempt
+                    # Exponential backoff: sleep for 2, 4, 8... seconds
+                    sleep_time = 2 ** (attempt + 1)
                     self.logger.info("Retrying in %d seconds...", sleep_time)
                     time.sleep(sleep_time)
                 else:
