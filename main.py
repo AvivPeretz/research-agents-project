@@ -71,7 +71,7 @@ def main():
     if all_projects:
         print(f"\n--- 3. Running Research Enhancement Agent for all active projects 🚀 ---")
         # Inject the notifier instance
-        enhancement_agent = ResearchEnhancementAgent(overleaf_projects=all_projects, notifier=notifier)
+        enhancement_agent = ResearchEnhancementAgent(overleaf_projects=all_projects, notifier=notifier,db=db)
         enhancement_agent.run()
     else:
         print("\n--- No projects available for Research Enhancement. ---")

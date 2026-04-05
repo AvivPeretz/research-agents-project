@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import imaplib
 import email
@@ -17,12 +16,16 @@ class ResearchEnhancementAgent(BaseAgent):
     """
     Agent responsible for uploading manuscripts to paperreview.ai, 
     reading the feedback via IMAP safely, and generating actionable tasks.
+    State is now fully managed via the central SQLite database.
     """
-    def __init__(self, overleaf_projects: list, notifier: NotificationAgent):
+    def __init__(self, overleaf_projects: list, notifier: NotificationAgent, db=None):
         super().__init__(agent_name="ResearchEnhancementAgent")
         self.projects = overleaf_projects
         self.library = LibraryManager()
-        self.notifier = notifier # <--- DEPENDENCY INJECTION
+        self.notifier = notifier 
+        
+        # --- NEW: Dependency Injection for Database ---
+        self.db = db 
         
         # Use Config for credentials
         self.uni_email = Config.OVERLEAF_EMAIL 
@@ -32,7 +35,6 @@ class ResearchEnhancementAgent(BaseAgent):
         self.logger.info("ResearchEnhancementAgent initialized for %d projects.", len(self.projects))
 
     def _get_project_pdf_path(self, project_name: str) -> str:
-        # Use Config directory instead of hardcoded path
         project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
         if os.path.exists(project_dir):
             for root, _, files in os.walk(project_dir):
@@ -41,34 +43,38 @@ class ResearchEnhancementAgent(BaseAgent):
                         return os.path.join(root, file)
         return None
 
-    def _get_state_file(self, project_name: str) -> str:
-        safe_name = project_name.replace(" ", "_")
-        # Use Config directory instead of self.library.base_dir for consistency
-        project_dir = os.path.join(Config.LIBRARY_DIR, "project_enhancement", safe_name)
-        if not os.path.exists(project_dir):
-            os.makedirs(project_dir)
-        return os.path.join(project_dir, "stanford_state.json")
-
-    def _get_state(self, project_name: str) -> dict:
-        state_file = self._get_state_file(project_name)
-        if os.path.exists(state_file):
-            try:
-                with open(state_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                self.logger.warning("Could not read state file for %s: %s", project_name, str(e))
+    def _get_stanford_state(self, project_name: str) -> dict:
+        """Retrieves Stanford status from SQLite database."""
+        if not self.db:
+            return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
+            
+        try:
+            state = self.db.get_project_state(project_name)
+            if state:
+                return {
+                    "status": state.get('stanford_status') or "READY_FOR_UPLOAD",
+                    "last_upload_time": state.get('last_upload_time')
+                }
+        except Exception as e:
+            self.logger.warning("Could not read DB state for %s: %s", project_name, str(e))
+            
         return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
 
-    def _save_state(self, project_name: str, state: dict):
+    def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None):
+        """Updates Stanford status in SQLite database."""
+        if not self.db:
+            return
+            
         try:
-            with open(self._get_state_file(project_name), 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=4)
+            if upload_time:
+                self.db.update_project_state(project_name, stanford_status=status, last_upload_time=upload_time)
+            else:
+                self.db.update_project_state(project_name, stanford_status=status)
         except Exception as e:
-            self.logger.error("Failed to save state for %s: %s", project_name, str(e))
+            self.logger.error("Failed to update DB state for %s: %s", project_name, str(e))
 
     def upload_to_stanford(self, project_name: str, pdf_path: str) -> bool:
         """Phase 1: Uploads the PDF to paperreview.ai using Playwright."""
-        # Defensive check
         if not pdf_path or not os.path.exists(pdf_path):
             self.logger.error("Invalid PDF path provided for upload: %s", pdf_path)
             return False
@@ -119,7 +125,6 @@ class ResearchEnhancementAgent(BaseAgent):
         """Phase 2a: Connects to Gmail and extracts the token specifically for this project."""
         print(f"   🔍 Checking Gmail for Stanford review token for '{project_name}'...")
         try:
-            # Use IMAP config from Config file
             mail = imaplib.IMAP4_SSL(Config.IMAP_SERVER, Config.IMAP_PORT)
             mail.login(self.dummy_email, self.dummy_password)
             mail.select("INBOX")
@@ -173,7 +178,6 @@ class ResearchEnhancementAgent(BaseAgent):
 
     def _fetch_review_from_stanford(self, token: str) -> str:
         """Phase 2b: Uses Playwright to submit the token and scrape the review."""
-        # Defensive check
         if not token or str(token).strip() == "":
             self.logger.error("Empty token provided to Stanford scraper.")
             return None
@@ -227,7 +231,6 @@ class ResearchEnhancementAgent(BaseAgent):
 
     def _generate_actionable_tasks(self, project_name: str, review_text: str) -> str:
         """Phase 2c: Uses Groq to parse the review and generate tasks with deadlines."""
-        # Defensive check
         if not review_text or str(review_text).strip() == "":
             self.logger.error("Empty review text provided for task generation.")
             return None
@@ -251,11 +254,13 @@ class ResearchEnhancementAgent(BaseAgent):
         """
         
         try:
-            # ask_llm will raise a RuntimeError if it completely fails
             tasks = self.ask_llm(prompt)
             
             safe_name = project_name.replace(" ", "_")
-            save_path = os.path.join(Config.LIBRARY_DIR, "project_enhancement", safe_name, "stanford_tasks.md")
+            save_dir = os.path.join(Config.LIBRARY_DIR, "project_enhancement", safe_name)
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, "stanford_tasks.md")
+            
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(tasks)
                 
@@ -263,7 +268,6 @@ class ResearchEnhancementAgent(BaseAgent):
             return tasks
         except RuntimeError as e:
             self.logger.error("LLM Generation failed: %s", str(e))
-            # Fallback message instead of crashing
             return "⚠️ *System Note: The AI assistant was unable to generate actionable tasks at this time due to a temporary connection issue. Please review the raw feedback manually.*"
 
     def run(self):
@@ -271,7 +275,7 @@ class ResearchEnhancementAgent(BaseAgent):
         for project in self.projects:
             print(f"\n{'-'*40}\n🧠 Stanford Peer-Review Engine: {project}\n{'-'*40}")
             
-            state = self._get_state(project)
+            state = self._get_stanford_state(project)
             
             if state["status"] == "READY_FOR_UPLOAD":
                 pdf_path = self._get_project_pdf_path(project)
@@ -281,10 +285,8 @@ class ResearchEnhancementAgent(BaseAgent):
                     
                 success = self.upload_to_stanford(project, pdf_path)
                 if success:
-                    state["status"] = "WAITING_FOR_REVIEW"
-                    state["last_upload_time"] = datetime.now().isoformat()
-                    self._save_state(project, state)
-                    self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW.")
+                    self._update_stanford_state(project, "WAITING_FOR_REVIEW", datetime.now().isoformat())
+                    self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW in DB.")
                     
             elif state["status"] == "WAITING_FOR_REVIEW":
                 print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
@@ -295,9 +297,8 @@ class ResearchEnhancementAgent(BaseAgent):
                     if review_text:
                         tasks = self._generate_actionable_tasks(project, review_text)
                         if tasks:
-                            state["status"] = "REVIEW_COMPLETED" 
-                            self._save_state(project, state)
-                            print("✅ Phase 2 complete. Tasks generated and state updated to REVIEW_COMPLETED.")
+                            self._update_stanford_state(project, "REVIEW_COMPLETED")
+                            print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
                             
                             self.logger.info("Sending Stanford task list email for %s...", project)
                             self.notifier.send_stanford_tasks(
