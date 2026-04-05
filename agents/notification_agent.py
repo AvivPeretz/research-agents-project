@@ -37,7 +37,7 @@ class NotificationAgent(BaseAgent):
             return self.target_email
             
         try:
-            config = self.db.get_project_config(project_name)
+            config = self.db.get_project_state(project_name) # Changed to get_project_state
             if config and config.get('ResearcherEmail'):
                 return config['ResearcherEmail']
             else:
