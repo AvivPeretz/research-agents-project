@@ -40,7 +40,7 @@ def main():
     '''''
 
     print("\n--- 0. Running Data Ingestion (Delta Sync) ---")
-    scraper = DataIngestionAgent(notifier=notifier)
+    scraper = DataIngestionAgent(db=db, notifier=notifier)
     # The agent connects, downloads only deltas, and returns updated project names
     updated_projects = scraper.sync_all_projects()
     

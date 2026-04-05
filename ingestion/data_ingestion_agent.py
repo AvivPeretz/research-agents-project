@@ -1,5 +1,4 @@
 import os
-import json
 import shutil
 import zipfile
 import time
@@ -11,18 +10,18 @@ from config import Config
 class DataIngestionAgent:
     """
     Data Ingestion Agent: Performs a Delta Sync.
-    Downloads BOTH the source ZIP (for text delta extraction) AND the compiled PDF (for Stanford review).
+    Downloads BOTH the source ZIP (for text delta extraction) AND the compiled PDF.
+    Now utilizes the centralized SQLite database for sync state management.
     """
-    def __init__(self, notifier=None):
-        self.email = os.getenv("OVERLEAF_EMAIL")
-        self.password = os.getenv("OVERLEAF_PASSWORD")
+    def __init__(self, db=None, notifier=None):
+        self.email = Config.OVERLEAF_EMAIL
+        self.password = Config.OVERLEAF_PASSWORD
         
-        # Dependency Injection for sending admin alerts
+        # Dependency Injection
+        self.db = db
         self.notifier = notifier
         
-        # Use Config for paths
         self.state_file = Config.OVERLEAF_STATE_PATH
-        self.registry_file = Config.SYNC_REGISTRY_PATH
         self.download_dir = Config.OVERLEAF_DIR
         
         if not os.path.exists(self.download_dir):
@@ -32,7 +31,6 @@ class DataIngestionAgent:
         """Fallback method: Opens browser for user to log in and alerts admin."""
         print("\n🛑 No saved session found or session expired! Initiating manual login...")
         
-        # Send critical alert to Admin!
         if self.notifier:
             self.notifier.send_admin_alert(
                 subject="Overleaf Manual Login Required",
@@ -56,7 +54,6 @@ class DataIngestionAgent:
             print("⏳ Waiting up to 90 seconds for you to reach the dashboard...")
             
             try:
-                # Increased timeout to 90 seconds to allow human interaction
                 page.wait_for_url("**/project", timeout=90000)
                 print("✅ Reached dashboard! Saving session securely...")
                 context.storage_state(path=self.state_file)
@@ -69,19 +66,13 @@ class DataIngestionAgent:
                 context.close()
                 browser.close()
 
-    def _load_registry(self) -> dict:
-        if os.path.exists(self.registry_file):
-            with open(self.registry_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
-
-    def _save_registry(self, registry: dict):
-        with open(self.registry_file, 'w', encoding='utf-8') as f:
-            json.dump(registry, f, indent=4)
-
     def sync_all_projects(self) -> list:
         print("🤖 Starting Delta Sync Ingestion Cycle...")
         
+        if not self.db:
+            print("❌ Database connection missing! Aborting sync.")
+            return []
+            
         if not os.path.exists(self.state_file):
             self._perform_manual_login()
             
@@ -89,7 +80,6 @@ class DataIngestionAgent:
             print("❌ Still no session file. Aborting sync.")
             return []
 
-        registry = self._load_registry()
         updated_projects = []
 
         with sync_playwright() as p:
@@ -104,7 +94,6 @@ class DataIngestionAgent:
                 print("🌐 Navigating to dashboard...")
                 page.goto("https://www.overleaf.com/project")
                 
-                # We check if we actually reached the dashboard. If not, the session is dead.
                 try:
                     page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
                 except PlaywrightTimeoutError:
@@ -112,11 +101,9 @@ class DataIngestionAgent:
                     context.close()
                     browser.close()
                     
-                    # Delete the bad state file so it triggers manual login next time
                     if os.path.exists(self.state_file):
                         os.remove(self.state_file)
                         
-                    # Recursively try ONE more time to trigger the manual login process
                     print("🔄 Retrying sync cycle to prompt manual login...")
                     return self.sync_all_projects()
                 
@@ -136,8 +123,11 @@ class DataIngestionAgent:
                         
                     last_modified_text = row.inner_text().strip() 
                     
-                    is_new = project_name not in registry
-                    is_modified = not is_new and registry[project_name] != last_modified_text
+                    # --- NEW: Check SQLite Database instead of JSON ---
+                    db_last_modified = self.db.get_last_modified(project_name)
+                    
+                    is_new = db_last_modified is None
+                    is_modified = not is_new and db_last_modified != last_modified_text
                     
                     if is_new or is_modified:
                         reason = "NEW" if is_new else "MODIFIED"
@@ -166,18 +156,16 @@ class DataIngestionAgent:
                             
                         os.remove(zip_path)
                         
-                        # --- 2. DOWNLOAD COMPILED PDF (VIA FILE MENU) ---
+                        # --- 2. DOWNLOAD COMPILED PDF ---
                         print(f"   📄 Opening editor to download PDF via the 'File' menu...")
                         try:
                             editor_url = f"https://www.overleaf.com{href}"
                             page.goto(editor_url)
-                            
                             page.wait_for_timeout(8000)
                             
                             print("   📂 Clicking the 'File' menu...")
                             file_btn = page.locator('text="File"').first
                             file_btn.click()
-                            
                             page.wait_for_timeout(1500)
                             
                             print("   📥 Clicking 'Download as PDF'...")
@@ -192,18 +180,20 @@ class DataIngestionAgent:
                             print(f"   ✅ PDF downloaded successfully.")
                             
                         except Exception as e:
-                            print(f"   ⚠️ Exception during PDF download via File menu: {e}")
+                            print(f"   ⚠️ Exception during PDF download: {e}")
                         finally:
                             page.goto("https://www.overleaf.com/project")
                             page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
                         
-                        registry[project_name] = last_modified_text
+                        # --- NEW: Update SQLite Database ---
+                        self.db.update_sync_registry(project_name, last_modified_text)
+                        # We also ensure the project exists in the master project_state table!
+                        self.db.add_project(project_name, Config.OVERLEAF_EMAIL)
+                        
                         updated_projects.append(project_name)
                         print(f"✅ Synced '{project_name}'.")
                     else:
                         print(f"⏭️  [SKIPPED] '{project_name}' is up to date.")
-
-                self._save_registry(registry)
                 
             except Exception as e:
                 print(f"❌ Sync failed: {e}")
