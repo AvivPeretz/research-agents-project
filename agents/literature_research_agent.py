@@ -2,7 +2,7 @@ import os
 import json
 from pydantic import ValidationError
 from domain.schemas import LiteratureReport
-
+import re 
 # Import the centralized configuration
 from config import Config
 from agents.base_agent import BaseAgent
@@ -133,6 +133,7 @@ class LiteratureResearchAgent(BaseAgent):
                  raise ValueError("LLM response did not contain JSON brackets.")
                  
             raw_json = response[start:end]
+            raw_json = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw_json)
             validated_report = LiteratureReport.model_validate_json(raw_json)
             return validated_report.model_dump(by_alias=True)
             
