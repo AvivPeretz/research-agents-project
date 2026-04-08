@@ -47,7 +47,7 @@ class NotificationAgent(BaseAgent):
             return self.target_email
             
         try:
-            config = self.db.get_project_state(project_name) # Changed to get_project_state
+            config = self.db.get_project_state(project_name) 
             # Use canonical snake_case key from DB schema
             if config and config.get('researcher_email'):
                 return config['researcher_email']
@@ -178,6 +178,39 @@ class NotificationAgent(BaseAgent):
         msg.set_content("Please enable HTML to view this message.")
         msg.add_alternative(email_html, subtype='html')
         self._dispatch_email(msg, recipient)
+
+    def send_supervisor_report(self, supervisor_email: str, md_content: str):
+        """
+        Formats and sends the Weekly Lab Status email directly to a Supervisor.
+        Unlike other emails, this groups multiple projects together.
+        """
+        msg = EmailMessage()
+        msg['Subject'] = "📊 Weekly Lab Status Report"
+        msg['From'] = f"Supervisor Status Agent 🤖 <{self.sender_email}>"
+        msg['To'] = supervisor_email
+
+        html_body = markdown.markdown(md_content)
+        
+        # Using a distinct dark orange theme for management reports
+        email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #d35400; }}</style></head>
+        <body>
+            <div class="container">
+                <h2 style="color: #d35400;">Hello Supervisor,</h2>
+                <p>Here is your automated progress report regarding the active research projects in your lab.</p>
+                <div style="background-color: #fdf2e9; padding: 20px; border-radius: 5px;">
+                    {html_body}
+                </div>
+                <p style="font-size: 14px; color: #7f8c8d; margin-top: 30px;">This report is generated autonomously by analyzing Overleaf sync patterns and AI-driven activity metrics.<br>- Your Supervisor Status Agent</p>
+            </div>
+        </body>
+        </html>
+        """
+        msg.set_content("Please enable HTML to view this message.")
+        msg.add_alternative(email_html, subtype='html')
+        self._dispatch_email(msg, supervisor_email)
 
     def send_admin_alert(self, subject: str, message: str):
         """Sends a critical system alert directly to the system administrator."""
