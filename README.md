@@ -184,28 +184,3 @@ python main.py --agent progress --project "My Thesis"
 ```bash
 python main.py --help
 ```
-
----
-
-## 📁 Project Structure
-├── agents/
-│   ├── base_agent.py               # Abstract base with Multi-LLM Waterfall & logging
-│   ├── literature_research_agent.py
-│   ├── progress_tracking_agent.py
-│   ├── research_enhancement_agent.py
-│   └── notification_agent.py
-├── ingestion/
-│   └── data_ingestion_agent.py     # Playwright Delta Sync from Overleaf
-├── utils/
-│   ├── overleaf_connector.py       # LaTeX parser & text cleaner
-│   ├── literature_fetcher.py       # Semantic Scholar API + Google Scholar fallback
-│   ├── library_manager.py          # File I/O & directory structure
-│   ├── database_manager.py         # SQLite Single Source of Truth
-│   └── garbage_collector.py        # TTL-based Markdown cleanup
-├── domain/
-│   └── schemas.py                  # Pydantic contracts for LLM output validation
-├── config.py                       # Centralized configuration & env management
-├── main.py                         # Orchestrator + CLI (argparse)
-├── requirements.txt
-├── .env                            # (Not committed) credentials & API keys
-└── .gitignore
