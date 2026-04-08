@@ -22,7 +22,7 @@ class ProgressTrackingAgent(BaseAgent):
         self.connector = OverleafConnector()
         self.notifier = notifier 
         
-        # --- NEW: Dependency Injection for Database ---
+        # Dependency Injection for Database
         self.db = db 
         
         self.logger.info("ProgressTrackingAgent initialized with %d projects.", len(self.overleaf_projects))
@@ -49,7 +49,6 @@ class ProgressTrackingAgent(BaseAgent):
             return
             
         try:
-            # Update the database using the dynamic kwargs method we built
             self.db.update_project_state(project, last_seen_text=text)
         except Exception as e:
             self.logger.error("Failed to save current text state to DB for %s: %s", project, str(e))
@@ -138,10 +137,24 @@ class ProgressTrackingAgent(BaseAgent):
         self.logger.info("Starting the progress tracking cycle.")
         for project in self.overleaf_projects:
             print(f"\n{'-'*40}\n📂 Evaluating Project Updates: {project}\n{'-'*40}")
-            changes = self.check_text_changes(project)
             
-            if changes.get("has_changes"):
-                delta_text = changes.get("delta_text")
+            changes = self.check_text_changes(project)
+            has_changes = changes.get("has_changes", False)
+            delta_text = changes.get("delta_text", "")
+            
+            # --- NEW: Record Activity Snapshot for the Supervisor Agent ---
+            # We record this REGARDLESS of whether there were changes or not,
+            # so the Supervisor Agent can track "silent days" vs "active days".
+            if self.db:
+                delta_char_count = len(delta_text) if has_changes else 0
+                self.db.add_progress_snapshot(
+                    project_name=project, 
+                    had_changes=has_changes, 
+                    delta_char_count=delta_char_count
+                )
+            # --------------------------------------------------------------
+            
+            if has_changes:
                 feedback = self.provide_feedback(delta_text)
                 suggestions = self.suggest_improvements(delta_text)
                 

@@ -31,6 +31,18 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row 
         return conn
 
+    def _ensure_column_exists(self, cursor, table_name: str, column_name: str, column_type: str):
+        """
+        Safely adds a column to an existing table if it doesn't already exist.
+        Prevents crashes during database schema upgrades.
+        """
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        # Extract column names from the PRAGMA result
+        columns = [row['name'] for row in cursor.fetchall()]
+        if column_name not in columns:
+            self.logger.info("Upgrading Database Schema: Adding column '%s' to '%s'.", column_name, table_name)
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
     def _create_tables(self):
         queries = [
             """
@@ -61,6 +73,16 @@ class DatabaseManager:
                 started_at TEXT,
                 finished_at TEXT
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS progress_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_name TEXT,
+                snapshot_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                had_changes BOOLEAN,
+                delta_char_count INTEGER,
+                FOREIGN KEY(project_name) REFERENCES project_state(project_name)
+            );
             """
         ]
         try:
@@ -68,10 +90,17 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 for q in queries:
                     cursor.execute(q)
+                
+                # --- Dynamic Schema Upgrades (Safe Migrations) ---
+                # Adding new columns for Supervisor Status tracking
+                self._ensure_column_exists(cursor, "project_state", "supervisor_email", "TEXT")
+                self._ensure_column_exists(cursor, "project_state", "student_name", "TEXT")
+                self._ensure_column_exists(cursor, "project_state", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                
                 conn.commit()
             self.logger.info("Database tables verified/created successfully.")
         except sqlite3.Error as e:
-            self.logger.error("Failed to create tables: %s", str(e))
+            self.logger.error("Failed to create/upgrade tables: %s", str(e))
 
     # ==========================================
     # SYNC REGISTRY METHODS (For DataIngestion)
@@ -105,6 +134,28 @@ class DatabaseManager:
             self.logger.error("Failed to update sync registry: %s", str(e))
 
     # ==========================================
+    # PROGRESS SNAPSHOTS METHODS (For Supervisor Agent)
+    # ==========================================
+    def add_progress_snapshot(self, project_name: str, had_changes: bool, delta_char_count: int = 0):
+        """
+        Records a daily/run snapshot of project activity.
+        Called by ProgressTrackingAgent even when had_changes is False to track silent days.
+        """
+        query = """
+        INSERT INTO progress_snapshots (project_name, had_changes, delta_char_count)
+        VALUES (?, ?, ?)
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (project_name, had_changes, delta_char_count))
+                conn.commit()
+            self.logger.info("Recorded progress snapshot for [%s]: changes=%s, chars=%d", 
+                             project_name, had_changes, delta_char_count)
+        except sqlite3.Error as e:
+            self.logger.error("Failed to add progress snapshot for %s: %s", project_name, str(e))
+
+    # ==========================================
     # PROJECT STATE METHODS (For Core Agents)
     # ==========================================
     def add_project(self, project_name: str, email: str):
@@ -135,7 +186,7 @@ class DatabaseManager:
     def update_project_state(self, project_name: str, **kwargs):
         """
         Dynamically updates any column in the project_state table.
-        Example: db.update_project_state("Project A", last_seen_text="New text", stanford_status="REVIEWED")
+        Example: db.update_project_state("Project A", last_seen_text="New text", supervisor_email="x@x.com")
         """
         if not kwargs:
             return
@@ -172,8 +223,7 @@ class DatabaseManager:
     def migrate_from_json(self, json_path: str):
         """
         Safely migrate projects from a legacy researchers_map.json file into the
-        `project_state` table. This operation is idempotent (uses INSERT OR IGNORE
-        in add_project) and will not raise on missing or malformed input.
+        `project_state` table. This operation is idempotent.
         """
         if not json_path:
             self.logger.info("No json_path provided to migrate_from_json(). Skipping.")
@@ -191,15 +241,12 @@ class DatabaseManager:
             return
 
         def _process_entry(project_name, val):
-            # Determine email from several possible shapes
             email = None
             if isinstance(val, str):
                 email = val
             elif isinstance(val, dict):
-                # try common keys
                 email = val.get('researcher_email') or val.get('ResearcherEmail') or val.get('email')
             elif isinstance(val, list):
-                # list of emails or objects — pick first plausible
                 for item in val:
                     if isinstance(item, str):
                         email = item
@@ -215,17 +262,13 @@ class DatabaseManager:
             try:
                 self.add_project(project_name, email)
             except Exception as e:
-                # Never crash migration; log and continue
                 self.logger.error("Failed to add migrated project %s: %s", project_name, str(e))
 
-        # Support several top-level shapes for backwards compatibility
         try:
             if isinstance(data, dict):
-                # If dict maps project_name -> email or -> object
                 for proj, val in data.items():
                     _process_entry(proj, val)
             elif isinstance(data, list):
-                # A list of records; try to extract project_name and email
                 for record in data:
                     if isinstance(record, dict):
                         proj = record.get('project_name') or record.get('project') or record.get('name')
