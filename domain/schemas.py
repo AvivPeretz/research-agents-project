@@ -1,6 +1,10 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Literal
 
+# ==========================================
+# Literature Research Agent Schemas
+# ==========================================
+
 class PaperData(BaseModel):
     """
     Data contract representing a single academic paper's extracted metrics.
@@ -38,4 +42,47 @@ class LiteratureReport(BaseModel):
     Must contain a textual summary and a list of structured paper data.
     """
     summary: str = Field(..., min_length=50, description="A detailed markdown summary of the research findings.")
-    papers: list[PaperData] = Field(..., min_length=1, description="List of structured data for each analyzed paper.")
+    papers: list[PaperData] = Field(..., min_length=1, description="List of structured data for each analyzed paper.") 
+
+
+# ==========================================
+# Supervisor Status Agent Schemas (NEW)
+# ==========================================
+
+class ProjectEvaluation(BaseModel):
+    """
+    Data contract for a single student's progress evaluation.
+    Forces the LLM to choose a strict status and provide actionable insights.
+    """
+    project_name: str
+    student_name: str = "Unknown Student"
+    
+    # Strict behavioral classification
+    status: Literal["ON_TRACK", "NEEDS_ATTENTION", "STALLED"] = Field(
+        ..., 
+        description="The calculated status based strictly on the activity metrics."
+    )
+    
+    rationale: str = Field(
+        ..., 
+        description="A concise 1-2 sentence explanation justifying the chosen status based on the data."
+    )
+    
+    action_item: str = Field(
+        ..., 
+        description="A recommended next step for the supervisor (e.g., 'Schedule a quick check-in', 'No action needed')."
+    )
+
+class SupervisorReport(BaseModel):
+    """
+    The main contract for the Supervisor Status Agent's output.
+    Returns a consolidated report of all projects under a single supervisor.
+    """
+    executive_summary: str = Field(
+        ..., 
+        description="A brief 2-3 sentence overview summarizing the general health of the supervisor's lab/students."
+    )
+    evaluations: list[ProjectEvaluation] = Field(
+        ..., 
+        description="A list containing the specific evaluations for each project."
+    )
