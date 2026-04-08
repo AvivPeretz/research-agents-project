@@ -4,7 +4,7 @@ import logging
 import logging.handlers
 from abc import ABC, abstractmethod
 from groq import Groq
-import google.generativeai as genai
+from google import genai
 from openai import OpenAI
 
 # Import the centralized configuration
@@ -67,9 +67,8 @@ class BaseAgent(ABC):
         gemini_key = getattr(Config, 'GEMINI_API_KEY', None) 
         if gemini_key:
             try:
-                genai.configure(api_key=gemini_key)
-                gemini_model_name = getattr(Config, 'GEMINI_MODEL_NAME', 'gemini-1.5-flash')
-                self.gemini_model = genai.GenerativeModel(gemini_model_name)
+                self.gemini_client = genai.Client(api_key=gemini_key)
+                self.gemini_model_name = getattr(Config, 'GEMINI_MODEL_NAME', 'gemini-1.5-flash')
                 self.gemini_available = True
                 self.logger.info("Fallback 1 (Gemini) configured successfully.")
             except Exception as e:
@@ -100,7 +99,10 @@ class BaseAgent(ABC):
         elif provider_name == "gemini":
             if not getattr(self, 'gemini_available', False):
                 raise ValueError("Gemini is not configured.")
-            response = self.gemini_model.generate_content(prompt)
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_model_name,
+                contents=prompt,
+            )
             return response.text
             
         elif provider_name == "openai":
