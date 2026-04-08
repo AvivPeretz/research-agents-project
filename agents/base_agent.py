@@ -4,7 +4,8 @@ import logging
 import logging.handlers
 from abc import ABC, abstractmethod
 from groq import Groq
-import google.generativeai as genai  
+import google.generativeai as genai
+from openai import OpenAI
 
 # Import the centralized configuration
 from config import Config
@@ -13,7 +14,7 @@ class BaseAgent(ABC):
     """
     Abstract base class for all agents in the project.
     Provides common functionality like logging and LLM integration.
-    Features a Multi-LLM Waterfall strategy (Primary -> Fallback) with built-in retries.
+    Features a Multi-LLM Waterfall strategy (Groq -> Gemini -> OpenAI) with built-in retries.
     """
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
@@ -22,10 +23,6 @@ class BaseAgent(ABC):
         self.logger.info("Agent '%s' initialized.", self.agent_name)
 
     def _setup_logger(self):
-        """
-        Configure internal logging to track agent activities.
-        Outputs to BOTH the console and a dedicated rotating log file.
-        """
         logger = logging.getLogger(self.agent_name)
         logger.setLevel(logging.INFO)
         
@@ -55,33 +52,39 @@ class BaseAgent(ABC):
     def _setup_llm(self):
         """
         Initialize connections to LLM providers.
-        Sets up Groq as the Primary provider and Gemini as the Fallback.
+        Sets up Groq as Primary, Gemini as Fallback 1, and OpenAI as Fallback 2.
         """
-        # 1. Setup Groq (Primary)
+        # 1. Setup Groq (Primary - MUST EXIST)
         groq_key = Config.GROQ_API_KEY
         if not groq_key:
             self.logger.error("GROQ_API_KEY not found. Primary LLM cannot start.")
             raise ValueError("API Key is missing. Please check your .env file.")
-        
         self.groq_client = Groq(api_key=groq_key)
         self.logger.info("Primary LLM (Groq) configured successfully.")
 
-        # 2. Setup Gemini (Fallback)
+        # 2. Setup Gemini (Fallback 1)
         self.gemini_available = False
-        # Using getattr to prevent crashes if Config wasn't fully updated yet
         gemini_key = getattr(Config, 'GEMINI_API_KEY', None) 
-        
         if gemini_key:
             try:
                 genai.configure(api_key=gemini_key)
                 gemini_model_name = getattr(Config, 'GEMINI_MODEL_NAME', 'gemini-1.5-flash')
                 self.gemini_model = genai.GenerativeModel(gemini_model_name)
                 self.gemini_available = True
-                self.logger.info("Fallback LLM (Gemini) configured successfully.")
+                self.logger.info("Fallback 1 (Gemini) configured successfully.")
             except Exception as e:
                 self.logger.warning("Failed to configure Gemini Fallback: %s", str(e))
-        else:
-            self.logger.warning("GEMINI_API_KEY not found. Running WITHOUT fallback LLM protection.")
+
+        # 3. Setup OpenAI (Fallback 2)
+        self.openai_available = False
+        openai_key = getattr(Config, 'OPENAI_API_KEY', None)
+        if openai_key:
+            try:
+                self.openai_client = OpenAI(api_key=openai_key)
+                self.openai_available = True
+                self.logger.info("Fallback 2 (OpenAI) configured successfully.")
+            except Exception as e:
+                self.logger.warning("Failed to configure OpenAI Fallback: %s", str(e))
 
     def _ask_provider(self, provider_name: str, prompt: str) -> str:
         """
@@ -100,21 +103,31 @@ class BaseAgent(ABC):
             response = self.gemini_model.generate_content(prompt)
             return response.text
             
+        elif provider_name == "openai":
+            if not getattr(self, 'openai_available', False):
+                raise ValueError("OpenAI is not configured.")
+            response = self.openai_client.chat.completions.create(
+                model=getattr(Config, 'OPENAI_MODEL_NAME', 'gpt-4o-mini'),
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content
+            
         else:
             raise ValueError(f"Unknown LLM provider requested: {provider_name}")
 
     def ask_llm(self, prompt: str) -> str:
         """
         Sends a prompt using a Multi-LLM Waterfall strategy.
-        Attempts Primary (Groq). If it fails after all retries, fails over to Fallback (Gemini).
-        Raises RuntimeError only if ALL providers completely fail.
+        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> OpenAI) if available.
         """
         max_retries = Config.LLM_MAX_RETRIES
         
-        # Define the waterfall order
+        # Build the dynamic waterfall
         providers_waterfall = ["groq"]
         if getattr(self, 'gemini_available', False):
             providers_waterfall.append("gemini")
+        if getattr(self, 'openai_available', False):
+            providers_waterfall.append("openai")
 
         for provider in providers_waterfall:
             self.logger.info("Routing request to LLM provider: [%s]", provider.upper())
@@ -124,43 +137,32 @@ class BaseAgent(ABC):
                     if attempt > 0:
                         self.logger.info("Retrying [%s] (Attempt %d/%d)...", provider.upper(), attempt + 1, max_retries)
                     
-                    # Unified call through the adapter
                     content = self._ask_provider(provider, prompt)
                     
                     # --- Defensive Checks ---
                     if content is None or not content.strip():
                         raise ValueError(f"{provider.upper()} returned an empty or None response.")
-                    
                     if content.strip().startswith("Error:"):
                         raise ValueError(f"{provider.upper()} hallucinated an error string: {content}")
                     
-                    # Success! Return the content immediately.
                     return content
                     
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
-                    
                     if attempt < max_retries - 1:
                         sleep_time = 2 ** (attempt + 1)
-                        self.logger.info("Backing off %d seconds before retrying [%s]...", sleep_time, provider.upper())
                         time.sleep(sleep_time)
                     else:
                         self.logger.error("Max retries reached for provider [%s]. Exhausted.", provider.upper())
-                        break # Break the retry loop to fall back to the next provider
+                        break 
                         
-            # If the code reaches here, the current provider completely failed.
             if provider != providers_waterfall[-1]:
                 self.logger.warning("Initiating LLM Fallback: Switching from [%s] to next provider...", provider.upper())
             else:
                 self.logger.error("All available LLM providers have been exhausted.")
 
-        # If the loop finishes and no provider succeeded
         raise RuntimeError("CRITICAL: Failed to communicate with any LLM provider after evaluating all fallbacks.")
 
     @abstractmethod
     def run(self):
-        """
-        The main execution flow of the agent.
-        Must be implemented by all subclasses.
-        """
         pass
