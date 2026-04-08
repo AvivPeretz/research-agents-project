@@ -35,6 +35,8 @@ class Config:
     # 3. LLM Configuration (Groq)
     # ==========================================
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL_NAME = "gemini-1.5-flash"
     LLM_MODEL_NAME = "llama-3.3-70b-versatile"
     LLM_MAX_RETRIES = 3
     LLM_TIMEOUT_SECONDS = 30
