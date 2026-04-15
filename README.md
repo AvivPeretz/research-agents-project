@@ -10,6 +10,20 @@ formatted email reports.
 
 ---
 
+## 📋 Table of Contents
+
+- [Features & Architecture](#-features--architecture)
+- [Project Structure](#-project-structure)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+- [Configuration](#-configuration)
+- [Usage & CLI](#-usage--command-line-interface-cli)
+- [Agent Reference](#-agent-reference)
+- [Troubleshooting](#-troubleshooting)
+- [Roadmap](#-roadmap)
+
+---
+
 ## 🌟 Features & Architecture
 
 The system is built on a modular, scalable architecture separating data ingestion from LLM
@@ -95,6 +109,326 @@ internal notifications, successfully bypassing strict institutional SMTP blocks.
 
 ---
 
+## 📁 Project Structure
+
+```
+research-agents/
+├── agents/
+│   ├── __init__.py
+│   ├── base_agent.py               # Abstract base class: logging, Multi-LLM waterfall
+│   ├── literature_research_agent.py
+│   ├── progress_tracking_agent.py
+│   ├── research_enhancement_agent.py
+│   ├── supervisor_status_agent.py
+│   └── notification_agent.py
+├── ingestion/
+│   └── data_ingestion_agent.py     # Overleaf Delta Sync via Playwright
+├── domain/
+│   └── schemas.py                  # Pydantic contracts for all LLM outputs
+├── utils/
+│   ├── __init__.py
+│   ├── database_manager.py         # SQLite single source of truth
+│   ├── library_manager.py          # File I/O: Markdown, CSV, directories
+│   ├── literature_fetcher.py       # Semantic Scholar API + Google Scholar fallback
+│   ├── overleaf_connector.py       # LaTeX → plain text via RegEx
+│   └── garbage_collector.py        # TTL-based .md file cleanup
+├── research_library/               # Generated output (gitignored)
+│   ├── literature_reviews/
+│   ├── project_tracking/
+│   ├── project_enhancement/
+│   ├── comparison_tables/
+│   └── system.db                   # SQLite database
+├── overleaf_projects/              # Downloaded .tex + PDF files (gitignored)
+├── logs/                           # Rotating log files (gitignored)
+├── config.py                       # Centralized configuration class
+├── main.py                         # Orchestrator + argparse CLI
+├── requirements.txt
+├── .env.example                    # Template — copy to .env and fill in
+└── .gitignore
+```
+
+---
+
+## ✅ Prerequisites
+
+Before installing, make sure the following are available on your machine:
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.10+ | [python.org](https://www.python.org/downloads/) |
+| pip | Latest | Bundled with Python |
+| Git | Any | For cloning the repository |
+| Google Chrome | Latest | Used by Playwright for browser automation |
+| A Groq API Key | Free | [console.groq.com](https://console.groq.com) — **required** |
+| A Gmail Account | Any | Used as the SMTP relay for sending emails |
+| Gmail App Password | — | See [Configuration](#-configuration) section below |
+| An Overleaf Account | Free/Pro | Your university Overleaf account |
+
+> **Note:** Gemini and OpenAI API keys are **optional**. They are used as automatic LLM
+> fallbacks if Groq is unavailable. The system will run correctly with only Groq configured.
+
+---
+
+## 🚀 Installation
+
+### Step 1 — Clone the Repository
+
+```bash
+git clone https://github.com/<your-username>/research-agents.git
+cd research-agents
+```
+
+### Step 2 — Create a Virtual Environment *(Strongly Recommended)*
+
+```bash
+# Create the environment
+python -m venv venv
+
+# Activate it — macOS / Linux
+source venv/bin/activate
+
+# Activate it — Windows (PowerShell)
+.\venv\Scripts\Activate.ps1
+```
+
+### Step 3 — Install Python Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### Step 4 — Install Playwright Browsers
+
+Playwright requires a one-time download of the Chromium browser engine.
+
+```bash
+playwright install chromium
+```
+
+> If you encounter permission errors on Linux, run:
+> `playwright install --with-deps chromium`
+
+### Step 5 — Configure Environment Variables
+
+Copy the provided template file and fill in your credentials:
+
+```bash
+cp .env.example .env
+```
+
+Then open `.env` in any text editor and fill in your values.
+See the full [Configuration](#-configuration) section below for details on each variable.
+
+### Step 6 — Verify Installation
+
+Run a quick sanity check to confirm everything is connected:
+
+```bash
+# Test only the Literature Agent on a specific project
+python main.py --agent literature --project "Your_Project_Name"
+```
+
+If you see log output and no `ValueError` on startup, the installation is successful.
+
+---
+
+## ⚙️ Configuration
+
+All credentials and settings are managed through a `.env` file in the project root.
+**Never commit this file to Git.** It is already listed in `.gitignore`.
+
+### Creating Your `.env` File
+
+```bash
+cp .env.example .env
+```
+
+### Variables Reference
+
+```dotenv
+# ============================================================
+# LLM PROVIDERS
+# ============================================================
+
+# [REQUIRED] Primary LLM — Free tier at console.groq.com
+GROQ_API_KEY=gsk_...
+
+# [OPTIONAL] Fallback LLM #1 — Free tier at aistudio.google.com
+GEMINI_API_KEY=AIza...
+
+# [OPTIONAL] Fallback LLM #2 — Paid, at platform.openai.com
+OPENAI_API_KEY=sk-...
+
+
+# ============================================================
+# EMAIL — GMAIL RELAY (Sender Account)
+# ============================================================
+# This is a Gmail account used ONLY for sending notification emails.
+# It does NOT need to be your university email.
+# Recommendation: create a dedicated dummy Gmail account for this.
+
+NOTIFICATION_SENDER_EMAIL=your-relay@gmail.com
+NOTIFICATION_SENDER_PASSWORD=xxxx xxxx xxxx xxxx
+# ↑ This is a Gmail App Password (16 chars with spaces), NOT your Gmail login password.
+# To generate one: Google Account → Security → 2-Step Verification → App Passwords
+
+
+# ============================================================
+# OVERLEAF / UNIVERSITY ACCOUNT (Receiver Account)
+# ============================================================
+# This is your university email connected to Overleaf.
+# Used for: logging into Overleaf and receiving Stanford review tokens.
+
+OVERLEAF_EMAIL=your.name@university.edu
+OVERLEAF_PASSWORD=your-overleaf-password
+```
+
+### How to Generate a Gmail App Password
+
+1. Go to your [Google Account](https://myaccount.google.com)
+2. Navigate to **Security** → **2-Step Verification** (must be enabled)
+3. Scroll down to **App Passwords**
+4. Select app: **Mail**, device: **Other** → type "ResearchAgents"
+5. Copy the 16-character password into `NOTIFICATION_SENDER_PASSWORD`
+
+> **Important:** Use the App Password exactly as shown, including spaces.
+
+---
+
+## 🖥️ Usage & Command Line Interface (CLI)
+
+The system includes a powerful built-in CLI using `argparse` for fine-grained control
+over which agents and projects are executed.
+
+### 1. Basic Execution — Run Everything
+
+Runs all agents across all active projects found in the `overleaf_projects/` directory.
+
+```bash
+python main.py
+```
+
+> On the **first run**, the Data Ingestion Agent will open a visible browser window and
+> ask you to log into Overleaf manually (to handle reCAPTCHA). After a successful login,
+> the session is saved and all subsequent runs are fully automated.
+
+---
+
+### 2. Run a Specific Agent
+
+Use the `--agent` flag to isolate a single phase. Useful during development and testing.
+
+| Value | Description |
+|---|---|
+| `all` | Run the full pipeline *(default)* |
+| `ingestion` | Phase 0 — Download new/modified Overleaf projects |
+| `literature` | Phase 1 — Fetch and summarize related papers |
+| `progress` | Phase 2 — Analyze manuscript delta and provide feedback |
+| `enhancement` | Phase 3 — Upload to Stanford peer-review and collect results |
+| `gc` | Garbage collector — delete Markdown files older than 30 days |
+
+```bash
+# Run only the Literature Research Agent
+python main.py --agent literature
+
+# Run only the Garbage Collector
+python main.py --agent gc
+```
+
+---
+
+### 3. Target a Specific Project
+
+Use `--project` to process a single project, ignoring all others.
+Enclose the project name in quotes if it contains spaces.
+
+```bash
+python main.py --project "My_Thesis"
+```
+
+---
+
+### 4. Combined Execution — The Recommended Workflow
+
+Combine `--agent` and `--project` for precise, targeted runs.
+This is the optimal pattern during development and debugging.
+
+```bash
+# Run only the Progress Tracking Agent for a specific project
+python main.py --agent progress --project "My_Thesis"
+
+# Run only the Literature Agent for a specific project
+python main.py --agent literature --project "Physics_Lab_1"
+
+# Run the full pipeline on one project only
+python main.py --project "Physics_Lab_1"
+```
+
+---
+
+### 5. Help Menu
+
+```bash
+python main.py --help
+```
+
+---
+
+## 🤖 Agent Reference
+
+### First-Time Setup: Overleaf Login
+
+The `DataIngestionAgent` requires a one-time manual login to Overleaf to create a persistent
+browser session. This only needs to be done once (or when the session expires):
+
+```bash
+python main.py --agent ingestion
+```
+
+A browser window will open automatically. Log in with your Overleaf credentials and solve
+the reCAPTCHA if prompted. Once you reach the Overleaf dashboard, the session is saved
+to `overleaf_state.json` (gitignored) and the browser will close. All future runs will
+use the saved session silently.
+
+---
+
+### Registering a Project and Researcher Email
+
+For the system to correctly route email notifications to the right researcher, each
+project must be associated with an email address in the SQLite database.
+
+Create or edit `researchers_map.json` in the project root using this format:
+
+```json
+{
+  "My_Thesis": "student.name@university.edu",
+  "Physics_Lab_1": "another.student@university.edu"
+}
+```
+
+On the next run, `main.py` will automatically migrate this data into the database.
+This step only needs to be done once per project. After migration, you can delete the
+JSON file — the database is the live source of truth.
+
+---
+
+### Checking Logs
+
+Each agent writes to its own rotating log file inside the `logs/` directory:
+
+```
+logs/
+├── LiteratureResearchAgent.log
+├── ProgressTrackingAgent.log
+├── ResearchEnhancementAgent.log
+├── NotificationAgent.log
+└── DatabaseManager.log
+```
+
+Log files are automatically rotated at 5MB and up to 3 backups are kept per agent.
+
+---
+
 ## 🛠️ Utility Modules & Infrastructure
 
 * **Multi-LLM Waterfall Strategy:** The `BaseAgent` incorporates a dynamic fallback
@@ -140,47 +474,51 @@ internal notifications, successfully bypassing strict institutional SMTP blocks.
 
 ---
 
-## 🚀 Usage & Command Line Interface (CLI)
+## 🔧 Troubleshooting
 
-The system includes a powerful, built-in CLI using `argparse` to allow fine-grained control
-over which agents and projects are executed. This is highly useful for development,
-debugging, and targeted runs.
+### `ValueError: Missing required environment variables`
+Your `.env` file is missing one or more required keys. Open `.env` and verify that
+`GROQ_API_KEY`, `NOTIFICATION_SENDER_EMAIL`, `NOTIFICATION_SENDER_PASSWORD`,
+`OVERLEAF_EMAIL`, and `OVERLEAF_PASSWORD` are all filled in.
 
-### 1. Basic Execution (Run Everything)
-By default, running the script will execute **all agents** across **all active projects**
-found in the `overleaf_projects/` directory.
+### `playwright._impl._errors.Error: Executable doesn't exist`
+You skipped the Playwright browser installation step. Run:
 ```bash
-python main.py
+playwright install chromium
 ```
 
-### 2. Run a Specific Agent *(Great for Debugging)*
-To isolate a specific task and save time, use the `--agent` flag.
+### `SMTPAuthenticationError` when sending emails
+Your Gmail App Password is incorrect or 2-Step Verification is not enabled on the
+sending Gmail account. Regenerate the App Password from your Google Account settings.
 
-Available options: `all`, `ingestion`, `literature`, `progress`, `enhancement`, `gc`.
+### The browser opens but the login times out
+You have 90 seconds to complete the Overleaf login manually. If the reCAPTCHA takes
+longer, re-run `python main.py --agent ingestion` to get a fresh 90-second window.
 
-```bash
-# Example: Run only the Literature Research Agent
-python main.py --agent literature
-```
+### `No valid projects found matching '...'`
+The project name you passed via `--project` does not match any folder inside
+`overleaf_projects/`. Project names are case-sensitive and must match exactly.
+Run without `--project` first to let the ingestion agent download the project.
 
-### 3. Target a Specific Project
-To execute the entire pipeline for a single project (ignoring all others in the workspace),
-use the `--project` flag. Enclose the project name in quotes if it contains spaces.
+### Groq rate limit errors
+The free Groq tier has per-minute token limits. The system will automatically retry
+with exponential backoff. If it exhausts all retries, configure a Gemini or OpenAI
+API key as a fallback in your `.env` file.
 
-```bash
-python main.py --project "Physics_Lab_1"
-```
+---
 
-### 4. The Sweet Spot — Combined Execution
-Combine flags to run a specific agent on a specific project. This is the optimal workflow
-for targeted updates or testing a specific component.
+## 🗺️ Roadmap
 
-```bash
-# Example: Run only the Progress Tracking Agent for "My Thesis"
-python main.py --agent progress --project "My Thesis"
-```
-
-### 5. The Cheat Sheet (Help Menu)
-```bash
-python main.py --help
-```
+- [ ] **Docker containerization** — Package the system into a Docker image with persistent
+  volumes for the SQLite database and downloaded project files.
+- [ ] **Scheduled execution** — Replace manual CLI triggers with a cron-based or
+  APScheduler-based autonomous scheduler (e.g., literature search daily, progress
+  tracking every 8 hours, supervisor report weekly).
+- [ ] **Web Dashboard** — A local intranet Streamlit/Flask UI for lab managers to
+  visualize `progress_snapshots` as velocity graphs and manage project/researcher
+  assignments without CLI access.
+- [ ] **Internal peer-review pipeline** — Replace the Stanford `paperreview.ai` dependency
+  with a self-contained review pipeline powered by multi-query arXiv and Semantic Scholar
+  searches, grounded in the same 7-dimension evaluation framework.
+- [ ] **Microservices migration** — Split agents into independently deployable services
+  communicating over a message queue (e.g., RabbitMQ or Redis Streams).
