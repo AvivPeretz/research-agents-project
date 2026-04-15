@@ -19,6 +19,9 @@ formatted email reports.
 - [Configuration](#-configuration)
 - [Usage & CLI](#-usage--command-line-interface-cli)
 - [Agent Reference](#-agent-reference)
+  - [First-Time Overleaf Login](#first-time-setup-overleaf-login)
+  - [Stanford Email Forwarding Rule](#setting-up-the-stanford-review-email-forwarding-rule)
+  - [Registering Projects](#registering-a-project-and-researcher-email)
 - [Troubleshooting](#-troubleshooting)
 - [Roadmap](#-roadmap)
 
@@ -389,6 +392,45 @@ A browser window will open automatically. Log in with your Overleaf credentials 
 the reCAPTCHA if prompted. Once you reach the Overleaf dashboard, the session is saved
 to `overleaf_state.json` (gitignored) and the browser will close. All future runs will
 use the saved session silently.
+
+---
+
+### Setting Up the Stanford Review Email Forwarding Rule
+
+The Research Enhancement Agent (`--agent enhancement`) relies on a **two-account email
+architecture** to retrieve peer-review results from Stanford's `paperreview.ai`:
+
+1. The system submits the manuscript PDF to Stanford along with your **university email address**.
+2. Stanford sends the access token **only to that university email** (institutional emails only).
+3. The agent polls your **Gmail account** via IMAP to extract the token and fetch the review.
+
+For step 3 to work, you must configure an **automatic forwarding rule** on your university
+inbox that forwards Stanford's emails to your Gmail relay account. This is a one-time manual
+setup.
+
+#### Instructions for Microsoft 365 (Outlook Web)
+
+1. Log in to your university email at [outlook.office.com](https://outlook.office.com)
+2. Click the **Settings** gear icon (top-right) → **View all Outlook settings**
+3. Navigate to **Mail** → **Rules**
+4. Click **Add new rule** and configure it as follows:
+
+| Field | Value |
+|---|---|
+| Rule name | `Forward Stanford Review to Gmail` |
+| Condition | **From** contains `paperreview.ai` |
+| Action | **Forward to** → `your-relay@gmail.com` |
+
+5. Click **Save**. The rule is now active and requires no further maintenance.
+
+> **Why is this necessary?** Stanford's `paperreview.ai` only sends review access tokens
+> to institutional (non-Gmail) email addresses. The university's Microsoft 365 environment
+> blocks automated IMAP access from external scripts. The forwarding rule bridges both
+> constraints: Stanford's email lands in the university inbox and is immediately forwarded
+> to the Gmail account where the agent can read it programmatically.
+
+> **Security note:** The Gmail account receiving these forwarded emails should be the
+> same account configured in `NOTIFICATION_SENDER_EMAIL` in your `.env` file.
 
 ---
 
