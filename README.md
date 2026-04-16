@@ -16,6 +16,8 @@ formatted email reports.
 - [Project Structure](#-project-structure)
 - [Prerequisites](#-prerequisites)
 - [Installation](#-installation)
+  - [Option A — Automated Setup](#-option-a--automated-setup-recommended)
+  - [Option B — Manual Setup](#-option-b--manual-setup)
 - [Configuration](#-configuration)
 - [Usage & CLI](#-usage--command-line-interface-cli)
 - [Agent Reference](#-agent-reference)
@@ -174,14 +176,40 @@ Before installing, make sure the following are available on your machine:
 
 ## 🚀 Installation
 
-### Step 1 — Clone the Repository
+Start by cloning the repository — this is required for both installation methods below.
 
 ```bash
 git clone https://github.com/<your-username>/research-agents.git
 cd research-agents
 ```
 
-### Step 2 — Create a Virtual Environment *(Strongly Recommended)*
+Choose one of the two installation methods:
+
+---
+
+### ⚡ Option A — Automated Setup (Recommended)
+
+A single script handles everything: virtual environment creation, dependency installation,
+Playwright browser download, and `.env` file creation.
+
+```bash
+bash setup.sh
+```
+
+The script will print clear progress for each step and tell you exactly what to do next.
+Once it finishes, skip ahead to the [Configuration](#-configuration) section to fill in
+your credentials.
+
+> **Windows users:** Run the script inside **Git Bash** (included with Git for Windows),
+> not PowerShell or Command Prompt.
+
+---
+
+### 🔧 Option B — Manual Setup
+
+Follow these steps if you prefer full control over the installation process.
+
+#### Step 1 — Create a Virtual Environment
 
 ```bash
 # Create the environment
@@ -194,15 +222,19 @@ source venv/bin/activate
 .\venv\Scripts\Activate.ps1
 ```
 
-### Step 3 — Install Python Dependencies
+> **Important:** Always activate the virtual environment before running any project command.
+> You will need to re-activate it every time you open a new terminal session.
+
+#### Step 2 — Install Python Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4 — Install Playwright Browsers
+#### Step 3 — Install Playwright Browser
 
-Playwright requires a one-time download of the Chromium browser engine.
+Playwright requires a one-time download of the Chromium browser engine used for
+Overleaf automation and web scraping.
 
 ```bash
 playwright install chromium
@@ -211,23 +243,18 @@ playwright install chromium
 > If you encounter permission errors on Linux, run:
 > `playwright install --with-deps chromium`
 
-### Step 5 — Configure Environment Variables
-
-Copy the provided template file and fill in your credentials:
+#### Step 4 — Create Your `.env` File
 
 ```bash
 cp .env.example .env
 ```
 
-Then open `.env` in any text editor and fill in your values.
-See the full [Configuration](#-configuration) section below for details on each variable.
+Then open `.env` in any text editor and fill in your credentials.
+See the [Configuration](#-configuration) section below for a full explanation of each field.
 
-### Step 6 — Verify Installation
-
-Run a quick sanity check to confirm everything is connected:
+#### Step 5 — Verify the Installation
 
 ```bash
-# Test only the Literature Agent on a specific project
 python main.py --agent literature --project "Your_Project_Name"
 ```
 
