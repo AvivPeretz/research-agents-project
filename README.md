@@ -197,11 +197,35 @@ bash setup.sh
 ```
 
 The script will print clear progress for each step and tell you exactly what to do next.
-Once it finishes, skip ahead to the [Configuration](#-configuration) section to fill in
-your credentials.
+Once it finishes, come back here and continue with the two remaining steps below.
 
 > **Windows users:** Run the script inside **Git Bash** (included with Git for Windows),
 > not PowerShell or Command Prompt.
+
+#### Step A1 — Fill In Your Credentials
+
+Open the `.env` file that was just created and fill in your values.
+See the [Configuration](#-configuration) section below for a full explanation of each field.
+
+```bash
+nano .env   # or open in any text editor
+```
+
+#### Step A2 — Register Your Project and Email
+
+Create a file named `researchers_map.json` in the project root. This tells the system
+which Overleaf project belongs to which researcher, so email notifications are routed
+correctly.
+
+```json
+{
+  "Your_Overleaf_Project_Name": "your.name@university.edu"
+}
+```
+
+> The project name must match **exactly** the name shown on your Overleaf dashboard
+> (case-sensitive, spaces included). On the first run, this file is automatically
+> imported into the database. It is only needed once.
 
 ---
 
@@ -252,10 +276,26 @@ cp .env.example .env
 Then open `.env` in any text editor and fill in your credentials.
 See the [Configuration](#-configuration) section below for a full explanation of each field.
 
-#### Step 5 — Verify the Installation
+#### Step 5 — Register Your Project and Email
+
+Create a file named `researchers_map.json` in the project root. This tells the system
+which Overleaf project belongs to which researcher, so email notifications are routed
+correctly.
+
+```json
+{
+  "Your_Overleaf_Project_Name": "your.name@university.edu"
+}
+```
+
+> The project name must match **exactly** the name shown on your Overleaf dashboard
+> (case-sensitive, spaces included). On the first run, this file is automatically
+> imported into the database. It is only needed once.
+
+#### Step 6 — Verify the Installation
 
 ```bash
-python main.py --agent literature --project "Your_Project_Name"
+python main.py --agent literature --project "Your_Overleaf_Project_Name"
 ```
 
 If you see log output and no `ValueError` on startup, the installation is successful.
