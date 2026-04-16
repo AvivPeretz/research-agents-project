@@ -52,15 +52,20 @@ echo ""
 # ── Step 1: Check Python version ─────────────────────────────
 print_header "Step 1 of 5 — Checking Python Version"
 
-if ! command -v python3 &>/dev/null; then
+# Detect correct python command (python3 on macOS/Linux, python on Windows)
+if command -v python3 &>/dev/null; then
+    PYTHON_CMD="python3"
+elif command -v python &>/dev/null; then
+    PYTHON_CMD="python"
+else
     print_error "Python 3 is not installed or not in your PATH."
     echo "Please install Python 3.10 or higher from https://www.python.org/downloads/"
     exit 1
 fi
 
-PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PYTHON_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)')
-PYTHON_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
+PYTHON_VERSION=$($PYTHON_CMD -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PYTHON_MAJOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.major)')
+PYTHON_MINOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.minor)')
 
 if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]; }; then
     print_error "Python $PYTHON_VERSION detected. This project requires Python 3.10 or higher."
@@ -78,7 +83,7 @@ if [ -d "venv" ]; then
     print_warning "A 'venv' folder already exists. Skipping creation."
 else
     print_step "Creating virtual environment in ./venv ..."
-    python3 -m venv venv
+    $PYTHON_CMD -m venv venv
     print_success "Virtual environment created."
 fi
 
