@@ -160,7 +160,7 @@ Before installing, make sure the following are available on your machine:
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Python | 3.10+ | [python.org](https://www.python.org/downloads/) |
+| Python | 3.10-3.13 (DO NOT USE 3.14.x) | [python.org](https://www.python.org/downloads/) |
 | pip | Latest | Bundled with Python |
 | Git | Any | For cloning the repository |
 | Google Chrome | Latest | Used by Playwright for browser automation |
