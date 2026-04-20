@@ -5,11 +5,7 @@
 # Compatible with: macOS, Linux, Windows (Git Bash)
 # Supported Python versions: 3.10, 3.11, 3.12, 3.13
 # =============================================================
-# Run this script once from the project root directory:
-#   bash setup.sh
-# =============================================================
 
-# ── Colors for terminal output ────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -17,7 +13,6 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ── Helper functions ──────────────────────────────────────────
 print_header() {
     echo ""
     echo -e "${BLUE}${BOLD}============================================${NC}"
@@ -31,7 +26,6 @@ print_success() { echo -e "${GREEN}✅ $1${NC}"; }
 print_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 print_error()   { echo -e "${RED}❌ $1${NC}"; }
 
-# ── Detect Operating System ───────────────────────────────────
 detect_os() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         OS="macos"
@@ -61,45 +55,67 @@ print_header "Step 1 of 5 — Checking Python Version"
 PYTHON_CMD=""
 PYTHON_VERSION=""
 
-# Try specific supported versions first, then fall back to generic commands
-CANDIDATES=("python3.13" "python3.12" "python3.11" "python3.10" "python3" "python")
+# Generic candidates (work on macOS/Linux)
+GENERIC_CANDIDATES=("python3.13" "python3.12" "python3.11" "python3.10" "python3" "python")
 
-for cmd in "${CANDIDATES[@]}"; do
-    if command -v "$cmd" &>/dev/null; then
+# Windows-specific full paths (for Git Bash where version-specific commands don't exist)
+WINDOWS_CANDIDATES=(
+    "/c/Users/$USERNAME/AppData/Local/Programs/Python/Python313/python.exe"
+    "/c/Users/$USERNAME/AppData/Local/Programs/Python/Python312/python.exe"
+    "/c/Users/$USERNAME/AppData/Local/Programs/Python/Python311/python.exe"
+    "/c/Users/$USERNAME/AppData/Local/Programs/Python/Python310/python.exe"
+    "/c/Program Files/Python313/python.exe"
+    "/c/Program Files/Python312/python.exe"
+    "/c/Program Files/Python311/python.exe"
+    "/c/Program Files/Python310/python.exe"
+)
+
+try_python() {
+    local cmd="$1"
+    if command -v "$cmd" &>/dev/null || [ -f "$cmd" ]; then
+        local MAJOR MINOR
         MAJOR=$("$cmd" -c 'import sys; print(sys.version_info.major)' 2>/dev/null)
         MINOR=$("$cmd" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null)
 
-        if [[ -z "$MAJOR" || -z "$MINOR" ]]; then
-            continue
-        fi
+        [[ -z "$MAJOR" || -z "$MINOR" ]] && return 1
 
-        # Reject Python 2
         if [[ "$MAJOR" -lt 3 ]]; then
-            continue
+            return 1
         fi
 
-        # Reject Python < 3.10
         if [[ "$MAJOR" -eq 3 && "$MINOR" -lt 10 ]]; then
-            print_warning "Found Python $MAJOR.$MINOR ($cmd) — version too old (minimum: 3.10)."
-            continue
+            print_warning "Found Python $MAJOR.$MINOR ($cmd) — too old (minimum: 3.10). Skipping."
+            return 1
         fi
 
-        # Reject Python 3.14+ (too new, dependencies not ready)
         if [[ "$MAJOR" -eq 3 && "$MINOR" -ge 14 ]]; then
-            print_warning "Found Python $MAJOR.$MINOR ($cmd) — version too new (maximum: 3.13)."
-            echo "  Please install Python 3.12 from https://www.python.org/downloads/"
-            echo "  During installation, check 'Add Python to PATH'."
-            echo "  After installing, close this terminal, open a new one, and run: bash setup.sh"
-            echo ""
-            continue
+            print_warning "Found Python $MAJOR.$MINOR ($cmd) — too new (maximum: 3.13). Skipping."
+            return 1
         fi
 
-        # Valid version found
         PYTHON_CMD="$cmd"
         PYTHON_VERSION="$MAJOR.$MINOR"
+        return 0
+    fi
+    return 1
+}
+
+# Try generic candidates first
+for cmd in "${GENERIC_CANDIDATES[@]}"; do
+    if try_python "$cmd"; then
         break
     fi
 done
+
+# If not found and on Windows, try full paths
+if [[ -z "$PYTHON_CMD" && "$OS" == "windows" ]]; then
+    print_step "Searching for Python in common Windows installation paths..."
+    for cmd in "${WINDOWS_CANDIDATES[@]}"; do
+        if try_python "$cmd"; then
+            break
+        fi
+    done
+fi
 
 if [[ -z "$PYTHON_CMD" ]]; then
     print_error "No compatible Python version found. Required: 3.10, 3.11, 3.12, or 3.13."
@@ -144,7 +160,6 @@ if [ ! -d "venv" ]; then
 fi
 
 print_step "Activating virtual environment..."
-
 if [[ "$OS" == "windows" ]]; then
     source venv/Scripts/activate
 else
@@ -162,7 +177,6 @@ print_success "Virtual environment activated."
 # ── Step 3: Install Python dependencies ──────────────────────
 print_header "Step 3 of 5 — Installing Python Dependencies"
 
-# Always install setuptools first — required by some packages on Python 3.12+
 print_step "Installing setuptools (required base dependency)..."
 pip install setuptools --quiet --upgrade
 
@@ -221,23 +235,15 @@ else
 # ============================================================
 # LLM PROVIDERS
 # ============================================================
-
-# [REQUIRED] Primary LLM — Free tier at console.groq.com
 GROQ_API_KEY=
-
-# [OPTIONAL] Fallback LLM #1 — Free tier at aistudio.google.com
 GEMINI_API_KEY=
-
-# [OPTIONAL] Fallback LLM #2 — Paid, at platform.openai.com
 OPENAI_API_KEY=
-
 
 # ============================================================
 # EMAIL — GMAIL RELAY (Sender Account)
 # ============================================================
 NOTIFICATION_SENDER_EMAIL=
 NOTIFICATION_SENDER_PASSWORD=
-
 
 # ============================================================
 # OVERLEAF / UNIVERSITY ACCOUNT (Receiver Account)
@@ -265,7 +271,6 @@ else
 fi
 echo ""
 echo "  2. Create your project mapping file (researchers_map.json):"
-echo "     Create a file named researchers_map.json in this folder with:"
 echo '     {'
 echo '       "Your_Overleaf_Project_Name": "your.email@university.edu"'
 echo '     }'
