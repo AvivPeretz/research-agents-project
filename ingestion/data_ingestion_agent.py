@@ -4,7 +4,7 @@ import zipfile
 import time
 import random
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth_sync
+
 
 # Import centralized configuration
 from config import Config
@@ -72,7 +72,7 @@ class DataIngestionAgent:
         page = context.new_page()
 
         # Apply stealth patches to mask navigator.webdriver and other bot signals
-        stealth_sync(page)
+        # stealth is handled via browser launch args (--disable-blink-features=AutomationControlled)
 
         return browser, context, page
 
@@ -160,7 +160,7 @@ class DataIngestionAgent:
                 accept_downloads=True,
             )
             page = context.new_page()
-            stealth_sync(page)
+            # stealth is handled via browser launch args (--disable-blink-features=AutomationControlled)
 
             try:
                 print("🌐 Navigating to dashboard...")
