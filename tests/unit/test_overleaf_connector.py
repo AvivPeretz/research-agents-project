@@ -10,72 +10,82 @@ class TestCleanLatex:
 
     def test_clean_latex_removes_comments(self):
         """Asserts that LaTeX comments (%) are removed from output."""
+        connector = OverleafConnector()
         input_text = "Some text % this is a comment\nMore text"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert "%" not in result
 
     def test_clean_latex_removes_usepackage(self):
         """Asserts that \\usepackage commands are removed from output."""
+        connector = OverleafConnector()
         input_text = r"Text \usepackage{amsmath} more text"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert r"\usepackage" not in result
 
     def test_clean_latex_removes_documentclass(self):
         """Asserts that \\documentclass commands are removed from output."""
+        connector = OverleafConnector()
         input_text = r"\documentclass{article} Some content"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert r"\documentclass" not in result
 
     def test_clean_latex_unwraps_textbf(self):
         """Asserts that \\textbf{text} is unwrapped to just text."""
+        connector = OverleafConnector()
         input_text = r"\textbf{Hello} world"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert "Hello" in result
         assert r"\textbf" not in result
 
     def test_clean_latex_unwraps_textit(self):
         """Asserts that \\textit{text} is unwrapped to just text."""
+        connector = OverleafConnector()
         input_text = r"\textit{World} of text"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert "World" in result
         assert r"\textit" not in result
 
     def test_clean_latex_removes_standalone_commands(self):
         """Asserts that \\maketitle and \\clearpage are removed."""
+        connector = OverleafConnector()
         input_text = r"Text \maketitle more \clearpage end"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert r"\maketitle" not in result
         assert r"\clearpage" not in result
 
     def test_clean_latex_removes_curly_braces(self):
         """Asserts that all curly braces { } are removed from output."""
+        connector = OverleafConnector()
         input_text = r"Text with {braces} and more"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert "{" not in result
         assert "}" not in result
 
     def test_clean_latex_collapses_multiple_blank_lines(self):
         """Asserts that multiple consecutive blank lines are collapsed to one."""
+        connector = OverleafConnector()
         input_text = "Line 1\n\n\n\nLine 2\n\n\nLine 3"
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert "\n\n\n" not in result
         assert "Line 1" in result
         assert "Line 2" in result
 
     def test_clean_latex_empty_input_returns_empty(self):
         """Asserts that empty string input returns empty string."""
-        result = OverleafConnector.clean_latex("")
+        connector = OverleafConnector()
+        result = connector.clean_latex_text("")
         assert result == ""
 
     def test_clean_latex_preserves_real_text(self):
         """Asserts that real paragraph text survives the cleaning process."""
+        connector = OverleafConnector()
         input_text = r"""
         Machine learning is a subfield of artificial intelligence.
         \usepackage{amsmath}
         % This is a comment
         \textbf{Deep learning} has revolutionized computer vision.
         """
-        result = OverleafConnector.clean_latex(input_text)
+        result = connector.clean_latex_text(input_text)
         assert "Machine learning" in result
         assert "artificial intelligence" in result
         assert "Deep learning" in result
@@ -87,8 +97,8 @@ class TestReadAndCleanTexFile:
 
     def test_read_and_clean_tex_file_success(self, temp_project_dir):
         """Asserts that reading and cleaning a valid tex file returns non-empty cleaned string."""
-        tex_path = str(temp_project_dir / "main.tex")
-        result = OverleafConnector.read_and_clean_tex_file(tex_path)
+        connector = OverleafConnector()
+        result = connector.read_and_clean_tex_file(str(temp_project_dir), "main.tex")
         assert result != ""
         assert isinstance(result, str)
         # Should not contain LaTeX directives
@@ -97,13 +107,14 @@ class TestReadAndCleanTexFile:
 
     def test_read_and_clean_tex_file_missing_file(self, tmp_path):
         """Asserts that reading a non-existent file returns empty string."""
-        non_existent_path = str(tmp_path / "nonexistent.tex")
-        result = OverleafConnector.read_and_clean_tex_file(non_existent_path)
+        connector = OverleafConnector()
+        result = connector.read_and_clean_tex_file(str(tmp_path), "nonexistent.tex")
         assert result == ""
 
     def test_read_and_clean_tex_file_empty_file(self, tmp_path):
         """Asserts that reading an empty tex file returns empty string."""
         empty_tex = tmp_path / "empty.tex"
         empty_tex.write_text("")
-        result = OverleafConnector.read_and_clean_tex_file(str(empty_tex))
+        connector = OverleafConnector()
+        result = connector.read_and_clean_tex_file(str(tmp_path), "empty.tex")
         assert result == ""
