@@ -10,7 +10,7 @@ class TestPlaywrightFailures:
 
     def test_overleaf_session_expired_triggers_relogin(self, db_in_memory, mock_notifier):
         """Asserts that session timeout triggers _perform_manual_login."""
-        from agents.overleaf_connector import OverleafConnector
+        from utils.overleaf_connector import OverleafConnector
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         with patch("playwright.sync_api.sync_playwright") as mock_pw:
