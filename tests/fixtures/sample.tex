@@ -1,0 +1,69 @@
+\documentclass[12pt]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+% This is a comment that should be removed during processing
+% LaTeX comments are prefixed with percent signs
+
+\title{Machine Learning Approaches to Network Traffic Classification in IoT Environments}
+\author{John Smith and Jane Doe}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper explores advanced techniques for classifying network traffic patterns in Internet of Things (IoT) environments using machine learning and deep learning methods. We propose a novel convolutional neural network architecture that achieves 96\% accuracy on standard benchmarks while maintaining computational efficiency suitable for edge devices with limited resources.
+\end{abstract}
+
+\section{Introduction}
+
+The rapid proliferation of Internet of Things devices has created unprecedented challenges in network management and cybersecurity. \textbf{Network traffic classification} is a critical component of modern network operations, enabling quality of service management, security threat detection, and resource optimization. Traditional rule-based approaches struggle with the complexity and volume of modern network data, making machine learning solutions increasingly attractive.
+
+This research addresses the fundamental problem of identifying application-layer protocols and traffic types from raw network packets. We leverage recent advances in deep learning, particularly convolutional neural networks (CNNs), to automatically learn hierarchical feature representations from packet data. Our approach demonstrates \textit{significant improvements} over existing methods in both accuracy and computational efficiency.
+
+\section{Related Work}
+
+Existing approaches to network traffic classification can be categorized into three main groups: port-based methods, payload-based methods, and machine learning approaches. Port-based classification has become increasingly unreliable as applications adopt dynamic port allocation and tunneling techniques.
+
+\textbf{Machine learning methods} have emerged as the most promising direction for traffic classification research. Recent work by Garcia-Teodoro et al. (2015) demonstrated that random forests and support vector machines can achieve high accuracy on network traffic datasets. However, these approaches require careful feature engineering and domain expertise.
+
+Deep learning methods, particularly convolutional neural networks, have shown remarkable success in image and signal processing tasks. The analogy between image pixels and network packet bytes suggests that CNN architectures may be naturally suited to packet classification tasks. Our work extends this intuition with a specifically designed architecture optimized for packet-level data.
+
+\section{Methodology}
+
+Our approach consists of three main phases: data collection and preprocessing, model architecture design, and comprehensive evaluation. We collected network traffic from multiple IoT devices operating in real production environments, including smart home sensors, industrial control systems, and healthcare monitoring devices.
+
+The data preprocessing phase involves standardizing packet lengths and applying appropriate normalization techniques to ensure neural network stability. We normalize raw byte values to the range [0, 1] and apply class balancing techniques to address the inherent class imbalance in network traffic datasets.
+
+\section{Experimental Results}
+
+Our proposed CNN architecture achieves 96\% overall accuracy on the benchmark dataset, with particularly strong performance on video streaming (98.2\%) and voice communication (97.5\%) classes. \textit{Computational requirements} are significantly reduced compared to baseline approaches, enabling real-time classification on edge devices.
+
+\begin{table}
+\centering
+\caption{Performance comparison across different architectures}
+\begin{tabular}{|c|c|c|}
+\hline
+Method & Accuracy & Runtime (ms/packet) \\
+\hline
+Port-based & 72.1\% & 0.1 \\
+Rule-based & 81.3\% & 2.5 \\
+Random Forest & 89.4\% & 15.2 \\
+SVM & 88.9\% & 12.8 \\
+Our CNN & 96.0\% & 8.3 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+
+We have presented a novel CNN-based approach for network traffic classification in IoT environments. The method achieves significant improvements over existing techniques while maintaining practical computational requirements for deployment on resource-constrained devices.
+
+\clearpage
+
+\end{document}
