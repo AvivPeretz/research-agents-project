@@ -38,8 +38,8 @@ class DataIngestionAgent:
         """
         page.click(selector)
         self._human_delay(300, 700)
-        for char in text:
-            page.type(selector, char, delay=random.uniform(60, 180))
+        page.locator(selector).fill(text)
+        self._human_delay(300, 700)
 
     def _build_stealth_context(self, playwright, headless: bool = None, accept_downloads: bool = False):
         """
@@ -63,7 +63,7 @@ class DataIngestionAgent:
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
+                "Chrome/135.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1440, "height": 900},
             locale="en-US",
@@ -152,7 +152,7 @@ class DataIngestionAgent:
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
+                    "Chrome/135.0.0.0 Safari/537.36"
                 ),
                 viewport={"width": 1440, "height": 900},
                 locale="en-US",

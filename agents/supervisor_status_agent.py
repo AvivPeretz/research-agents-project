@@ -64,9 +64,15 @@ class SupervisorStatusAgent(BaseAgent):
         # Calculate days since creation (to handle the "New Project" edge case)
         if created_at_str:
             try:
-                # Assuming SQLite default TIMESTAMP format: YYYY-MM-DD HH:MM:SS
-                created_dt = datetime.strptime(created_at_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
-                metrics["days_since_creation"] = (datetime.utcnow() - created_dt).days
+                created_dt = None
+                for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                    try:
+                        created_dt = datetime.strptime(created_at_str.split('.')[0], fmt)
+                        break
+                    except ValueError:
+                        continue
+                if created_dt:
+                    metrics["days_since_creation"] = (datetime.utcnow() - created_dt).days
             except Exception as e:
                 self.logger.warning("Could not parse created_at for %s: %s", project_name, str(e))
 

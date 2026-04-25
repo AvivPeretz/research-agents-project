@@ -13,7 +13,7 @@ class TestConfigValidation:
 
     def test_validate_passes_with_all_keys_present(self):
         """Asserts that Config.validate() does not raise when all required env vars are present."""
-        with patch.object(Config, 'GROQ_API_KEY', "test_key_123"), \
+        with patch.object(Config, 'GROQ_API_KEY', "gsk_test_key_123"), \
              patch.object(Config, 'NOTIFICATION_SENDER_EMAIL', "sender@example.com"), \
              patch.object(Config, 'NOTIFICATION_SENDER_PASSWORD', "pass123"), \
              patch.object(Config, 'OVERLEAF_EMAIL', "overleaf@example.com"), \

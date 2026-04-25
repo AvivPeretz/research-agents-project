@@ -51,7 +51,7 @@ class TestConfigFailures:
         """Asserts that validate() does not raise when all keys present."""
         from config import Config
 
-        with patch.object(Config, 'GROQ_API_KEY', "test_key"), \
+        with patch.object(Config, 'GROQ_API_KEY', "gsk_test_key"), \
              patch.object(Config, 'NOTIFICATION_SENDER_EMAIL', "sender@example.com"), \
              patch.object(Config, 'NOTIFICATION_SENDER_PASSWORD', "pass123"), \
              patch.object(Config, 'OVERLEAF_EMAIL', "overleaf@example.com"), \

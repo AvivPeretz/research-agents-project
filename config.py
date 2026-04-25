@@ -101,3 +101,10 @@ class Config:
         missing = [name for name, val in required if not val]
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+        if cls.NOTIFICATION_SENDER_EMAIL and "@" not in cls.NOTIFICATION_SENDER_EMAIL:
+            raise ValueError("NOTIFICATION_SENDER_EMAIL does not appear to be a valid email address.")
+        if cls.OVERLEAF_EMAIL and "@" not in cls.OVERLEAF_EMAIL:
+            raise ValueError("OVERLEAF_EMAIL does not appear to be a valid email address.")
+        if cls.GROQ_API_KEY and not cls.GROQ_API_KEY.startswith("gsk_"):
+            raise ValueError("GROQ_API_KEY does not appear to be a valid Groq key (expected prefix: gsk_).")

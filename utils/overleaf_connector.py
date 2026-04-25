@@ -33,7 +33,10 @@ class OverleafConnector:
         clean_text = re.sub(r'\\begin\{document\}|\\end\{document\}', '', clean_text)
         
         # 3. Extract text from formatting commands (e.g., \textbf{Hello} -> Hello)
-        clean_text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', clean_text)
+        # Pass 1 — handle simple formatting commands
+        clean_text = re.sub(r'\\(textbf|textit|emph|text|mathrm|mathbf|mathit)\{([^}]*)\}', r'\2', clean_text)
+        # Pass 2 — remove other non-math commands that wrap content (only if content has no backslash)
+        clean_text = re.sub(r'\\(?!begin|end|frac|sum|int|prod|lim|sqrt|left|right|over)[a-zA-Z]+\{([^\\}][^}]*)\}', r'\1', clean_text)
         
         # 4. Remove standalone commands (like \maketitle, \clearpage)
         clean_text = re.sub(r'\\[a-zA-Z]+\*?', '', clean_text)
