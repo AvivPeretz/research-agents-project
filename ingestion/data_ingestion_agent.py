@@ -5,8 +5,6 @@ import time
 import random
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-
-# Import centralized configuration
 from config import Config
 
 class DataIngestionAgent:
@@ -19,11 +17,8 @@ class DataIngestionAgent:
     def __init__(self, db=None, notifier=None):
         self.email = Config.OVERLEAF_EMAIL
         self.password = Config.OVERLEAF_PASSWORD
-
-        # Dependency Injection
         self.db = db
         self.notifier = notifier
-
         self.state_file = Config.OVERLEAF_STATE_PATH
         self.download_dir = Config.OVERLEAF_DIR
 
@@ -44,12 +39,16 @@ class DataIngestionAgent:
         for char in text:
             page.type(selector, char, delay=random.uniform(60, 180))
 
-    def _build_stealth_context(self, playwright, headless: bool = False, accept_downloads: bool = False):
+    def _build_stealth_context(self, playwright, headless: bool = None, accept_downloads: bool = False):
         """
         Creates a hardened browser context with stealth patches applied.
-        Applies playwright-stealth to mask all automation indicators.
+        Uses Config.PLAYWRIGHT_HEADLESS unless explicitly overridden.
         Returns (browser, context, page) as a tuple.
         """
+        # Use Config value if not explicitly overridden by caller
+        if headless is None:
+            headless = Config.PLAYWRIGHT_HEADLESS
+
         browser = playwright.chromium.launch(
             headless=headless,
             args=[
@@ -70,18 +69,13 @@ class DataIngestionAgent:
             accept_downloads=accept_downloads,
         )
         page = context.new_page()
-
-        # Apply stealth patches to mask navigator.webdriver and other bot signals
-        # stealth is handled via browser launch args (--disable-blink-features=AutomationControlled)
-
         return browser, context, page
 
     def _perform_manual_login(self):
         """
-        Opens a visible, stealth-patched browser and pre-fills credentials.
-        Waits for the user to complete any CAPTCHA manually if triggered,
+        Opens a visible browser (always headless=False — requires human interaction)
+        and pre-fills credentials. Waits for the user to complete any CAPTCHA manually,
         then saves the resulting session state to disk.
-        Sends an admin alert email before opening the browser window.
         """
         print("\n🛑 No saved session found or session expired! Initiating manual login...")
 
@@ -96,6 +90,7 @@ class DataIngestionAgent:
             )
 
         with sync_playwright() as p:
+            # Manual login always requires a visible browser — override headless to False
             browser, context, page = self._build_stealth_context(p, headless=False)
 
             try:
@@ -125,7 +120,13 @@ class DataIngestionAgent:
                 context.close()
                 browser.close()
 
-    def sync_all_projects(self) -> list:
+    def sync_all_projects(self, _retry_depth: int = 0) -> list:
+        """
+        Performs a full delta sync cycle.
+        _retry_depth prevents infinite recursion on repeated session failures.
+        """
+        MAX_RETRY_DEPTH = 2
+
         print("🤖 Starting Delta Sync Ingestion Cycle...")
 
         if not self.db:
@@ -142,11 +143,8 @@ class DataIngestionAgent:
         updated_projects = []
 
         with sync_playwright() as p:
-            browser, context, page = self._build_stealth_context(
-                p, headless=False, accept_downloads=True
-            )
-
-            # Restore the saved authenticated session into the context
+            # Use Config.PLAYWRIGHT_HEADLESS (via _build_stealth_context default)
+            browser, _, _ = self._build_stealth_context(p, accept_downloads=True)
             context = browser.new_context(
                 storage_state=self.state_file,
                 user_agent=(
@@ -160,7 +158,6 @@ class DataIngestionAgent:
                 accept_downloads=True,
             )
             page = context.new_page()
-            # stealth is handled via browser launch args (--disable-blink-features=AutomationControlled)
 
             try:
                 print("🌐 Navigating to dashboard...")
@@ -181,8 +178,21 @@ class DataIngestionAgent:
                     if os.path.exists(self.state_file):
                         os.remove(self.state_file)
 
-                    print("🔄 Retrying sync cycle to prompt manual login...")
-                    return self.sync_all_projects()
+                    # Depth limit — prevent infinite recursion
+                    if _retry_depth >= MAX_RETRY_DEPTH:
+                        print(f"❌ Max retry depth ({MAX_RETRY_DEPTH}) reached. Aborting sync.")
+                        if self.notifier:
+                            self.notifier.send_admin_alert(
+                                subject="Overleaf Sync Failed — Max Retries Reached",
+                                message=(
+                                    f"sync_all_projects() failed after {MAX_RETRY_DEPTH} retries. "
+                                    "Manual login may be required."
+                                )
+                            )
+                        return []
+
+                    print(f"🔄 Retrying sync cycle (attempt {_retry_depth + 1}/{MAX_RETRY_DEPTH})...")
+                    return self.sync_all_projects(_retry_depth=_retry_depth + 1)
 
                 rows = page.locator(
                     'tr:has(a[href^="/project/"]), li:has(a[href^="/project/"])'
@@ -199,7 +209,6 @@ class DataIngestionAgent:
                         continue
 
                     last_modified_text = row.inner_text().strip()
-
                     db_last_modified = self.db.get_last_modified(project_name)
 
                     is_new = db_last_modified is None
@@ -220,9 +229,7 @@ class DataIngestionAgent:
                             page.evaluate(f"window.location.href = '{zip_download_url}'")
 
                         zip_download = zip_download_info.value
-                        zip_path = os.path.join(
-                            self.download_dir, f"{safe_project_name}.zip"
-                        )
+                        zip_path = os.path.join(self.download_dir, f"{safe_project_name}.zip")
                         zip_download.save_as(zip_path)
 
                         extract_path = os.path.join(self.download_dir, project_name)
@@ -253,9 +260,7 @@ class DataIngestionAgent:
                                 pdf_btn.click()
 
                             pdf_download = pdf_download_info.value
-                            pdf_path = os.path.join(
-                                extract_path, f"{safe_project_name}.pdf"
-                            )
+                            pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
                             pdf_download.save_as(pdf_path)
                             print("   ✅ PDF downloaded successfully.")
 

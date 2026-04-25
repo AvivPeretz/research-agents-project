@@ -81,7 +81,7 @@ class ResearchEnhancementAgent(BaseAgent):
             
         self.logger.info("Initiating Phase 1: Uploading '%s' to paperreview.ai...", project_name)
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False) 
+            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS)
             context = browser.new_context()
             page = context.new_page()
             try:
@@ -184,7 +184,7 @@ class ResearchEnhancementAgent(BaseAgent):
             
         print("   🌐 Navigating to paperreview.ai/review to fetch feedback...")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS)
             context = browser.new_context()
             page = context.new_page()
             try:

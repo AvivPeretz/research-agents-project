@@ -50,9 +50,12 @@ class Config:
     # ==========================================
     # 4. API & Network Configuration
     # ==========================================
+    
     SEMANTIC_SCHOLAR_RATE_LIMIT = 100  # Requests per 5 minutes
     PLAYWRIGHT_TIMEOUT_MS = 30000      # 30 seconds in milliseconds
-    
+    # Playwright headless mode — set to False only for local debugging
+    PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
+
     # ==========================================
     # 5. Email Configuration
     # ==========================================

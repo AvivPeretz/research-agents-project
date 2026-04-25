@@ -137,30 +137,39 @@ class ProgressTrackingAgent(BaseAgent):
         self.logger.info("Starting the progress tracking cycle.")
         for project in self.overleaf_projects:
             print(f"\n{'-'*40}\n📂 Evaluating Project Updates: {project}\n{'-'*40}")
-            
+
+            old_text_before_run = self._get_last_seen_text(project)
+            is_first_run = not old_text_before_run or old_text_before_run.strip() == ""
+
             changes = self.check_text_changes(project)
             has_changes = changes.get("has_changes", False)
             delta_text = changes.get("delta_text", "")
-            
-            # --- NEW: Record Activity Snapshot for the Supervisor Agent ---
-            # We record this REGARDLESS of whether there were changes or not,
-            # so the Supervisor Agent can track "silent days" vs "active days".
+
+            # Record snapshot regardless of changes
             if self.db:
                 delta_char_count = len(delta_text) if has_changes else 0
                 self.db.add_progress_snapshot(
-                    project_name=project, 
-                    had_changes=has_changes, 
+                    project_name=project,
+                    had_changes=has_changes,
                     delta_char_count=delta_char_count
                 )
-            # --------------------------------------------------------------
-            
+
             if has_changes:
+                old_text = self._get_last_seen_text(project)
+                is_first_run = not old_text or old_text.strip() == ""
+
+                if is_first_run:
+                    self.logger.info(
+                        "First run for '%s' — baseline established. Skipping feedback email.", project
+                    )
+                    continue
+
                 feedback = self.provide_feedback(delta_text)
                 suggestions = self.suggest_improvements(delta_text)
-                
+
                 self.library.save_tracking_feedback(project, feedback, suggestions)
                 self.logger.info("Saved focused feedback and suggestions for %s.", project)
-                
+
                 combined_md = f"### 📝 Progress Feedback\n{feedback}\n\n### 💡 Targeted Suggestions\n{suggestions}"
                 self.logger.info("Sending progress feedback email for %s...", project)
                 self.notifier.send_progress_feedback(
@@ -169,5 +178,5 @@ class ProgressTrackingAgent(BaseAgent):
                 )
             else:
                 self.logger.info("No actionable new text found for %s. Skipping LLM analysis.", project)
-                
+
         self.logger.info("Progress tracking cycle completed.")
