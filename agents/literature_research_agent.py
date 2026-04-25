@@ -178,7 +178,7 @@ class LiteratureResearchAgent(BaseAgent):
                 self.library.append_to_project_literature_table(project, paper)
                 
                 # Using .get() gracefully defaults if the key somehow wasn't mapped
-                paper_title = paper.get("paper_name", "Unknown") or paper.get("paper name", "Unknown")
+                paper_title = paper.get("paper_name") or paper.get("paper name", "Unknown")
                 self.logger.info("Appended paper '%s' to rolling CSV table.", paper_title)
                 
             safe_name = project.replace(" ", "_")

@@ -184,17 +184,27 @@ class DatabaseManager:
             return None
 
     def update_project_state(self, project_name: str, **kwargs):
-        """
-        Dynamically updates any column in the project_state table.
-        Example: db.update_project_state("Project A", last_seen_text="New text", supervisor_email="x@x.com")
-        """
         if not kwargs:
             return
-        
+
+        # Whitelist of valid column names to prevent SQL injection
+        VALID_COLUMNS = {
+            "stanford_status", "last_upload_time", "last_seen_text",
+            "researcher_email", "student_status", "update_frequency",
+            "supervisor_email", "student_name", "created_at"
+        }
+
+        invalid_keys = set(kwargs.keys()) - VALID_COLUMNS
+        if invalid_keys:
+            self.logger.error(
+                "Attempted to update invalid columns: %s. Aborting update.", invalid_keys
+            )
+            return
+
         columns = ", ".join([f"{k} = ?" for k in kwargs.keys()])
         values = list(kwargs.values())
         values.append(project_name)
-        
+
         query = f"UPDATE project_state SET {columns} WHERE project_name = ?"
         try:
             with self._get_connection() as conn:

@@ -92,7 +92,8 @@ class BaseAgent(ABC):
         if provider_name == "groq":
             chat_completion = self.groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=Config.LLM_MODEL_NAME,  
+                model=Config.LLM_MODEL_NAME,
+                timeout=Config.LLM_TIMEOUT_SECONDS  
             )
             return chat_completion.choices[0].message.content
             
@@ -102,6 +103,7 @@ class BaseAgent(ABC):
             response = self.gemini_client.models.generate_content(
                 model=self.gemini_model_name,
                 contents=prompt,
+                config={"timeout": Config.LLM_TIMEOUT_SECONDS}
             )
             return response.text
             
@@ -110,7 +112,8 @@ class BaseAgent(ABC):
                 raise ValueError("OpenAI is not configured.")
             response = self.openai_client.chat.completions.create(
                 model=getattr(Config, 'OPENAI_MODEL_NAME', 'gpt-4o-mini'),
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                timeout=Config.LLM_TIMEOUT_SECONDS
             )
             return response.choices[0].message.content
             

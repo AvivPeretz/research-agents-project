@@ -153,7 +153,7 @@ class ResearchEnhancementAgent(BaseAgent):
                                     if content_type in ["text/plain", "text/html"]:
                                         try:
                                             body += part.get_payload(decode=True).decode(errors='ignore') + " "
-                                        except:
+                                        except Exception:
                                             pass
                             else:
                                 body = msg.get_payload(decode=True).decode(errors='ignore')
@@ -289,6 +289,23 @@ class ResearchEnhancementAgent(BaseAgent):
                     self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW in DB.")
                     
             elif state["status"] == "WAITING_FOR_REVIEW":
+                if state.get("last_upload_time"):
+                    try:
+                        upload_dt = datetime.fromisoformat(state["last_upload_time"])
+                        hours_waiting = (datetime.now() - upload_dt).total_seconds() / 3600
+                        if hours_waiting > 48:
+                            self.logger.warning(
+                                "Project '%s' has been WAITING_FOR_REVIEW for %.1f hours. Sending alert.",
+                                project, hours_waiting
+                            )
+                            self.notifier.send_admin_alert(
+                                subject=f"Stanford Review Stuck: {project}",
+                                message=f"Project '{project}' has been waiting for a Stanford review token for {hours_waiting:.0f} hours. Manual intervention may be required."
+                            )
+                            self._update_stanford_state(project, "READY_FOR_UPLOAD")
+                            continue
+                    except Exception as e:
+                        self.logger.warning("Could not parse upload time for %s: %s", project, str(e))
                 print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
                 token = self._get_stanford_token_from_email(project)
                 
@@ -296,7 +313,7 @@ class ResearchEnhancementAgent(BaseAgent):
                     review_text = self._fetch_review_from_stanford(token)
                     if review_text:
                         tasks = self._generate_actionable_tasks(project, review_text)
-                        if tasks:
+                        if tasks is not None and tasks.strip():
                             self._update_stanford_state(project, "REVIEW_COMPLETED")
                             print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
                             
