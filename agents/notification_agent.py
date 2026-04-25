@@ -1,4 +1,5 @@
 import os
+import time
 import smtplib
 import markdown
 import logging
@@ -64,16 +65,21 @@ class NotificationAgent(BaseAgent):
             self.logger.error("Sender credentials missing in configuration!")
             return False
 
-        try:
-            self.logger.info("Connecting to Gmail SMTP server as a relay...")
-            with smtplib.SMTP_SSL(Config.SMTP_SERVER, Config.SMTP_PORT) as smtp:
-                smtp.login(self.sender_email, self.sender_password)
-                smtp.send_message(msg)
-            self.logger.info("✅ Email successfully sent to %s.", recipient)
-            return True
-        except Exception as e:
-            self.logger.error("❌ Failed to send email: %s", str(e))
-            return False
+        for attempt in range(3):
+            try:
+                self.logger.info("Connecting to Gmail SMTP server as a relay...")
+                with smtplib.SMTP_SSL(Config.SMTP_SERVER, Config.SMTP_PORT) as smtp:
+                    smtp.login(self.sender_email, self.sender_password)
+                    smtp.send_message(msg)
+                self.logger.info("✅ Email successfully sent to %s.", recipient)
+                return True
+            except Exception as e:
+                if attempt < 2:
+                    self.logger.warning("Email send attempt %d failed: %s. Retrying...", attempt + 1, str(e))
+                    time.sleep(2)
+                else:
+                    self.logger.error("❌ Failed to send email after 3 attempts: %s", str(e))
+        return False
 
     # ==========================================
     # AGENT-SPECIFIC EMAIL FUNCTIONS
@@ -116,7 +122,9 @@ class NotificationAgent(BaseAgent):
             except Exception as e:
                 self.logger.error("Could not attach CSV: %s", str(e))
 
-        self._dispatch_email(msg, recipient)
+        result = self._dispatch_email(msg, recipient)
+        if not result:
+            self.logger.error("Failed to dispatch literature update email for project: %s", project_name)
 
     def send_progress_feedback(self, project_name: str, md_content: str):
         """Formats and sends the Tri-daily Progress Tracking email."""
@@ -146,7 +154,9 @@ class NotificationAgent(BaseAgent):
         """
         msg.set_content("Please enable HTML to view this message.")
         msg.add_alternative(email_html, subtype='html')
-        self._dispatch_email(msg, recipient)
+        result = self._dispatch_email(msg, recipient)
+        if not result:
+            self.logger.error("Failed to dispatch progress feedback email for project: %s", project_name)
 
     def send_stanford_tasks(self, project_name: str, md_content: str):
         """Formats and sends the Monthly Stanford Review & Task List email."""
@@ -177,7 +187,9 @@ class NotificationAgent(BaseAgent):
         """
         msg.set_content("Please enable HTML to view this message.")
         msg.add_alternative(email_html, subtype='html')
-        self._dispatch_email(msg, recipient)
+        result = self._dispatch_email(msg, recipient)
+        if not result:
+            self.logger.error("Failed to dispatch stanford tasks email for project: %s", project_name)
 
     def send_supervisor_report(self, supervisor_email: str, md_content: str):
         """
@@ -210,7 +222,9 @@ class NotificationAgent(BaseAgent):
         """
         msg.set_content("Please enable HTML to view this message.")
         msg.add_alternative(email_html, subtype='html')
-        self._dispatch_email(msg, supervisor_email)
+        result = self._dispatch_email(msg, supervisor_email)
+        if not result:
+            self.logger.error("Failed to dispatch supervisor report email to: %s", supervisor_email)
 
     def send_admin_alert(self, subject: str, message: str):
         """Sends a critical system alert directly to the system administrator."""
@@ -220,7 +234,9 @@ class NotificationAgent(BaseAgent):
         msg['To'] = self.sender_email # Sending to the dummy/personal email itself
 
         msg.set_content(message)
-        self._dispatch_email(msg, self.sender_email)
+        result = self._dispatch_email(msg, self.sender_email)
+        if not result:
+            self.logger.error("Failed to dispatch admin alert email with subject: %s", subject)
 
     def run(self):
         pass

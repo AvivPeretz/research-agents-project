@@ -1,4 +1,5 @@
 import os
+import logging
 import pandas as pd
 from datetime import datetime
 
@@ -9,6 +10,7 @@ class LibraryManager:
     """
     def __init__(self, base_dir="research_library"):
         self.base_dir = os.path.abspath(base_dir)
+        self.logger = logging.getLogger("LibraryManager")
         self._ensure_base_dirs()
 
     def _ensure_base_dirs(self):
@@ -74,6 +76,12 @@ class LibraryManager:
             df = pd.DataFrame(columns=columns)
 
         new_row = {col: paper_data.get(col, "N/A") for col in columns}
-        
+
+        if not df.empty and "paper name" in df.columns:
+            new_paper_name = new_row.get("paper name", "N/A")
+            if any(df["paper name"].fillna("").str.lower() == new_paper_name.lower()):
+                self.logger.info("Paper '%s' already exists in the table. Skipping.", new_paper_name)
+                return
+
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         df.to_csv(csv_path, index=False)

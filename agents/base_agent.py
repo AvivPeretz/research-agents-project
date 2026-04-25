@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import logging
 import logging.handlers
 from abc import ABC, abstractmethod
@@ -155,7 +156,7 @@ class BaseAgent(ABC):
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
                     if attempt < max_retries - 1:
-                        sleep_time = 2 ** (attempt + 1)
+                        sleep_time = 2 ** (attempt + 1) + random.uniform(0, 1)
                         time.sleep(sleep_time)
                     else:
                         self.logger.error("Max retries reached for provider [%s]. Exhausted.", provider.upper())

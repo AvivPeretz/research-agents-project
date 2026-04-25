@@ -164,6 +164,10 @@ class ProgressTrackingAgent(BaseAgent):
                     )
                     continue
 
+                if len(delta_text.strip()) < 50:
+                    self.logger.info("Delta too small to process (<50 chars). Skipping feedback.")
+                    continue
+
                 feedback = self.provide_feedback(delta_text)
                 suggestions = self.suggest_improvements(delta_text)
 

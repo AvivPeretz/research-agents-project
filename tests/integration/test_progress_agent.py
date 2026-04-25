@@ -71,7 +71,7 @@ class TestProgressTrackingAgent:
     def test_run_sends_email_only_when_changes_exist(self, progress_agent, mock_notifier):
         """Asserts that send_progress_feedback is called only when changes exist."""
         old_text = "Original"
-        new_text = "Original\nNew content added"
+        new_text = "Original\nNew content added here which is long enough to exceed the fifty character minimum threshold."
 
         with patch.object(progress_agent.connector, "read_and_clean_tex_file", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):

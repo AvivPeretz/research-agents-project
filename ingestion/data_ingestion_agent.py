@@ -1,4 +1,5 @@
 import os
+import logging
 import shutil
 import zipfile
 import time
@@ -15,6 +16,7 @@ class DataIngestionAgent:
     Utilizes the centralized SQLite database for sync state management.
     """
     def __init__(self, db=None, notifier=None):
+        self.logger = logging.getLogger("DataIngestionAgent")
         self.email = Config.OVERLEAF_EMAIL
         self.password = Config.OVERLEAF_PASSWORD
         self.db = db
@@ -232,6 +234,10 @@ class DataIngestionAgent:
                         zip_path = os.path.join(self.download_dir, f"{safe_project_name}.zip")
                         zip_download.save_as(zip_path)
 
+                        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+                            self.logger.error("ZIP file missing or empty for '%s'. Skipping sync.", project_name)
+                            continue
+
                         extract_path = os.path.join(self.download_dir, project_name)
                         if os.path.exists(extract_path):
                             shutil.rmtree(extract_path)
@@ -262,7 +268,10 @@ class DataIngestionAgent:
                             pdf_download = pdf_download_info.value
                             pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
                             pdf_download.save_as(pdf_path)
-                            print("   ✅ PDF downloaded successfully.")
+                            if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+                                self.logger.warning("PDF file missing or empty for '%s'.", project_name)
+                            else:
+                                print("   ✅ PDF downloaded successfully.")
 
                         except Exception as e:
                             print(f"   ⚠️ Exception during PDF download: {e}")

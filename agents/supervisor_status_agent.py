@@ -66,7 +66,7 @@ class SupervisorStatusAgent(BaseAgent):
             try:
                 # Assuming SQLite default TIMESTAMP format: YYYY-MM-DD HH:MM:SS
                 created_dt = datetime.strptime(created_at_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
-                metrics["days_since_creation"] = (datetime.now() - created_dt).days
+                metrics["days_since_creation"] = (datetime.utcnow() - created_dt).days
             except Exception as e:
                 self.logger.warning("Could not parse created_at for %s: %s", project_name, str(e))
 
