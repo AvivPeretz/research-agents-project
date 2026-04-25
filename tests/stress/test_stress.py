@@ -1,7 +1,7 @@
 """Stress and load tests for the research agents system."""
 
 import threading
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,18 +11,23 @@ from tests.fixtures.mock_responses import VALID_LITERATURE_JSON
 class TestStress:
     """Tests for system behavior under stress and load."""
 
-    def test_literature_agent_with_15_projects(self, db_in_memory, mock_notifier):
+    def test_literature_agent_with_15_projects(self, mock_notifier):
         """Asserts that LiteratureResearchAgent handles 15 projects without error."""
         from agents.literature_research_agent import LiteratureResearchAgent
+        from utils.literature_fetcher import LiteratureFetcher
 
         projects = [f"Project_{i}" for i in range(15)]
 
-        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
-            with patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Test content"):
-                agent = LiteratureResearchAgent(projects=projects, db=db_in_memory, notifier=mock_notifier)
-                agent.run()
-                # Should complete without error
-                assert mock_notifier.send_literature_update.call_count >= 0
+        mock_papers = [{"title": "Test Paper", "link": "http://example.com", 
+                        "snippet": "Abstract", "year": "2024", 
+                        "citationCount": "5", "venue": "IEEE"}]
+
+        with patch.object(LiteratureFetcher, "search", return_value=mock_papers):
+            with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
+                with patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Test content"):
+                    agent = LiteratureResearchAgent(active_projects=projects, notifier=mock_notifier)
+                    agent.run()
+                    assert mock_notifier.send_literature_update.call_count >= 0
 
     def test_progress_agent_with_15_projects(self, db_in_memory, mock_notifier):
         """Asserts that ProgressTrackingAgent handles 15 projects without error."""
@@ -30,23 +35,23 @@ class TestStress:
 
         projects = [f"Project_{i}" for i in range(15)]
         for proj in projects:
-            db_in_memory.add_project(proj)
+            db_in_memory.add_project(proj, "test@example.com")
 
-        with patch.object(ProgressTrackingAgent, "_get_project_text", return_value="Static content"):
-            agent = ProgressTrackingAgent(projects=projects, db=db_in_memory, notifier=mock_notifier)
+        agent = ProgressTrackingAgent(overleaf_projects=projects, db=db_in_memory, notifier=mock_notifier)
+        with patch.object(agent.connector, "read_and_clean_tex_file", return_value="Static content"):
             agent.run()
             # Should complete without error
 
     def test_db_concurrent_writes_do_not_corrupt(self, db_in_memory):
         """Asserts that 10 concurrent snapshot writes don't corrupt database."""
         project = "Concurrent_Project"
-        db_in_memory.add_project(project)
+        db_in_memory.add_project(project, "test@example.com")
 
         def add_snapshot(i):
             db_in_memory.add_progress_snapshot(
                 project,
                 had_changes=(i % 2 == 0),
-                delta=f"Changes {i}",
+                delta_char_count=i * 10,
             )
 
         threads = [threading.Thread(target=add_snapshot, args=(i,)) for i in range(10)]
@@ -58,9 +63,10 @@ class TestStress:
             thread.join()
 
         # Verify all 10 rows were inserted
-        cursor = db_in_memory.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM progress_snapshots WHERE project_name = ?", (project,))
-        count = cursor.fetchone()[0]
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM progress_snapshots WHERE project_name = ?", (project,))
+            count = cursor.fetchone()[0]
 
         assert count == 10
 
@@ -70,9 +76,7 @@ class TestStress:
 
         with patch.object(BaseAgent, "ask_llm", return_value="Valid response"):
             for _ in range(50):
-                result = BaseAgent.ask_llm.__wrapped__(
-                    MagicMock(), query="Test", required_keys=None, fallback_response=""
-                )
+                result = BaseAgent.ask_llm(MagicMock(), "Test prompt")
                 assert result is not None
 
     def test_garbage_collector_with_500_files(self, tmp_path):
@@ -105,7 +109,7 @@ class TestStress:
         remaining_files = list(lit_review_dir.glob("*.md"))
         assert len(remaining_files) == 200
 
-    def test_literature_agent_large_tex_file(self, db_in_memory, mock_notifier):
+    def test_literature_agent_large_tex_file(self, mock_notifier):
         """Asserts that 100,000 char LaTeX file is truncated to 4000 chars before LLM."""
         from agents.literature_research_agent import LiteratureResearchAgent
 
@@ -114,8 +118,7 @@ class TestStress:
         with patch.object(LiteratureResearchAgent, "_read_project_text", return_value=large_text):
             with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON) as mock_llm:
                 agent = LiteratureResearchAgent(
-                    projects=["LargeText_Project"],
-                    db=db_in_memory,
+                    active_projects=["LargeText_Project"],
                     notifier=mock_notifier,
                 )
                 agent.run()
@@ -132,15 +135,12 @@ class TestStress:
         for i in range(100):
             db_in_memory.update_sync_registry(project, f"Text version {i}")
 
-        cursor = db_in_memory.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM sync_registry WHERE project_name = ?", (project,))
-        count = cursor.fetchone()[0]
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sync_registry WHERE project_name = ?", (project,))
+            count = cursor.fetchone()[0]
 
         assert count == 1
         # Latest value should be stored
         result = db_in_memory.get_last_modified(project)
         assert "version 99" in result
-
-
-# Import at module level to use in tests
-from unittest.mock import MagicMock

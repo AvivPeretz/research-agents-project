@@ -23,8 +23,8 @@ def db_in_memory(tmp_path, monkeypatch):
     # Patch Config.LIBRARY_DIR to use a temporary directory
     monkeypatch.setattr(Config, "LIBRARY_DIR", str(tmp_path))
 
-    # Create in-memory database
-    db = DatabaseManager(db_path=":memory:")
+    # Create database in the patched tmp_path directory
+    db = DatabaseManager()
 
     yield db
 

@@ -5,10 +5,10 @@ VALID_LITERATURE_JSON = '''{
     "papers": [
         {
             "paper_name": "Deep Learning for Network Traffic Classification",
-            "types_of_available_data": "packet headers, payload samples, timing information",
-            "reproducible": "yes",
-            "complexity": "medium",
-            "privacy_preservation": "yes"
+            "types of available data": "packet headers, payload samples, timing information",
+            "reproducible": "Yes",
+            "complexity": "Moderate",
+            "is there privacy issues?": "Yes"
         }
     ]
 }'''
@@ -30,7 +30,8 @@ VALID_SUPERVISOR_JSON = '''{
         {
             "project_name": "Test_Research_Project",
             "status": "ON_TRACK",
-            "notes": "Project is progressing as planned with consistent updates."
+            "rationale": "Project is progressing as planned with consistent updates.",
+            "action_item": "No action needed."
         }
     ]
 }'''

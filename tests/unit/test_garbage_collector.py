@@ -88,7 +88,7 @@ class TestGarbageCollector:
         assert old_md.exists()
 
     def test_run_only_targets_correct_folders(self, tmp_path):
-        """Asserts that old MD files in literature_reviews and project_tracking are deleted, but not others."""
+        """Asserts that old MD files in literature_reviews, project_tracking, and project_enhancement are all deleted."""
         base_dir = tmp_path / "research_library"
 
         # Create old files in each folder
@@ -117,9 +117,9 @@ class TestGarbageCollector:
         gc.run()
 
         # Assert correct deletion behavior
-        assert not lit_md.exists()  # literature_reviews: deleted
+        assert not lit_md.exists()   # literature_reviews: deleted
         assert not proj_md.exists()  # project_tracking: deleted
-        assert enh_md.exists()  # project_enhancement: kept
+        assert not enh_md.exists()   # project_enhancement: deleted
 
     def test_run_handles_missing_directory_gracefully(self, tmp_path):
         """Asserts that calling run() with a non-existent base_dir raises no exception."""

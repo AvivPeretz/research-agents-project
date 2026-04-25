@@ -16,13 +16,12 @@ class TestLiteratureResearchAgent:
     """Integration tests for LiteratureResearchAgent functionality."""
 
     @pytest.fixture
-    def literature_agent(self, db_in_memory, mock_notifier, sample_project_name):
+    def literature_agent(self, mock_notifier, sample_project_name):
         """Create a LiteratureResearchAgent with mocked dependencies."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
             with patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=MOCK_SEMANTIC_SCHOLAR_RESULTS):
                 agent = LiteratureResearchAgent(
-                    projects=[sample_project_name],
-                    db=db_in_memory,
+                    active_projects=[sample_project_name],
                     notifier=mock_notifier,
                 )
                 yield agent
@@ -30,51 +29,51 @@ class TestLiteratureResearchAgent:
     def test_extract_keywords_returns_string(self, literature_agent, sample_project_name):
         """Asserts that extract_keywords_from_text returns a non-empty string."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value="keyword1 keyword2"):
-            result = literature_agent.extract_keywords_from_text("Sample research text about AI")
+            result = literature_agent.extract_keywords_from_text(sample_project_name, "Sample research text about AI")
             assert isinstance(result, str)
             assert result != ""
 
     def test_extract_keywords_falls_back_to_project_name_on_empty_text(self, literature_agent, sample_project_name):
         """Asserts that extract_keywords returns project name when text input is empty."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=""):
-            result = literature_agent.extract_keywords_from_text("")
+            result = literature_agent.extract_keywords_from_text(sample_project_name, "")
             assert sample_project_name in result or result == sample_project_name
 
-    def test_extract_keywords_strips_quotes(self, literature_agent):
+    def test_extract_keywords_strips_quotes(self, literature_agent, sample_project_name):
         """Asserts that quotes returned by LLM are stripped from result."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value='"deep learning" "neural networks"'):
-            result = literature_agent.extract_keywords_from_text("Test text")
+            result = literature_agent.extract_keywords_from_text(sample_project_name, "Test text")
             assert '"' not in result
             assert "deep learning" in result.lower() or "neural" in result.lower()
 
-    def test_process_results_with_llm_returns_valid_dict(self, literature_agent):
+    def test_process_results_with_llm_returns_valid_dict(self, literature_agent, sample_project_name):
         """Asserts that process_results_with_llm returns dict with 'summary' and 'papers' keys."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
-            result = literature_agent.process_results_with_llm(MOCK_SEMANTIC_SCHOLAR_RESULTS, "test keyword")
+            result = literature_agent.process_results_with_llm(sample_project_name, "test keyword", MOCK_SEMANTIC_SCHOLAR_RESULTS)
             assert isinstance(result, dict)
             assert "summary" in result
             assert "papers" in result
 
-    def test_process_results_with_llm_handles_broken_json(self, literature_agent):
+    def test_process_results_with_llm_handles_broken_json(self, literature_agent, sample_project_name):
         """Asserts that broken JSON triggers fallback dict without crash."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=BROKEN_JSON):
-            result = literature_agent.process_results_with_llm([], "test keyword")
+            result = literature_agent.process_results_with_llm(sample_project_name, "test keyword", [])
             assert isinstance(result, dict)
             assert "summary" in result
             assert "papers" in result
 
-    def test_process_results_with_llm_handles_empty_data(self, literature_agent):
+    def test_process_results_with_llm_handles_empty_data(self, literature_agent, sample_project_name):
         """Asserts that empty data list returns fallback dict."""
-        result = literature_agent.process_results_with_llm([], "test keyword")
+        result = literature_agent.process_results_with_llm(sample_project_name, "test keyword", [])
         assert isinstance(result, dict)
         assert "summary" in result
         assert "papers" in result
 
-    def test_process_results_with_llm_pydantic_failure(self, literature_agent):
+    def test_process_results_with_llm_pydantic_failure(self, literature_agent, sample_project_name):
         """Asserts that JSON failing Pydantic validation returns fallback dict."""
         invalid_json = '{"summary": "short", "papers": []}'  # Short summary, empty papers
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=invalid_json):
-            result = literature_agent.process_results_with_llm(MOCK_SEMANTIC_SCHOLAR_RESULTS, "test keyword")
+            result = literature_agent.process_results_with_llm(sample_project_name, "test keyword", MOCK_SEMANTIC_SCHOLAR_RESULTS)
             assert isinstance(result, dict)
 
     def test_run_calls_notifier_send(self, literature_agent, mock_notifier):
@@ -83,12 +82,11 @@ class TestLiteratureResearchAgent:
             literature_agent.run()
             mock_notifier.send_literature_update.assert_called()
 
-    def test_run_with_no_projects_does_not_crash(self, db_in_memory, mock_notifier):
+    def test_run_with_no_projects_does_not_crash(self, mock_notifier):
         """Asserts that instantiating with empty project list and running completes without error."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
             agent = LiteratureResearchAgent(
-                projects=[],
-                db=db_in_memory,
+                active_projects=[],
                 notifier=mock_notifier,
             )
             # Should not crash

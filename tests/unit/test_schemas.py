@@ -15,10 +15,10 @@ class TestPaperDataSchema:
         """Asserts that PaperData with all fields provided validates correctly."""
         data = {
             "paper_name": "Test Paper",
-            "types_of_available_data": "images, text",
-            "reproducible": "yes",
-            "complexity": "high",
-            "privacy_preservation": "yes",
+            "data_type": "images, text",
+            "reproducible": "Yes",
+            "complexity": "High",
+            "privacy_issues": "Yes",
         }
         paper = PaperData(**data)
         assert paper.paper_name == "Test Paper"
@@ -28,10 +28,10 @@ class TestPaperDataSchema:
         data = {"paper_name": "Only Name"}
         paper = PaperData(**data)
         assert paper.paper_name == "Only Name"
-        assert paper.types_of_available_data == "N/A"
+        assert paper.data_type == "N/A"
         assert paper.reproducible == "N/A"
         assert paper.complexity == "N/A"
-        assert paper.privacy_preservation == "N/A"
+        assert paper.privacy_issues == "N/A"
 
     def test_paper_data_invalid_reproducible(self):
         """Asserts that invalid reproducible value 'Maybe' raises ValidationError."""
@@ -52,10 +52,10 @@ class TestPaperDataSchema:
             PaperData(**data)
 
     def test_paper_data_invalid_privacy(self):
-        """Asserts that invalid privacy_preservation value 'Partial' raises ValidationError."""
+        """Asserts that invalid privacy_issues value 'Partial' raises ValidationError."""
         data = {
             "paper_name": "Test",
-            "privacy_preservation": "Partial",
+            "privacy_issues": "Partial",
         }
         with pytest.raises(ValidationError):
             PaperData(**data)
@@ -67,7 +67,7 @@ class TestPaperDataSchema:
             "types of available data": "sensor data, logs",
         }
         paper = PaperData(**data)
-        assert paper.types_of_available_data == "sensor data, logs"
+        assert paper.data_type == "sensor data, logs"
 
 
 class TestLiteratureReportSchema:
@@ -115,7 +115,8 @@ class TestProjectEvaluationSchema:
             data = {
                 "project_name": "Test Project",
                 "status": status,
-                "notes": "Test notes",
+                "rationale": "Test rationale.",
+                "action_item": "No action needed.",
             }
             eval_obj = ProjectEvaluation(**data)
             assert eval_obj.status == status
@@ -125,7 +126,8 @@ class TestProjectEvaluationSchema:
         data = {
             "project_name": "Test",
             "status": "DELAYED",
-            "notes": "Test",
+            "rationale": "Test rationale.",
+            "action_item": "No action needed.",
         }
         with pytest.raises(ValidationError):
             ProjectEvaluation(**data)
@@ -142,7 +144,8 @@ class TestSupervisorReportSchema:
                 {
                     "project_name": "Test Project",
                     "status": "ON_TRACK",
-                    "notes": "Good progress",
+                    "rationale": "Good progress has been made.",
+                    "action_item": "No action needed.",
                 }
             ],
         }

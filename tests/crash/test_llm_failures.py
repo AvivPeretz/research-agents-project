@@ -9,15 +9,17 @@ class TestLLMFailures:
     """Tests for handling LLM provider failures and retry logic."""
 
     def test_all_providers_exhausted_raises_runtime_error(self):
-        """Asserts that RuntimeError is raised with meaningful message when all providers fail."""
+        """When all LLM providers fail, ask_llm must raise RuntimeError."""
         from agents.base_agent import BaseAgent
+        mock_agent = MagicMock(spec=BaseAgent)
+        mock_agent.groq_client = MagicMock()
+        mock_agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        mock_agent.gemini_available = False
+        mock_agent.openai_available = False
+        mock_agent.logger = MagicMock()
 
-        with patch.object(BaseAgent, "_ask_provider") as mock_ask:
-            mock_ask.side_effect = Exception("Provider error")
-
-            with pytest.raises(Exception):
-                # Simulate all providers failing
-                pass
+        with pytest.raises(RuntimeError):
+            BaseAgent.ask_llm(mock_agent, "test prompt")
 
     def test_groq_fails_switches_to_gemini(self):
         """Asserts that Gemini provider response is used when Groq fails."""
@@ -48,21 +50,16 @@ class TestLLMFailures:
                 # Backoff should be called between retries with increasing waits
                 pass
 
-    def test_pydantic_failure_returns_fallback_not_crash(self, db_in_memory, mock_notifier):
-        """Asserts that schema validation failure returns fallback dict without crash."""
+    def test_pydantic_failure_returns_fallback_not_crash(self):
         from agents.literature_research_agent import LiteratureResearchAgent
-
-        # Invalid JSON that fails schema
-        invalid_json = '{"summary": "short", "papers": []}'
-
-        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=invalid_json):
-            agent = LiteratureResearchAgent(
-                projects=["Test"],
-                db=db_in_memory,
-                notifier=mock_notifier,
-            )
-            result = agent.process_results_with_llm([], "test")
-            assert isinstance(result, dict)
+        mock_notifier = MagicMock()
+        agent = LiteratureResearchAgent(active_projects=["Test"], notifier=mock_notifier)
+        
+        with patch.object(agent, "ask_llm", return_value="not valid json {{{{"):
+            result = agent.process_results_with_llm("Test", "keywords", [{"title": "Paper"}])
+        
+        assert "summary" in result
+        assert result["papers"] == []
 
     def test_none_response_from_provider_triggers_retry(self):
         """Asserts that None response from provider triggers retry."""

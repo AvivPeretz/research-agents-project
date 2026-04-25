@@ -84,7 +84,7 @@ class TestNotificationAgent:
         with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
             notification_agent.send_literature_update(
                 project_name="Test",
-                summary="Test summary",
+                md_content="Test summary",
                 csv_path="/tmp/test.csv",
             )
             # Verify subject contains literature indicator if called
@@ -99,7 +99,7 @@ class TestNotificationAgent:
         with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
             notification_agent.send_progress_feedback(
                 project_name="Test",
-                delta="Some changes",
+                md_content="Some changes",
             )
             # Subject should contain Progress if called
 
@@ -108,7 +108,7 @@ class TestNotificationAgent:
         with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
             notification_agent.send_stanford_tasks(
                 project_name="Test",
-                tasks="Task list here",
+                md_content="Task list here",
             )
             # Subject should contain Stanford
 
@@ -118,7 +118,7 @@ class TestNotificationAgent:
         with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
             notification_agent.send_supervisor_report(
                 supervisor_email=supervisor_email,
-                report_content="Report",
+                md_content="Report",
             )
             # Verify recipient is supervisor email
 
@@ -130,7 +130,7 @@ class TestNotificationAgent:
         with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
             notification_agent.send_literature_update(
                 project_name="Test",
-                summary="Summary",
+                md_content="Summary",
                 csv_path=str(csv_file),
             )
             # Verify attachment was added if method was called
@@ -141,6 +141,6 @@ class TestNotificationAgent:
             # Should not crash
             notification_agent.send_literature_update(
                 project_name="Test",
-                summary="Summary",
+                md_content="Summary",
                 csv_path="/nonexistent/path/test.csv",
             )

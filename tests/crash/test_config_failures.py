@@ -12,7 +12,11 @@ class TestConfigFailures:
         """Asserts that ValueError with 'GROQ_API_KEY' is raised on missing key."""
         from config import Config
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.object(Config, 'GROQ_API_KEY', None), \
+             patch.object(Config, 'NOTIFICATION_SENDER_EMAIL', "test@example.com"), \
+             patch.object(Config, 'NOTIFICATION_SENDER_PASSWORD', "pass"), \
+             patch.object(Config, 'OVERLEAF_EMAIL', "test@example.com"), \
+             patch.object(Config, 'OVERLEAF_PASSWORD', "pass"):
             with pytest.raises(ValueError) as exc_info:
                 Config.validate()
             assert "GROQ_API_KEY" in str(exc_info.value)
@@ -21,14 +25,11 @@ class TestConfigFailures:
         """Asserts that ValueError is raised when value is empty string."""
         from config import Config
 
-        env_vars = {
-            "GROQ_API_KEY": "",
-            "NOTIFICATION_SENDER_EMAIL": "test@example.com",
-            "NOTIFICATION_SENDER_PASSWORD": "pass",
-            "OVERLEAF_EMAIL": "test@example.com",
-            "OVERLEAF_PASSWORD": "pass",
-        }
-        with patch.dict("os.environ", env_vars, clear=False):
+        with patch.object(Config, 'GROQ_API_KEY', ""), \
+             patch.object(Config, 'NOTIFICATION_SENDER_EMAIL', "test@example.com"), \
+             patch.object(Config, 'NOTIFICATION_SENDER_PASSWORD', "pass"), \
+             patch.object(Config, 'OVERLEAF_EMAIL', "test@example.com"), \
+             patch.object(Config, 'OVERLEAF_PASSWORD', "pass"):
             with pytest.raises(ValueError):
                 Config.validate()
 
@@ -36,25 +37,25 @@ class TestConfigFailures:
         """Asserts that all 5 missing key names appear in error message."""
         from config import Config
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.object(Config, 'GROQ_API_KEY', None), \
+             patch.object(Config, 'NOTIFICATION_SENDER_EMAIL', None), \
+             patch.object(Config, 'NOTIFICATION_SENDER_PASSWORD', None), \
+             patch.object(Config, 'OVERLEAF_EMAIL', None), \
+             patch.object(Config, 'OVERLEAF_PASSWORD', None):
             with pytest.raises(ValueError) as exc_info:
                 Config.validate()
             error_msg = str(exc_info.value)
-            # Should mention multiple missing keys
             assert "GROQ_API_KEY" in error_msg or "missing" in error_msg.lower()
 
     def test_validate_passes_when_all_present(self):
         """Asserts that validate() does not raise when all keys present."""
         from config import Config
 
-        env_vars = {
-            "GROQ_API_KEY": "test_key",
-            "NOTIFICATION_SENDER_EMAIL": "sender@example.com",
-            "NOTIFICATION_SENDER_PASSWORD": "pass123",
-            "OVERLEAF_EMAIL": "overleaf@example.com",
-            "OVERLEAF_PASSWORD": "overleaf_pass",
-        }
-        with patch.dict("os.environ", env_vars, clear=False):
+        with patch.object(Config, 'GROQ_API_KEY', "test_key"), \
+             patch.object(Config, 'NOTIFICATION_SENDER_EMAIL', "sender@example.com"), \
+             patch.object(Config, 'NOTIFICATION_SENDER_PASSWORD', "pass123"), \
+             patch.object(Config, 'OVERLEAF_EMAIL', "overleaf@example.com"), \
+             patch.object(Config, 'OVERLEAF_PASSWORD', "overleaf_pass"):
             # Should not raise
             Config.validate()
 

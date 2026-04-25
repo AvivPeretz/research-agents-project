@@ -1,5 +1,6 @@
 """Tests for Stanford state machine logic in ResearchEnhancementAgent."""
 
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,12 +14,12 @@ class TestStateMachine:
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         project = "Upload_Project"
-        db_in_memory.add_project(project, stanford_status="READY_FOR_UPLOAD")
+        db_in_memory.add_project(project, "test@example.com")
 
-        with patch.object(ResearchEnhancementAgent, "_upload_to_stanford", return_value=True):
+        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=True):
             with patch.object(ResearchEnhancementAgent, "_get_project_pdf_path", return_value="/tmp/paper.pdf"):
                 agent = ResearchEnhancementAgent(
-                    projects=[project],
+                    overleaf_projects=[project],
                     db=db_in_memory,
                     notifier=mock_notifier,
                 )
@@ -31,9 +32,9 @@ class TestStateMachine:
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         project = "Failed_Upload_Project"
-        db_in_memory.add_project(project, stanford_status="READY_FOR_UPLOAD")
+        db_in_memory.add_project(project, "test@example.com")
 
-        with patch.object(ResearchEnhancementAgent, "_upload_to_stanford", return_value=False):
+        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=False):
             # State should remain unchanged
             state = db_in_memory.get_project_state(project)
             assert state["stanford_status"] == "READY_FOR_UPLOAD"
@@ -43,7 +44,8 @@ class TestStateMachine:
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         project = "Waiting_Project"
-        db_in_memory.add_project(project, stanford_status="WAITING_FOR_REVIEW")
+        db_in_memory.add_project(project, "test@example.com")
+        db_in_memory.update_project_state(project, stanford_status="WAITING_FOR_REVIEW")
 
         with patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email", return_value=None):
             # State should remain WAITING_FOR_REVIEW
@@ -55,7 +57,8 @@ class TestStateMachine:
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         project = "Empty_Review_Project"
-        db_in_memory.add_project(project, stanford_status="WAITING_FOR_REVIEW")
+        db_in_memory.add_project(project, "test@example.com")
+        db_in_memory.update_project_state(project, stanford_status="WAITING_FOR_REVIEW")
 
         with patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email", return_value="token123"):
             with patch.object(ResearchEnhancementAgent, "_fetch_review_from_stanford", return_value=None):
@@ -69,14 +72,14 @@ class TestStateMachine:
         from tests.fixtures.mock_responses import STANFORD_REVIEW_TEXT
 
         project = "Happy_Path_Project"
-        db_in_memory.add_project(project, stanford_status="READY_FOR_UPLOAD")
+        db_in_memory.add_project(project, "test@example.com")
 
-        with patch.object(ResearchEnhancementAgent, "_upload_to_stanford", return_value=True):
+        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=True):
             with patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email", return_value="token123"):
                 with patch.object(ResearchEnhancementAgent, "_fetch_review_from_stanford", return_value=STANFORD_REVIEW_TEXT):
                     with patch.object(ResearchEnhancementAgent, "_generate_actionable_tasks", return_value="Tasks"):
                         agent = ResearchEnhancementAgent(
-                            projects=[project],
+                            overleaf_projects=[project],
                             db=db_in_memory,
                             notifier=mock_notifier,
                         )
@@ -88,12 +91,13 @@ class TestStateMachine:
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         project = "Completed_Project"
-        db_in_memory.add_project(project, stanford_status="REVIEW_COMPLETED")
+        db_in_memory.add_project(project, "test@example.com")
+        db_in_memory.update_project_state(project, stanford_status="REVIEW_COMPLETED")
 
-        with patch.object(ResearchEnhancementAgent, "_upload_to_stanford") as mock_upload:
+        with patch.object(ResearchEnhancementAgent, "upload_to_stanford") as mock_upload:
             with patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email") as mock_imap:
                 agent = ResearchEnhancementAgent(
-                    projects=[project],
+                    overleaf_projects=[project],
                     db=db_in_memory,
                     notifier=mock_notifier,
                 )
@@ -102,19 +106,19 @@ class TestStateMachine:
 
     def test_stuck_in_waiting_over_48h_should_be_detectable(self, db_in_memory):
         """Test documents missing alert feature for projects stuck > 48h in WAITING state."""
-        from datetime import datetime, timedelta
-
         project = "Stuck_Project"
-        db_in_memory.add_project(project, stanford_status="WAITING_FOR_REVIEW")
+        db_in_memory.add_project(project, "test@example.com")
+        db_in_memory.update_project_state(project, stanford_status="WAITING_FOR_REVIEW")
 
         # Update last_upload_time to 48+ hours ago
-        cursor = db_in_memory.conn.cursor()
         old_time = (datetime.now() - timedelta(hours=49)).isoformat()
-        cursor.execute(
-            "UPDATE project_state SET last_upload_time = ? WHERE project_name = ?",
-            (old_time, project),
-        )
-        db_in_memory.conn.commit()
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE project_state SET last_upload_time = ? WHERE project_name = ?",
+                (old_time, project),
+            )
+            conn.commit()
 
         # This test documents that stuck detection is a known gap
         # Future implementation should alert when stuck > 48h

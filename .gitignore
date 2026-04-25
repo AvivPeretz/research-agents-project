@@ -26,3 +26,13 @@ __pycache__/
 #tells git to ignore log files
 logs/
 *.log
+
+# Claude Code generated docs
+COMPLETION_SUMMARY.md
+CREATION_SUMMARY.md
+FINAL_CHECKLIST.md
+MASTER_INDEX.md
+QUICK_START.md
+TEST_SUITE_README.md
+run_tests.py
+.claude 
