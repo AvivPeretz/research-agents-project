@@ -4,6 +4,7 @@ import shutil
 import zipfile
 import time
 import random
+from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from config import Config
@@ -145,8 +146,14 @@ class DataIngestionAgent:
         updated_projects = []
 
         with sync_playwright() as p:
-            # Use Config.PLAYWRIGHT_HEADLESS (via _build_stealth_context default)
-            browser, _, _ = self._build_stealth_context(p, accept_downloads=True)
+            browser = p.chromium.launch(
+                headless=Config.PLAYWRIGHT_HEADLESS,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
+            )
             context = browser.new_context(
                 storage_state=self.state_file,
                 user_agent=(
@@ -209,6 +216,14 @@ class DataIngestionAgent:
                     project_name = link.inner_text().strip()
                     if not project_name:
                         continue
+
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name="DataIngestionAgent",
+                            project_name=project_name,
+                            status="STARTED",
+                            started_at=datetime.now().isoformat()
+                        )
 
                     last_modified_text = row.inner_text().strip()
                     db_last_modified = self.db.get_last_modified(project_name)
@@ -292,6 +307,14 @@ class DataIngestionAgent:
 
                     else:
                         print(f"⏭️  [SKIPPED] '{project_name}' is up to date.")
+
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name="DataIngestionAgent",
+                            project_name=project_name,
+                            status="SUCCESS",
+                            finished_at=datetime.now().isoformat()
+                        )
 
             except Exception as e:
                 print(f"❌ Sync failed: {e}")

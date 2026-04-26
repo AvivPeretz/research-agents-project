@@ -10,10 +10,10 @@ class PaperData(BaseModel):
     Data contract representing a single academic paper's extracted metrics.
     Enforces strict typing and allowed values to prevent LLM hallucinations.
     """
-    paper_name: str
+    paper_name: str = Field(default="Unknown", alias="paper name")
     cited: str = "N/A"
     source: str = "N/A"
-    year_published: str = "N/A"
+    year_published: str = Field(default="N/A", alias="year published")
     
     # Using aliases helps the LLM map its natural text generation to our strict keys
     data_type: str = Field(default="N/A", alias="types of available data")

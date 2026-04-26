@@ -30,21 +30,21 @@ class LiteratureFetcher:
         self._min_seconds_between_calls = 300.0 / Config.SEMANTIC_SCHOLAR_RATE_LIMIT
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=False)
-    def _fetch_from_semantic_scholar(self, keywords: str) -> list:
+    def _fetch_from_semantic_scholar(self, keywords: str, limit: int = 10) -> list:
         """PRIMARY: Uses Semantic Scholar API. Retries up to 3 times on failure."""
-        
+
         #enforce rate limit
         elapsed = time.time() - self._last_semantic_scholar_call
         if elapsed < self._min_seconds_between_calls:
             sleep_time = self._min_seconds_between_calls - elapsed
             self.logger.info("Rate limiting: sleeping %.2fs before Semantic Scholar call.", sleep_time)
-            time.sleep(sleep_time)    
+            time.sleep(sleep_time)
 
         self.logger.info("Attempting Semantic Scholar API for keywords: '%s'", keywords)
         query = urllib.parse.quote_plus(keywords)
-        
-        # Searching for papers from 2023 onwards, fetching 5 results
-        url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit=5&year=2023-&fields=title,abstract,year,citationCount,venue,url"
+
+        # Searching for papers from 2023 onwards, fetching configurable number of results
+        url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={limit}&year=2023-&fields=title,abstract,year,citationCount,venue,url"
         
         response = requests.get(url, timeout=15)
         self._last_semantic_scholar_call = time.time()

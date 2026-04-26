@@ -1,5 +1,6 @@
 import os
 import difflib
+from datetime import datetime
 
 # Import the centralized configuration
 from config import Config
@@ -136,6 +137,13 @@ class ProgressTrackingAgent(BaseAgent):
     def run(self):
         self.logger.info("Starting the progress tracking cycle.")
         for project in self.overleaf_projects:
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="STARTED",
+                    started_at=datetime.now().isoformat()
+                )
             print(f"\n{'-'*40}\n📂 Evaluating Project Updates: {project}\n{'-'*40}")
 
             old_text_before_run = self._get_last_seen_text(project)
@@ -162,10 +170,24 @@ class ProgressTrackingAgent(BaseAgent):
                     self.logger.info(
                         "First run for '%s' — baseline established. Skipping feedback email.", project
                     )
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="SUCCESS",
+                            finished_at=datetime.now().isoformat()
+                        )
                     continue
 
                 if len(delta_text.strip()) < 50:
                     self.logger.info("Delta too small to process (<50 chars). Skipping feedback.")
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="SUCCESS",
+                            finished_at=datetime.now().isoformat()
+                        )
                     continue
 
                 feedback = self.provide_feedback(delta_text)
@@ -182,5 +204,13 @@ class ProgressTrackingAgent(BaseAgent):
                 )
             else:
                 self.logger.info("No actionable new text found for %s. Skipping LLM analysis.", project)
+
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="SUCCESS",
+                    finished_at=datetime.now().isoformat()
+                )
 
         self.logger.info("Progress tracking cycle completed.")

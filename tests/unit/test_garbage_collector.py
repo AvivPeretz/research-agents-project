@@ -129,6 +129,29 @@ class TestGarbageCollector:
         # Should not raise an exception
         gc.run()
 
+    def test_dry_run_does_not_delete_files(self, tmp_path):
+        """Asserts that dry_run=True logs deletions but does not remove any files."""
+        base_dir = tmp_path / "research_library"
+        lit_review_dir = base_dir / "literature_reviews" / "test_project"
+        lit_review_dir.mkdir(parents=True)
+
+        old_time = time.time() - (35 * 24 * 60 * 60)
+
+        # Create 3 old files that would normally be deleted
+        old_files = []
+        for i in range(3):
+            md_file = lit_review_dir / f"old_{i}.md"
+            md_file.write_text(f"Old content {i}")
+            os.utime(str(md_file), (old_time, old_time))
+            old_files.append(md_file)
+
+        gc = GarbageCollector(base_dir=str(base_dir), retention_days=30)
+        gc.run(dry_run=True)
+
+        # All files must still exist after a dry run
+        for f in old_files:
+            assert f.exists(), f"{f.name} was deleted during dry_run — it should not have been"
+
     def test_deleted_count_logged(self, tmp_path, caplog):
         """Asserts that the log message mentions the correct deleted count."""
         base_dir = tmp_path / "research_library"

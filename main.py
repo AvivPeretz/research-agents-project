@@ -105,7 +105,7 @@ def main():
     if args.agent in ['all', 'literature']:
         if valid_targets:
             print(f"\n--- 1. Running Literature Research Agent for: {valid_targets} ---")
-            lit_agent = LiteratureResearchAgent(active_projects=valid_targets, notifier=notifier)
+            lit_agent = LiteratureResearchAgent(active_projects=valid_targets, notifier=notifier, db=db)
             run_agent_safely(lit_agent)
         else:
             print("\n--- No projects available for Literature Research. ---")

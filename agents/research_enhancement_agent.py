@@ -85,7 +85,14 @@ class ResearchEnhancementAgent(BaseAgent):
             
         self.logger.info("Initiating Phase 1: Uploading '%s' to paperreview.ai...", project_name)
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS)
+            browser = p.chromium.launch(
+                headless=Config.PLAYWRIGHT_HEADLESS,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
+            )
             context = browser.new_context()
             page = context.new_page()
             try:
@@ -188,7 +195,14 @@ class ResearchEnhancementAgent(BaseAgent):
             
         print("   🌐 Navigating to paperreview.ai/review to fetch feedback...")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS)
+            browser = p.chromium.launch(
+                headless=Config.PLAYWRIGHT_HEADLESS,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
+            )
             context = browser.new_context()
             page = context.new_page()
             try:
@@ -345,6 +359,7 @@ class ResearchEnhancementAgent(BaseAgent):
         a structured academic review AND an actionable task list.
         Designed to replicate the output quality of Stanford's paperreview.ai.
         """
+        today_str = datetime.now().strftime("%Y-%m-%d")
         return f"""You are an expert academic peer reviewer with deep knowledge across \
 multiple scientific domains. Your role is to evaluate the research manuscript \
 titled '{project_name}' with the same rigor and standards applied at top-tier \
@@ -458,7 +473,7 @@ Based on the review above, generate a prioritized, actionable task list \
 for the research team. For EACH task provide:
 - **Task**: What specifically needs to be fixed or added
 - **Effort Estimate**: Actual working time (e.g., "~3 hours", "~1 day")
-- **Deadline**: Specific date within the next 30 days (from today)
+- **Deadline**: Specific date within the next 30 days from today ({today_str})
 - **Priority**: High / Medium / Low
 
 Format as a numbered markdown list. Be concrete and surgical — \
@@ -528,18 +543,39 @@ avoid vague tasks like "improve the writing."
     def run(self):
         self.logger.info("Starting Research Enhancement cycle.")
         for project in self.projects:
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="STARTED",
+                    started_at=datetime.now().isoformat()
+                )
             print(f"\n{'-'*40}\n🧠 Stanford Peer-Review Engine: {project}\n{'-'*40}")
-            
+
             state = self._get_stanford_state(project)
 
             if state["status"] == "SKIPPED_INSUFFICIENT_TEXT":
                 self.logger.info("Project '%s' was previously skipped (insufficient text). Skipping.", project)
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=project,
+                        status="SUCCESS",
+                        finished_at=datetime.now().isoformat()
+                    )
                 continue
 
             if state["status"] == "READY_FOR_UPLOAD":
                 pdf_path = self._get_project_pdf_path(project)
                 if not pdf_path:
                     self.logger.warning("No PDF found for %s. Cannot upload.", project)
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="SUCCESS",
+                            finished_at=datetime.now().isoformat()
+                        )
                     continue
                     
                 success = self.upload_to_stanford(project, pdf_path)
@@ -565,12 +601,19 @@ avoid vague tasks like "improve the writing."
                                 message=f"Project '{project}' has been waiting for a Stanford review token for {hours_waiting:.0f} hours. Manual intervention may be required."
                             )
                             self._update_stanford_state(project, "READY_FOR_UPLOAD")
+                            if self.db:
+                                self.db.log_agent_run(
+                                    agent_name=self.agent_name,
+                                    project_name=project,
+                                    status="SUCCESS",
+                                    finished_at=datetime.now().isoformat()
+                                )
                             continue
                     except Exception as e:
                         self.logger.warning("Could not parse upload time for %s: %s", project, str(e))
                 print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
                 token = self._get_stanford_token_from_email(project)
-                
+
                 if token:
                     review_text = self._fetch_review_from_stanford(token)
                     if review_text:
@@ -591,5 +634,19 @@ avoid vague tasks like "improve the writing."
                         self._run_internal_review(project)
                 else:
                     print("   ⏭️ Review email not yet received or token not found. Will try again next run.")
-                    
+
+            elif state["status"] in ("REVIEW_COMPLETED", "INTERNAL_REVIEW_COMPLETED"):
+                self.logger.info(
+                    "Project '%s' review is already complete (status: %s). Skipping.",
+                    project, state["status"]
+                )
+
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="SUCCESS",
+                    finished_at=datetime.now().isoformat()
+                )
+
         self.logger.info("Research Enhancement cycle completed.")

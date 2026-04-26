@@ -8,7 +8,10 @@ class LibraryManager:
     Manages the local file system (I/O) for the multi-agent system.
     Creates structured directories and saves structured CSVs per project.
     """
-    def __init__(self, base_dir="research_library"):
+    def __init__(self, base_dir=None):
+        if base_dir is None:
+            from config import Config
+            base_dir = str(Config.LIBRARY_DIR)
         self.base_dir = os.path.abspath(base_dir)
         self.logger = logging.getLogger("LibraryManager")
         self._ensure_base_dirs()

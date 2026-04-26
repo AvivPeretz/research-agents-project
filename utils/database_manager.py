@@ -230,6 +230,48 @@ class DatabaseManager:
         except sqlite3.Error as e:
             self.logger.error("Failed to log agent run: %s", str(e))
 
+    def get_projects_by_supervisor(self) -> list:
+        """
+        Returns all projects that have a supervisor assigned.
+        Each item is a dict with keys: project_name, supervisor_email,
+        student_name, created_at.
+        Returns an empty list on error.
+        """
+        query = """
+            SELECT project_name, supervisor_email, student_name, created_at
+            FROM project_state
+            WHERE supervisor_email IS NOT NULL AND supervisor_email != ''
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get projects by supervisor: %s", str(e))
+            return []
+
+    def get_project_snapshots(self, project_name: str, days: int = 28) -> list:
+        """
+        Returns progress snapshots for a project within the last N days.
+        Each item is a dict with keys: snapshot_date, had_changes, delta_char_count.
+        Returns an empty list on error.
+        """
+        query = """
+            SELECT snapshot_date, had_changes, delta_char_count
+            FROM progress_snapshots
+            WHERE project_name = ? AND snapshot_date >= date('now', ?)
+            ORDER BY snapshot_date DESC
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (project_name, f'-{days} days'))
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get snapshots for %s: %s", project_name, str(e))
+            return []
+
     def migrate_from_json(self, json_path: str):
         """
         Safely migrate projects from a legacy researchers_map.json file into the

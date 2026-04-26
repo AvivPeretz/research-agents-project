@@ -28,24 +28,13 @@ class SupervisorStatusAgent(BaseAgent):
         if not self.db:
             raise ValueError("Database connection is required for SupervisorStatusAgent.")
 
+        projects = self.db.get_projects_by_supervisor()
         projects_by_supervisor = {}
-        
-        with self.db._get_connection() as conn:
-            cursor = conn.cursor()
-            # Fetch all projects that have a supervisor assigned
-            cursor.execute("""
-                SELECT project_name, supervisor_email, student_name, created_at 
-                FROM project_state 
-                WHERE supervisor_email IS NOT NULL AND supervisor_email != ''
-            """)
-            projects = [dict(row) for row in cursor.fetchall()]
-
-            for proj in projects:
-                sup_email = proj['supervisor_email']
-                if sup_email not in projects_by_supervisor:
-                    projects_by_supervisor[sup_email] = []
-                projects_by_supervisor[sup_email].append(proj)
-                
+        for proj in projects:
+            sup_email = proj['supervisor_email']
+            if sup_email not in projects_by_supervisor:
+                projects_by_supervisor[sup_email] = []
+            projects_by_supervisor[sup_email].append(proj)
         return projects_by_supervisor
 
     def _calculate_project_metrics(self, project_name: str, created_at_str: str) -> dict:
@@ -76,16 +65,7 @@ class SupervisorStatusAgent(BaseAgent):
             except Exception as e:
                 self.logger.warning("Could not parse created_at for %s: %s", project_name, str(e))
 
-        with self.db._get_connection() as conn:
-            cursor = conn.cursor()
-            # Fetch last 28 days of activity
-            cursor.execute("""
-                SELECT snapshot_date, had_changes, delta_char_count 
-                FROM progress_snapshots 
-                WHERE project_name = ? AND snapshot_date >= date('now', '-28 days')
-                ORDER BY snapshot_date DESC
-            """, (project_name,))
-            snapshots = [dict(row) for row in cursor.fetchall()]
+        snapshots = self.db.get_project_snapshots(project_name, days=28)
 
         if not snapshots:
             return metrics
@@ -202,8 +182,15 @@ class SupervisorStatusAgent(BaseAgent):
                 return
 
             for sup_email, projects in projects_by_sup.items():
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=sup_email,
+                        status="STARTED",
+                        started_at=datetime.now().isoformat()
+                    )
                 self.logger.info("Processing %d projects for supervisor: %s", len(projects), sup_email)
-                
+
                 metrics_list = []
                 for proj in projects:
                     metrics = self._calculate_project_metrics(proj['project_name'], proj['created_at'])
@@ -223,8 +210,25 @@ class SupervisorStatusAgent(BaseAgent):
                     supervisor_email=sup_email,
                     md_content=markdown_content
                 )
-                
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=sup_email,
+                        status="SUCCESS",
+                        finished_at=datetime.now().isoformat()
+                    )
+
         except Exception as e:
             self.logger.error("SupervisorStatusAgent encountered a critical error: %s", str(e), exc_info=True)
-            
+            try:
+                self.notifier.send_admin_alert(
+                    subject="SupervisorStatusAgent — Critical Failure",
+                    message=(
+                        f"SupervisorStatusAgent encountered a critical error and could not "
+                        f"complete the weekly report cycle.\n\nError: {str(e)}"
+                    )
+                )
+            except Exception:
+                pass  # Do not let alert failure mask the original error
+
         self.logger.info("Supervisor Status cycle completed.")

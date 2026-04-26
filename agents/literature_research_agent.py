@@ -1,8 +1,9 @@
 import os
 import json
+from datetime import datetime
 from pydantic import ValidationError
 from domain.schemas import LiteratureReport
-import re 
+import re
 # Import the centralized configuration
 from config import Config
 from agents.base_agent import BaseAgent
@@ -17,15 +18,16 @@ class LiteratureResearchAgent(BaseAgent):
     Agent responsible for analyzing the current research text, generating keywords,
     fetching literature via LiteratureFetcher, and extracting data using Pydantic contracts.
     """
-    def __init__(self, active_projects: list, notifier: NotificationAgent):
+    def __init__(self, active_projects: list, notifier: NotificationAgent, db=None):
         super().__init__(agent_name="LiteratureResearchAgent")
         self.projects = active_projects
         self.library = LibraryManager()
-        self.notifier = notifier 
-        
+        self.notifier = notifier
+
         # Initialize the dedicated fetcher service
         self.fetcher = LiteratureFetcher()
-        
+
+        self.db = db
         self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
 
     def _read_project_text(self, project_name: str) -> str:
@@ -147,48 +149,93 @@ class LiteratureResearchAgent(BaseAgent):
     def run(self):
         self.logger.info("Starting the literature research cycle.")
         for project in self.projects:
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="STARTED",
+                    started_at=datetime.now().isoformat()
+                )
             print(f"\n{'='*40}\n🔬 Literature Search & Data Extraction for: {project}\n{'='*40}")
-            
+
             text = self._read_project_text(project)
             keywords = self.extract_keywords_from_text(project, text) if text else project
             
-            # --- NEW: Clean, single call to the Fetcher ---
-            enriched_data = self.fetcher.search(keywords)
-            
-            if not enriched_data:
+            # Generate 2 additional keyword angles from the project name and text
+            domain_keywords = project  # project name as domain query
+            method_keywords = keywords + " methodology" if keywords else project + " method"
+
+            # Run search for each query angle and merge results
+            all_papers = []
+            seen_titles = set()
+
+            for query in [keywords, domain_keywords, method_keywords]:
+                if not query or not query.strip():
+                    continue
+                results = self.fetcher.search(query)
+                for paper in results:
+                    title = paper.get("title", "").lower().strip()
+                    if title and title not in seen_titles:
+                        seen_titles.add(title)
+                        all_papers.append(paper)
+
+            # Cap at 15 unique papers total
+            all_papers = all_papers[:15]
+
+            if not all_papers:
                 self.logger.warning("No data fetched for %s. Skipping LLM processing.", project)
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=project,
+                        status="SUCCESS",
+                        finished_at=datetime.now().isoformat()
+                    )
                 continue
-                
-            research_data = self.process_results_with_llm(project, keywords, enriched_data)
+
+            research_data = self.process_results_with_llm(project, keywords, all_papers)
             
             if not research_data.get("papers"):
                 self.logger.warning("No parsed papers available for %s. Saving summary only.", project)
                 
             links_section = "\n\n### 🔗 Direct Links to Found Papers:\n"
-            for item in enriched_data:
+            for item in all_papers:
                 links_section += f"* [{item['title']}]({item['link']})\n"
 
             summary_text = f"# Literature Review for: {project}\n\n**Keywords Used:** {keywords}\n\n{research_data.get('summary', 'No summary available.')}{links_section}"
-            
+
             self.library.save_literature_summary(project, summary_text)
             self.logger.info("Saved literature markdown summary for project: %s", project)
-            
+
             papers_list = research_data.get("papers", [])
             for paper in papers_list:
                 self.library.append_to_project_literature_table(project, paper)
-                
+
                 # Using .get() gracefully defaults if the key somehow wasn't mapped
-                paper_title = paper.get("paper_name") or paper.get("paper name", "Unknown")
+                paper_title = paper.get("paper name", "Unknown")
                 self.logger.info("Appended paper '%s' to rolling CSV table.", paper_title)
-                
+
             safe_name = project.replace(" ", "_")
             csv_file_path = os.path.join(Config.LIBRARY_DIR, "comparison_tables", safe_name, f"{safe_name}_rolling_table.csv")
-            
+
+            if not research_data.get("papers"):
+                self.logger.info(
+                    "No papers found for project '%s'. Skipping literature email.", project
+                )
+                continue
+
             self.logger.info("Sending literature update email for %s...", project)
             self.notifier.send_literature_update(
                 project_name=project,
                 md_content=summary_text,
                 csv_path=csv_file_path if os.path.exists(csv_file_path) else None
             )
-                
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="SUCCESS",
+                    finished_at=datetime.now().isoformat()
+                )
+
         self.logger.info("Literature research cycle completed successfully.")

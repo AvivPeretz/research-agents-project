@@ -7,7 +7,10 @@ class GarbageCollector:
     A utility class to clean up old markdown files and prevent disk space exhaustion.
     Uses a TTL (Time-To-Live) approach.
     """
-    def __init__(self, base_dir="research_library", retention_days=30):
+    def __init__(self, base_dir=None, retention_days=30):
+        if base_dir is None:
+            from config import Config
+            base_dir = str(Config.LIBRARY_DIR)
         self.base_dir = os.path.abspath(base_dir)
         self.retention_days = retention_days
         self.retention_seconds = self.retention_days * 24 * 60 * 60 # Convert days to seconds
