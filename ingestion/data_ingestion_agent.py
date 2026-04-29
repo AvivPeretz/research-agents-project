@@ -144,6 +144,7 @@ class DataIngestionAgent:
             return []
 
         updated_projects = []
+        _need_retry = False
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -200,8 +201,7 @@ class DataIngestionAgent:
                             )
                         return []
 
-                    print(f"🔄 Retrying sync cycle (attempt {_retry_depth + 1}/{MAX_RETRY_DEPTH})...")
-                    return self.sync_all_projects(_retry_depth=_retry_depth + 1)
+                    _need_retry = True
 
                 rows = page.locator(
                     'tr:has(a[href^="/project/"]), li:has(a[href^="/project/"])'
@@ -321,6 +321,10 @@ class DataIngestionAgent:
             finally:
                 context.close()
                 browser.close()
+
+        if _need_retry:
+            print(f"🔄 Retrying sync cycle (attempt {_retry_depth + 1}/{MAX_RETRY_DEPTH})...")
+            return self.sync_all_projects(_retry_depth=_retry_depth + 1)
 
         print(f"🎉 Ingestion complete! {len(updated_projects)} projects were downloaded.")
         return updated_projects

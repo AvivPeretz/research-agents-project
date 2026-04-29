@@ -95,7 +95,7 @@ class DatabaseManager:
                 # Adding new columns for Supervisor Status tracking
                 self._ensure_column_exists(cursor, "project_state", "supervisor_email", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "student_name", "TEXT")
-                self._ensure_column_exists(cursor, "project_state", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                self._ensure_column_exists(cursor, "project_state", "created_at", "TEXT")
                 
                 conn.commit()
             self.logger.info("Database tables verified/created successfully.")
