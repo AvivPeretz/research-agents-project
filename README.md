@@ -179,7 +179,7 @@ Before installing, make sure the following are available on your machine:
 Start by cloning the repository — this is required for both installation methods below.
 
 ```bash
-git clone https://github.com/<your-username>/research-agents.git
+git https://github.com/AvivPeretz/research-agents-project.git
 cd research-agents
 ```
 
