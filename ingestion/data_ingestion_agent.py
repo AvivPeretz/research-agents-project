@@ -102,9 +102,9 @@ class DataIngestionAgent:
 
                 print("🔑 Pre-filling credentials with human-like typing...")
                 if self.email and self.password:
-                    self._human_type(page, "input[name='email']", self.email)
+                    self._human_type(page, "#email", self.email)
                     self._human_delay(400, 900)
-                    self._human_type(page, "input[name='password']", self.password)
+                    self._human_type(page, "#password", self.password)
                     self._human_delay(500, 1200)
 
                 print("\n🚨 ACTION REQUIRED: Click 'Log In'. Solve reCAPTCHA manually if it appears.")
