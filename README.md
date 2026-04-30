@@ -53,6 +53,8 @@ internal notifications, successfully bypassing strict institutional SMTP blocks.
   compiled PDFs), saving bandwidth and processing time.
 * Uses direct endpoint navigation to reliably download archives, immune to front-end UI
   changes.
+* Uses `RotatingFileHandler` and `StreamHandler` for logging, consistent with all other
+  agents and supporting container-friendly stdout output.
 
 ---
 
@@ -70,6 +72,13 @@ internal notifications, successfully bypassing strict institutional SMTP blocks.
   discovered papers.
 * The agent is context-aware and can accurately identify and categorize
   theoretical-mathematical papers without inventing empirical metrics.
+* **Multi-Query Fan-Out:** Generates three search queries per project (primary keywords,
+  domain query, and methodology query), deduplicates results by title, and caps the pool
+  at 15 unique papers per run, significantly increasing coverage over the previous
+  single-query approach. The Semantic Scholar API `limit` parameter is configurable
+  (default: 10).
+* Skips the literature update email when no papers are found, preventing empty reports
+  from reaching researchers.
 
 ---
 
@@ -94,6 +103,20 @@ internal notifications, successfully bypassing strict institutional SMTP blocks.
   to scrape the generated peer-review from the web portal.
 * Uses the LLM to translate harsh academic critiques into an actionable, supportive To-Do
   list with estimated effort hours and strict deadlines for the research team.
+* **Internal Review Fallback:** When the Stanford pipeline fails at any phase, an
+  automated internal fallback activates. It reads the manuscript via `OverleafConnector`,
+  intelligently truncates long papers (40% introduction / 35% body / 25% conclusion),
+  loads related papers from the project's existing rolling CSV, and makes a single LLM
+  call producing a full academic review across the same 7 evaluation dimensions. The
+  result is saved to the same path Stanford would use, emailed to the researcher, and
+  recorded in the database as `INTERNAL_REVIEW_COMPLETED`.
+* Both pipelines skip projects with fewer than 3,000 characters of manuscript text,
+  setting their status to `SKIPPED_INSUFFICIENT_TEXT`.
+* Correctly bypasses projects already in `REVIEW_COMPLETED` or
+  `INTERNAL_REVIEW_COMPLETED` state without re-processing them.
+* The Chromium instances launched during upload and review-fetch phases run with
+  `--no-sandbox` and `--disable-dev-shm-usage` flags, making the agent compatible
+  with Docker and Linux container environments.
 
 ---
 
@@ -554,7 +577,9 @@ Log files are automatically rotated at 5MB and up to 3 backups are kept per agen
 * **Single Source of Truth (Database):** Uses `DatabaseManager` backed by SQLite to safely
   manage project routing emails and synchronization states, replacing fragile JSON files.
   Includes built-in, idempotent JSON-to-SQLite migration for legacy `researchers_map.json`
-  data.
+  data. Exposes `get_projects_by_supervisor()` and `get_project_snapshots()` as public
+  query methods. All five agents record `STARTED`, `SUCCESS`, and `FAILURE` audit entries
+  per project cycle into the `agent_runs` table via `db.log_agent_run()`.
 
 * **Defensive Programming & Resilience:** Built into the `BaseAgent`, featuring strict
   validation for all LLM inputs and outputs. Implements **Exponential Backoff** for API
@@ -626,7 +651,7 @@ API key as a fallback in your `.env` file.
 - [ ] **Web Dashboard** — A local intranet Streamlit/Flask UI for lab managers to
   visualize `progress_snapshots` as velocity graphs and manage project/researcher
   assignments without CLI access.
-- [ ] **Internal peer-review pipeline** — Replace the Stanford `paperreview.ai` dependency
+- [x] **Internal peer-review pipeline** — Replace the Stanford `paperreview.ai` dependency
   with a self-contained review pipeline powered by multi-query arXiv and Semantic Scholar
   searches, grounded in the same 7-dimension evaluation framework.
 - [ ] **Microservices migration** — Split agents into independently deployable services
