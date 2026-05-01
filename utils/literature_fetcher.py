@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import urllib.parse
 import requests
@@ -23,11 +24,12 @@ class LiteratureFetcher:
             ch.setFormatter(formatter)
             self.logger.addHandler(ch)
             self.logger.setLevel(logging.INFO)
-            
+
         self.state_file = Config.SCHOLAR_STATE_PATH
         self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL
         self._last_semantic_scholar_call = 0.0
         self._min_seconds_between_calls = 300.0 / Config.SEMANTIC_SCHOLAR_RATE_LIMIT
+        self._openalex_warned = False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=False)
     def _fetch_from_semantic_scholar(self, keywords: str, limit: int = 10) -> list:
@@ -115,28 +117,66 @@ class LiteratureFetcher:
                 
                 if page.locator('form[id="captcha-form"]').count() > 0:
                     print("⚠️ Scholar CAPTCHA detected! Please solve it in the browser window.")
-                    page.wait_for_selector('div.gs_ri', timeout=60000)
-                
-                # Fetch up to 3 results from the fallback
-                page.wait_for_selector('div.gs_ri', timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
-                article_elements = page.locator('div.gs_ri').all()[:3]
-                
+                    page.wait_for_selector('div.gs_r.gs_or.gs_scl', timeout=60000)
+
+                # Try current DOM selector, fall back to older alternatives
+                primary_selector = 'div.gs_r.gs_or.gs_scl'
+                fallback_selectors = ['div[data-rp]', 'div.gs_r']
+                article_elements = []
+
+                if page.locator(primary_selector).count() > 0:
+                    page.wait_for_selector(primary_selector, timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
+                    article_elements = page.locator(primary_selector).all()[:3]
+                else:
+                    for sel in fallback_selectors:
+                        if page.locator(sel).count() > 0:
+                            page.wait_for_selector(sel, timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
+                            article_elements = page.locator(sel).all()[:3]
+                            break
+
                 for el in article_elements:
-                    title_el = el.locator('h3.gs_rt a')
-                    if title_el.count() > 0:
-                        title = title_el.inner_text()
-                        link = title_el.get_attribute('href')
-                        snippet = el.locator('div.gs_rs').inner_text() if el.locator('div.gs_rs').count() > 0 else "No snippet available."
-                        
-                        results.append({
-                            "title": title,
-                            "link": link,
-                            "snippet": snippet,
-                            # Fallback data lacks rich API info, so we use N/A
-                            "year": "N/A",
-                            "citationCount": "N/A",
-                            "venue": "N/A"
-                        })
+                    try:
+                        title_el = el.locator('h3.gs_rt a')
+                        if title_el.count() > 0:
+                            title = title_el.inner_text()
+                            link = title_el.get_attribute('href') or ""
+                        else:
+                            heading = el.locator('h3.gs_rt')
+                            title = heading.inner_text() if heading.count() > 0 else ""
+                            link = ""
+                        if not title:
+                            continue
+                    except Exception:
+                        continue
+
+                    try:
+                        snippet_el = el.locator('div.gs_rs')
+                        snippet = snippet_el.inner_text() if snippet_el.count() > 0 else ""
+                    except Exception:
+                        snippet = ""
+
+                    try:
+                        block_text = el.inner_text()
+                        year_match = re.search(r'\b(19|20)\d{2}\b', block_text)
+                        year = year_match.group(0) if year_match else "N/A"
+                    except Exception:
+                        year = "N/A"
+
+                    try:
+                        block_text = el.inner_text()
+                        cited_match = re.search(r'Cited by (\d+)', block_text)
+                        citation_count = cited_match.group(1) if cited_match else "0"
+                    except Exception:
+                        citation_count = "0"
+
+                    results.append({
+                        "title": title,
+                        "link": link,
+                        "snippet": snippet,
+                        "year": year,
+                        "citationCount": citation_count,
+                        "venue": "N/A",
+                    })
             except Exception as e:
                 self.logger.error("Error in fallback Google Scholar scraping: %s", str(e))
             finally:
@@ -170,3 +210,85 @@ class LiteratureFetcher:
         if fallback_results:
             self.logger.info("Successfully fetched %d results from Google Scholar fallback.", len(fallback_results))
         return fallback_results
+
+    def _enrich_with_openalex(self, papers: list) -> list:
+        """
+        Enriches a list of paper dicts with metadata from the OpenAlex API.
+        For each paper, queries OpenAlex by title to retrieve:
+          - topics: list of automatically-assigned topic names (up to 5)
+          - keywords: list of keyword strings
+          - is_oa: boolean — whether the paper is open access
+          - oa_url: direct open access URL if available
+
+        Returns the same list of paper dicts, each extended with an
+        'openalex' key containing the enrichment dict.
+        If OPENALEX_API_KEY is empty or a paper cannot be found,
+        the 'openalex' key is set to an empty dict for that paper.
+        All errors are caught and logged — never raises.
+        """
+        if not Config.OPENALEX_API_KEY:
+            if not self._openalex_warned:
+                self.logger.warning(
+                    "OPENALEX_API_KEY is not set; skipping OpenAlex enrichment."
+                )
+                self._openalex_warned = True
+            for paper in papers:
+                paper["openalex"] = {}
+            return papers
+
+        for paper in papers:
+            title = paper.get("title", "")
+            if not title:
+                paper["openalex"] = {}
+                continue
+
+            try:
+                encoded_title = urllib.parse.quote_plus(title)
+                url = (
+                    f"https://api.openalex.org/works"
+                    f"?search={encoded_title}"
+                    f"&select=title,keywords,topics,open_access,primary_location"
+                    f"&api_key={Config.OPENALEX_API_KEY}"
+                    f"&per_page=1"
+                )
+                response = requests.get(url, timeout=10)
+                if response.status_code != 200:
+                    self.logger.warning(
+                        "OpenAlex returned status %d for '%s'", response.status_code, title
+                    )
+                    paper["openalex"] = {}
+                    time.sleep(0.2)
+                    continue
+
+                data = response.json()
+                results = data.get("results", [])
+                if not results:
+                    paper["openalex"] = {}
+                    time.sleep(0.2)
+                    continue
+
+                result = results[0]
+                topics = [t["display_name"] for t in result.get("topics", [])][:5]
+                keywords = [k["display_name"] for k in result.get("keywords", [])]
+                is_oa = result.get("open_access", {}).get("is_oa", False)
+                oa_url = result.get("open_access", {}).get("oa_url", None)
+
+                paper["openalex"] = {
+                    "topics": topics,
+                    "keywords": keywords,
+                    "is_oa": is_oa,
+                    "oa_url": oa_url,
+                }
+            except Exception as e:
+                self.logger.error(
+                    "OpenAlex enrichment error for '%s': %s", title, str(e)
+                )
+                paper["openalex"] = {}
+
+            time.sleep(0.2)
+
+        return papers
+
+    def enrich_with_openalex(self, papers: list) -> list:
+        """Public entry point for OpenAlex enrichment."""
+        return self._enrich_with_openalex(papers)

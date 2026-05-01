@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from datetime import datetime
 from pydantic import ValidationError
 from domain.schemas import LiteratureReport
@@ -88,43 +89,93 @@ class LiteratureResearchAgent(BaseAgent):
             return fallback_data
             
         self.logger.info("Processing fetched literature data via LLM with Pydantic validation...")
-        data_str = json.dumps(scholar_data, indent=2)
-        
-        prompt = f"""
-        Act as an expert academic research assistant. 
-        I have fetched recent papers related to the project: '{project}'.
-        Keywords used: {keywords}
-        
-        Here are the enriched results (containing full abstracts, exact citation counts, and venues):
-        {data_str}
+        papers_json = json.dumps(scholar_data, indent=2)
 
-        You MUST return your response as a valid JSON object with EXACTLY the following structure:
-        {{
-            "summary": "A 1-2 paragraph engaging summary describing how these specific papers relate to the project. Embed the Markdown links to the papers in the text (e.g., [Paper Title](url)).",
-            "papers": [
-                {{
-                    "paper_name": "Title of the paper",
-                    "cited": "Use the 'citationCount' from the data (e.g., '15' or 'N/A')",
-                    "source": "Use the 'venue' from the data (e.g., 'IEEE Transactions...' or 'N/A')",
-                    "year_published": "Use the 'year' from the data",
-                    "types of available data": "Describe data type based on abstract. IF this is a Theoretical/Mathematical paper, explicitly write 'Theoretical Paper - No Dataset'",
-                    "number of samples": "e.g., 20000. IF theoretical, write 'N/A (Theoretical)'",
-                    "number of features": "e.g., 14. IF theoretical, write 'N/A (Theoretical)'",
-                    "number of classes": "e.g., 5. IF theoretical, write 'N/A (Theoretical)'",
-                    "location": "e.g., In-lab testbed. IF theoretical, write 'N/A (Theoretical)'",
-                    "for how long": "e.g., 3 weeks (or N/A)",
-                    "reproducible": "Must be EXACTLY 'Yes', 'No', or 'N/A'",
-                    "complexity": "Must be EXACTLY 'High', 'Moderate', 'Low', or 'N/A'",
-                    "is there privacy issues?": "Must be EXACTLY 'Yes', 'No', 'Minimal', 'High', or 'N/A'",
-                    "can i control the application collected": "Must be EXACTLY 'Yes', 'No', or 'N/A'"
-                }}
-            ]
-        }}
-        Important constraints:
-        1. Keep the EXACT JSON keys as defined above.
-        2. Obey the strict EXACTLY string match rules for dropdown fields (like reproducible, complexity).
-        3. ESCAPE ALL STRINGS properly. Do NOT use markdown blocks like ```json.
-        """
+        prompt = f"""You are an academic research assistant. Analyze the following list of \
+research papers and extract structured metadata for each one.
+
+For each paper, you are given:
+- title, abstract, year, citation count, venue, url
+- openalex: a dict with topics, keywords, is_oa, oa_url (may be empty)
+
+Extract the following fields for EACH paper. Read the column definitions carefully:
+
+COLUMN DEFINITIONS:
+- "paper name": The full title of the paper. Copy it exactly.
+- "cited": The number of times this paper has been cited (integer as string).
+- "source": The URL where the paper can be accessed.
+- "year published": The year the paper was published (4-digit string).
+- "types of available data": What type of dataset does the paper use or \
+describe? Look for mentions of dataset names, data types (e.g., network \
+traffic, sensor readings, images, signals). Use OpenAlex topics/keywords \
+to help identify. If not mentioned, use "N/A".
+- "number of samples": How many data samples/instances are in the dataset? \
+Look for phrases like "X samples", "dataset of X", "X instances". \
+If not stated, use "N/A".
+- "number of features": What features or attributes does the data have? \
+In communication/networking papers, look for feature types like SNR, RSSI, \
+packet size, frequency bands. List them briefly or count them. \
+If not stated, use "N/A".
+- "number of classes": How many classes or categories are in the dataset? \
+For classification papers, look for "X-class", "X categories", \
+"binary classification". If not stated, use "N/A".
+- "location": Where was the data collected? Lab name, university, city, \
+or type of environment (e.g., "indoor lab", "outdoor testbed", \
+"simulation"). If not stated, use "N/A".
+- "for how long": Over what duration was the data collected? \
+Look for "X days", "X weeks", "X hours". If not stated, use "N/A".
+- "is there privacy issues?": Does the paper mention privacy concerns about \
+its data? Look for mentions of anonymization, GDPR, personal data, \
+user consent. Answer "Yes", "No", or "N/A".
+- "is it reproducible?": Is there a link to code, GitHub repository, or \
+dataset that allows reproducing results? Check oa_url from OpenAlex too. \
+If is_oa is True, mention it. Answer "Yes (link: URL)", "No", or "N/A".
+- "data representation": How is the raw data represented as input features? \
+Look for how the paper converts raw signals/data into model inputs: \
+e.g., "spectrogram image", "feature vector", "graph", "time series array", \
+"frequency-domain matrix", "raw bytes". Use OpenAlex topics/keywords to help. \
+If not stated, use "N/A".
+- "how complicated is it?": Leave this field COMPLETELY EMPTY — do not write \
+anything, not even N/A.
+- "can i control the application collected?": Leave this field COMPLETELY \
+EMPTY — do not write anything, not even N/A.
+
+IMPORTANT RULES:
+- Base your answers primarily on the abstract text provided.
+- Use OpenAlex topics and keywords as supplementary hints, not as the \
+primary source.
+- If a field truly cannot be determined from the available text, use "N/A".
+- Do NOT hallucinate values — only extract what is explicitly stated or \
+strongly implied in the text.
+- Return ONLY a valid JSON object. No markdown, no explanation.
+
+Return format:
+{{
+  "summary": "A 2-3 sentence overview of the literature landscape for this project based on all papers combined.",
+  "papers": [
+    {{
+      "paper name": "...",
+      "cited": "...",
+      "source": "...",
+      "year published": "...",
+      "types of available data": "...",
+      "number of samples": "...",
+      "number of features": "...",
+      "number of classes": "...",
+      "location": "...",
+      "for how long": "...",
+      "is there privacy issues?": "...",
+      "is it reproducible?": "...",
+      "data representation": "...",
+      "how complicated is it?": "",
+      "can i control the application collected?": ""
+    }}
+  ]
+}}
+
+Papers to analyze:
+{papers_json}
+"""
         
         try:
             response = self.ask_llm(prompt)
@@ -169,9 +220,11 @@ class LiteratureResearchAgent(BaseAgent):
             all_papers = []
             seen_titles = set()
 
-            for query in [keywords, domain_keywords, method_keywords]:
+            for i, query in enumerate([keywords, domain_keywords, method_keywords]):
                 if not query or not query.strip():
                     continue
+                if i > 0:
+                    time.sleep(5)  # avoid Semantic Scholar rate limiting between queries
                 results = self.fetcher.search(query)
                 for paper in results:
                     title = paper.get("title", "").lower().strip()
@@ -181,6 +234,9 @@ class LiteratureResearchAgent(BaseAgent):
 
             # Cap at 15 unique papers total
             all_papers = all_papers[:15]
+
+            # Enrich with OpenAlex metadata before LLM processing
+            all_papers = self.fetcher.enrich_with_openalex(all_papers)
 
             if not all_papers:
                 self.logger.warning("No data fetched for %s. Skipping LLM processing.", project)

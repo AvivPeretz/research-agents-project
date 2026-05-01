@@ -66,11 +66,12 @@ class LibraryManager:
         csv_path = os.path.join(project_dir, f"{safe_name}_rolling_table.csv")
 
         columns = [
-            "paper name", "cited", "source", "year published", 
-            "types of available data", "number of samples", "number of features", 
-            "number of classes", "location", "for how long", 
-            "is it reproducible?", "how complicated it is?", 
-            "is there privacy issues?", "can i control the application collected"
+            "paper name", "cited", "source", "year published",
+            "types of available data", "number of samples", "number of features",
+            "number of classes", "location", "for how long",
+            "is it reproducible?", "how complicated is it?",
+            "is there privacy issues?", "data representation",
+            "can i control the application collected?"
         ]
 
         if os.path.exists(csv_path):

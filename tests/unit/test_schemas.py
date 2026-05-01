@@ -17,39 +17,39 @@ class TestPaperDataSchema:
             "paper_name": "Test Paper",
             "data_type": "images, text",
             "reproducible": "Yes",
-            "complexity": "High",
+            "how_complicated": "very",
             "privacy_issues": "Yes",
         }
         paper = PaperData(**data)
         assert paper.paper_name == "Test Paper"
 
     def test_paper_data_defaults_to_na(self):
-        """Asserts that optional fields default to 'N/A' when not provided."""
+        """Asserts that optional fields default to 'N/A' or '' when not provided."""
         data = {"paper_name": "Only Name"}
         paper = PaperData(**data)
         assert paper.paper_name == "Only Name"
         assert paper.data_type == "N/A"
         assert paper.reproducible == "N/A"
-        assert paper.complexity == "N/A"
+        assert paper.how_complicated == ""
         assert paper.privacy_issues == "N/A"
 
     def test_paper_data_invalid_reproducible(self):
-        """Asserts that invalid reproducible value 'Maybe' raises ValidationError."""
+        """Asserts that reproducible accepts any string (no longer a Literal enum)."""
         data = {
             "paper_name": "Test",
-            "reproducible": "Maybe",
+            "reproducible": "Yes (link: https://github.com/example)",
         }
-        with pytest.raises(ValidationError):
-            PaperData(**data)
+        paper = PaperData(**data)
+        assert "Yes" in paper.reproducible
 
     def test_paper_data_invalid_complexity(self):
-        """Asserts that invalid complexity value 'Unknown' raises ValidationError."""
+        """Asserts that how_complicated accepts any string value without raising."""
         data = {
             "paper_name": "Test",
-            "complexity": "Unknown",
+            "how_complicated": "",
         }
-        with pytest.raises(ValidationError):
-            PaperData(**data)
+        paper = PaperData(**data)
+        assert paper.how_complicated == ""
 
     def test_paper_data_invalid_privacy(self):
         """Asserts that invalid privacy_issues value 'Partial' raises ValidationError."""

@@ -23,15 +23,13 @@ class PaperData(BaseModel):
     location: str = "N/A"
     duration: str = Field(default="N/A", alias="for how long")
     
-    # Enforcing strict choices (Enums)
-    reproducible: Literal["Yes", "No", "N/A"] = "N/A"
-    complexity: Literal["High", "Moderate", "Low", "N/A"] = "N/A"
+    reproducible: str = Field(default="N/A", alias="is it reproducible?")
     privacy_issues: Literal["Yes", "No", "Minimal", "High", "N/A"] = Field(
         default="N/A", alias="is there privacy issues?"
     )
-    controllable: Literal["Yes", "No", "N/A"] = Field(
-        default="N/A", alias="can i control the application collected"
-    )
+    data_representation: str = Field(default="N/A", alias="data representation")
+    how_complicated: str = Field(default="", alias="how complicated is it?")
+    can_control: str = Field(default="", alias="can i control the application collected?")
     
     # Allow population by either the variable name or the alias
     model_config = ConfigDict(populate_by_name=True)
