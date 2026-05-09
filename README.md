@@ -62,19 +62,33 @@ internal notifications, successfully bypassing strict institutional SMTP blocks.
 **Literature Research Agent:**
 * Autonomously reads the actual `.tex` manuscript text to dynamically extract highly
   targeted research keywords.
-* **Hybrid Search Engine Approach:** Uses the **Semantic Scholar API** as the primary
-  source for fast, reliable data (full abstracts, exact citation counts, publication venues).
-  If the API fails, it falls back to navigating **Google Scholar** using Playwright.
+* **Three-Tier API Search Pipeline (no browser automation):**
+  1. **Semantic Scholar API** (primary) — authenticated with API key, 1 req/sec rate
+     limit, returns up to 12 papers with full abstracts, citation counts, and venues.
+     Requires `SEMANTIC_SCHOLAR_API_KEY` (optional — unauthenticated requests work at
+     lower rate limits).
+  2. **SerpAPI Google Scholar** (fallback) — activated only when all Semantic Scholar
+     queries return empty. Returns structured JSON directly from Google Scholar; no
+     browser or login required. 250 free searches/month at serpapi.com. Requires
+     `SERPAPI_API_KEY` (optional).
+  3. **scholarly Python library** (last resort) — activated only when both Semantic
+     Scholar and SerpAPI fail. Pure Python; no API key, no Playwright, no login required.
+  4. If all three sources fail, the agent logs an error and skips the project gracefully —
+     no empty report is sent to the researcher.
+* **OpenAlex Enrichment Layer:** After papers are found by any of the three sources above,
+  OpenAlex enriches each paper with topics, keywords, open-access status, and OA URL.
+  This metadata is fed to the LLM to help fill the comparison table. OpenAlex is not
+  an independent search source.
 * **Strict LLM Contracts (Pydantic):** Enforces a rigid JSON schema for all LLM outputs,
   guaranteeing data integrity and completely eliminating hallucinations.
-* Automatically populates a **14-Column Rolling CSV Comparison Table** per project and
-  generates comprehensive Markdown summaries featuring direct, clickable URLs to the
-  discovered papers.
+* Automatically populates a **15-Column Rolling CSV Comparison Table** (including a new
+  *Data Representation* column) per project and generates comprehensive Markdown summaries
+  featuring direct, clickable URLs to the discovered papers.
 * The agent is context-aware and can accurately identify and categorize
   theoretical-mathematical papers without inventing empirical metrics.
 * **Multi-Query Fan-Out:** Generates three search queries per project (primary keywords,
   domain query, and methodology query), deduplicates results by title, and caps the pool
-  at 15 unique papers per run, significantly increasing coverage over the previous
+  at 12 unique papers per run, significantly increasing coverage over the previous
   single-query approach. The Semantic Scholar API `limit` parameter is configurable
   (default: 10).
 * Skips the literature update email when no papers are found, preventing empty reports
@@ -155,9 +169,10 @@ research-agents/
 │   └── schemas.py                  # Pydantic contracts for all LLM outputs
 ├── utils/
 │   ├── __init__.py
+│   ├── captcha_solver.py           # CapSolver API: auto-solve Overleaf reCAPTCHA
 │   ├── database_manager.py         # SQLite single source of truth
 │   ├── library_manager.py          # File I/O: Markdown, CSV, directories
-│   ├── literature_fetcher.py       # Semantic Scholar API + Google Scholar fallback
+│   ├── literature_fetcher.py       # Semantic Scholar → SerpAPI → scholarly fallback chain
 │   ├── overleaf_connector.py       # LaTeX → plain text via RegEx
 │   └── garbage_collector.py        # TTL-based .md file cleanup
 ├── research_library/               # Generated output (gitignored)
@@ -374,6 +389,22 @@ NOTIFICATION_SENDER_PASSWORD=xxxx xxxx xxxx xxxx
 
 OVERLEAF_EMAIL=your.name@university.edu
 OVERLEAF_PASSWORD=your-overleaf-password
+
+
+# ============================================================
+# OPTIONAL API KEYS — Literature Search & Auto-Login
+# ============================================================
+
+# [OPTIONAL] SerpAPI key — Google Scholar fallback for literature search.
+# Activated only when Semantic Scholar returns no results.
+# Free tier: 250 searches/month at https://serpapi.com/
+SERPAPI_API_KEY=
+
+# [OPTIONAL] CapSolver key — automatic reCAPTCHA solving during Overleaf login.
+# If set, the agent will solve reCAPTCHA automatically without manual intervention.
+# If absent, the browser opens for manual login as before.
+# Pay-as-you-go: ~$5 credit lasts years at this volume. https://dashboard.capsolver.com/
+CAPSOLVER_API_KEY=
 ```
 
 ### How to Generate a Gmail App Password
@@ -471,17 +502,24 @@ python main.py --help
 
 ### First-Time Setup: Overleaf Login
 
-The `DataIngestionAgent` requires a one-time manual login to Overleaf to create a persistent
+The `DataIngestionAgent` requires a one-time login to Overleaf to create a persistent
 browser session. This only needs to be done once (or when the session expires):
 
 ```bash
 python main.py --agent ingestion
 ```
 
-A browser window will open automatically. Log in with your Overleaf credentials and solve
-the reCAPTCHA if prompted. Once you reach the Overleaf dashboard, the session is saved
-to `overleaf_state.json` (gitignored) and the browser will close. All future runs will
-use the saved session silently.
+A browser window will open automatically. The agent pre-fills your credentials and clicks
+the login button. If a reCAPTCHA appears:
+
+* **With `CAPSOLVER_API_KEY` set** — the reCAPTCHA is solved automatically via the
+  CapSolver API. No manual action is needed.
+* **Without `CAPSOLVER_API_KEY`** — the browser stays open for you to solve the
+  reCAPTCHA manually within 60 seconds.
+
+Once you reach the Overleaf dashboard, the session is saved to `overleaf_state.json`
+(gitignored) and the browser will close. All future runs will use the saved session
+silently.
 
 ---
 
@@ -626,8 +664,10 @@ Your Gmail App Password is incorrect or 2-Step Verification is not enabled on th
 sending Gmail account. Regenerate the App Password from your Google Account settings.
 
 ### The browser opens but the login times out
-You have 90 seconds to complete the Overleaf login manually. If the reCAPTCHA takes
-longer, re-run `python main.py --agent ingestion` to get a fresh 90-second window.
+If reCAPTCHA appears and `CAPSOLVER_API_KEY` is not set, you have 60 seconds to solve it
+manually. If the window closes before you finish, re-run `python main.py --agent ingestion`
+to open a fresh browser window. To skip manual intervention entirely, add a `CAPSOLVER_API_KEY`
+to your `.env` — the agent will solve reCAPTCHA automatically on the next run.
 
 ### `No valid projects found matching '...'`
 The project name you passed via `--project` does not match any folder inside
