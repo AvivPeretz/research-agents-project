@@ -1,19 +1,26 @@
-import os
 import re
 import time
 import urllib.parse
 import requests
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
-from playwright.sync_api import sync_playwright
 
 # Import centralized configuration
 from config import Config
 
+try:
+    from scholarly import scholarly as _scholarly_lib
+    SCHOLARLY_AVAILABLE = True
+except ImportError:
+    _scholarly_lib = None
+    SCHOLARLY_AVAILABLE = False
+
 class LiteratureFetcher:
     """
-    Handles literature retrieval using a Primary API (Semantic Scholar) 
-    and a Fallback Web Scraper (Google Scholar via Playwright).
+    Handles literature retrieval using:
+      1. Semantic Scholar API (primary)
+      2. SerpAPI Google Scholar (fallback)
+      3. scholarly library (last resort)
     Never raises an exception to the caller; always returns a list of results.
     """
     def __init__(self):
@@ -25,12 +32,10 @@ class LiteratureFetcher:
             self.logger.addHandler(ch)
             self.logger.setLevel(logging.INFO)
 
-        self.state_file = Config.SCHOLAR_STATE_PATH
         self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL
         self._last_semantic_scholar_call = 0.0
         self._min_seconds_between_calls = 300.0 / Config.SEMANTIC_SCHOLAR_RATE_LIMIT
         self._openalex_warned = False
-        self._openalex_search_warned = False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=False)
     def _fetch_from_semantic_scholar(self, keywords: str, limit: int = 10) -> list:
@@ -48,7 +53,7 @@ class LiteratureFetcher:
 
         # Searching for papers from 2023 onwards, fetching configurable number of results
         url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={limit}&year=2023-&fields=title,abstract,year,citationCount,venue,url"
-        
+
         headers = {}
         if Config.SEMANTIC_SCHOLAR_API_KEY:
             headers["x-api-key"] = Config.SEMANTIC_SCHOLAR_API_KEY
@@ -67,7 +72,7 @@ class LiteratureFetcher:
 
         response.raise_for_status() # Will trigger a retry if HTTP error occurs
         data = response.json()
-        
+
         results = []
         if data.get('data'):
             for item in data['data']:
@@ -82,157 +87,18 @@ class LiteratureFetcher:
                 })
         return results
 
-    def _perform_manual_login(self):
-        """Fallback method: Opens browser for user to log into Google Scholar."""
-        print("\n🛑 No Google Scholar session found! Initiating manual login...")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
-            )
-            page = context.new_page()
-            
-            login_url = "https://accounts.google.com/ServiceLogin?continue=https://scholar.google.com/"
-            page.goto(login_url)
-            
-            print(f"🔑 Please log in using the dummy account: {self.dummy_email}")
-            print("\n🚨 ACTION REQUIRED: Complete the login and solve any CAPTCHAs.")
-            
-            try:
-                page.wait_for_url("https://scholar.google.com/**", timeout=90000)
-                print("✅ Reached Google Scholar! Saving session securely...")
-                context.storage_state(path=self.state_file)
-                time.sleep(2)
-            except Exception as e:
-                print(f"❌ Login failed or timed out: {e}")
-            finally:
-                context.close()
-                browser.close()
-
-    def _fetch_from_google_scholar(self, keywords: str) -> list:
-        """FALLBACK: Scrapes Google Scholar if the primary API fails."""
-        self.logger.info("Falling back to Google Scholar scraping...")
-        
-        if not os.path.exists(self.state_file):
-            self._perform_manual_login()
-            
-        if not os.path.exists(self.state_file):
-            self.logger.error("No session file for Scholar. Cannot proceed with fallback scraping.")
-            return []
-
-        results = []
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS)
-            context = browser.new_context(storage_state=self.state_file)
-            page = context.new_page()
-            
-            try:
-                query = urllib.parse.quote_plus(keywords)
-                page.goto(f"https://scholar.google.com/scholar?q={query}&as_ylo=2023")
-                
-                if page.locator('form[id="captcha-form"]').count() > 0:
-                    print("⚠️ Scholar CAPTCHA detected! Please solve it in the browser window.")
-                    page.wait_for_selector('div.gs_r.gs_or.gs_scl', timeout=60000)
-
-                recaptcha_detected = (
-                    page.locator("iframe[src*='recaptcha']").count() > 0 or
-                    page.locator("div.g-recaptcha").count() > 0 or
-                    page.locator("#captcha-form").count() > 0
-                )
-                if recaptcha_detected:
-                    self.logger.warning(
-                        "Google Scholar: CAPTCHA detected. "
-                        "Manual login may be required."
-                    )
-                    return []
-
-                # Try current DOM selector, fall back to older alternatives
-                primary_selector = 'div.gs_r.gs_or.gs_scl'
-                fallback_selectors = ['div[data-rp]', 'div.gs_r']
-                article_elements = []
-
-                if page.locator(primary_selector).count() > 0:
-                    page.wait_for_selector(primary_selector, timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
-                    article_elements = page.locator(primary_selector).all()[:3]
-                else:
-                    for sel in fallback_selectors:
-                        if page.locator(sel).count() > 0:
-                            page.wait_for_selector(sel, timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
-                            article_elements = page.locator(sel).all()[:3]
-                            break
-
-                if not article_elements:
-                    self.logger.warning(
-                        "Google Scholar: no result elements matched any selector. "
-                        "Page may be serving a CAPTCHA or bot-detection response."
-                    )
-                    return []
-                else:
-                    self.logger.info(
-                        "Google Scholar: found %d result elements.", len(article_elements)
-                    )
-
-                for el in article_elements:
-                    try:
-                        title_el = el.locator('h3.gs_rt a')
-                        if title_el.count() > 0:
-                            title = title_el.inner_text()
-                            link = title_el.get_attribute('href') or ""
-                        else:
-                            heading = el.locator('h3.gs_rt')
-                            title = heading.inner_text() if heading.count() > 0 else ""
-                            link = ""
-                        if not title:
-                            continue
-                    except Exception:
-                        continue
-
-                    try:
-                        snippet_el = el.locator('div.gs_rs')
-                        snippet = snippet_el.inner_text() if snippet_el.count() > 0 else ""
-                    except Exception:
-                        snippet = ""
-
-                    try:
-                        block_text = el.inner_text()
-                        year_match = re.search(r'\b(19|20)\d{2}\b', block_text)
-                        year = year_match.group(0) if year_match else "N/A"
-                    except Exception:
-                        year = "N/A"
-
-                    try:
-                        block_text = el.inner_text()
-                        cited_match = re.search(r'Cited by (\d+)', block_text)
-                        citation_count = cited_match.group(1) if cited_match else "0"
-                    except Exception:
-                        citation_count = "0"
-
-                    results.append({
-                        "title": title,
-                        "link": link,
-                        "snippet": snippet,
-                        "year": year,
-                        "citationCount": citation_count,
-                        "venue": "N/A",
-                    })
-            except Exception as e:
-                self.logger.error("Error in fallback Google Scholar scraping: %s", str(e))
-            finally:
-                context.close()
-                browser.close()
-                
-        return results
-
     def search(self, keywords: str) -> list:
         """
-        Main entry point. Attempts Primary API first, then falls back to web scraping.
+        Main entry point for Semantic Scholar search.
+        Returns results from the Semantic Scholar API, or empty list on failure.
+        SerpAPI and scholarly fallbacks are handled at the agent level.
         Always returns a list of dictionaries.
         """
         if not keywords or keywords.strip() == "":
             self.logger.warning("Empty keywords provided. Returning empty list.")
             return []
 
-        # 1. Try Primary API
+        # Try Primary API
         try:
             results = self._fetch_from_semantic_scholar(keywords)
             if results:
@@ -243,11 +109,7 @@ class LiteratureFetcher:
         except Exception as e:
             self.logger.warning("Semantic Scholar API failed: %s", str(e))
 
-        # 2. Try Fallback Scraper
-        fallback_results = self._fetch_from_google_scholar(keywords)
-        if fallback_results:
-            self.logger.info("Successfully fetched %d results from Google Scholar fallback.", len(fallback_results))
-        return fallback_results
+        return []
 
     def _enrich_with_openalex(self, papers: list) -> list:
         """
@@ -342,11 +204,9 @@ class LiteratureFetcher:
         Returns empty list if OPENALEX_API_KEY is not set or on any error.
         """
         if not Config.OPENALEX_API_KEY:
-            if not self._openalex_search_warned:
-                self.logger.warning(
-                    "OPENALEX_API_KEY is not set; skipping OpenAlex direct search."
-                )
-                self._openalex_search_warned = True
+            self.logger.warning(
+                "OPENALEX_API_KEY is not set; skipping OpenAlex direct search."
+            )
             return []
 
         try:
@@ -465,3 +325,119 @@ class LiteratureFetcher:
     def fetch_from_openalex(self, keywords: str, limit: int = 8) -> list:
         """Public entry point for OpenAlex direct paper search."""
         return self._fetch_from_openalex(keywords, limit)
+
+    # ==========================================
+    # SerpAPI Google Scholar fallback
+    # ==========================================
+
+    def _extract_year_from_serpapi(self, item: dict) -> str:
+        """Extracts a 4-digit year from a SerpAPI publication_info summary string."""
+        summary = item.get("publication_info", {}).get("summary", "")
+        match = re.search(r'\b(19|20)\d{2}\b', summary)
+        return match.group(0) if match else ""
+
+    def _fetch_from_serpapi(self, keywords: str) -> list:
+        """
+        Searches Google Scholar via SerpAPI when Semantic Scholar is unavailable.
+        Returns papers in the same dict format as _fetch_from_semantic_scholar.
+        Returns empty list if SERPAPI_API_KEY is not configured or on any error.
+        """
+        if not Config.SERPAPI_API_KEY:
+            self.logger.warning("SERPAPI_API_KEY is not set; skipping SerpAPI search.")
+            return []
+
+        try:
+            url = "https://serpapi.com/search"
+            params = {
+                "engine": "google_scholar",
+                "q": keywords,
+                "api_key": Config.SERPAPI_API_KEY,
+                "num": 10,
+            }
+            response = requests.get(url, params=params, timeout=15)
+            if response.status_code != 200:
+                self.logger.warning(
+                    "SerpAPI returned status %d for keywords '%s'",
+                    response.status_code, keywords,
+                )
+                return []
+
+            results = []
+            for item in response.json().get("organic_results", []):
+                title = item.get("title", "")
+                if not title:
+                    continue
+                results.append({
+                    "title": title,
+                    "abstract": item.get("snippet", ""),
+                    "year": self._extract_year_from_serpapi(item),
+                    "citationCount": str(
+                        item.get("inline_links", {}).get("cited_by", {}).get("total", 0)
+                    ),
+                    "venue": item.get("publication_info", {}).get("summary", ""),
+                    "url": item.get("link", ""),
+                    "openalex": {},
+                })
+
+            self.logger.info(
+                "SerpAPI returned %d papers for '%s'.", len(results), keywords
+            )
+            return results
+
+        except Exception as e:
+            self.logger.error("SerpAPI search failed for '%s': %s", keywords, str(e))
+            return []
+
+    def fetch_from_serpapi(self, keywords: str) -> list:
+        """Public entry point for SerpAPI Google Scholar search."""
+        return self._fetch_from_serpapi(keywords)
+
+    # ==========================================
+    # scholarly last-resort fallback
+    # ==========================================
+
+    def _fetch_from_scholarly(self, keywords: str) -> list:
+        """
+        Last-resort Google Scholar search using the scholarly Python library.
+        Does not require login, session files, or browser automation.
+        Returns papers in the same dict format as other fetch methods.
+        Only called when both Semantic Scholar and SerpAPI have failed.
+        """
+        if not SCHOLARLY_AVAILABLE:
+            self.logger.warning(
+                "scholarly library is not installed; skipping scholarly search."
+            )
+            return []
+
+        try:
+            search_query = _scholarly_lib.search_pubs(keywords)
+            results = []
+            for i, pub in enumerate(search_query):
+                if i >= 8:
+                    break
+                bib = pub.get("bib", {})
+                title = bib.get("title", "")
+                if not title:
+                    continue
+                results.append({
+                    "title": title,
+                    "abstract": bib.get("abstract", ""),
+                    "year": str(bib.get("pub_year", "")),
+                    "citationCount": str(pub.get("num_citations", 0)),
+                    "venue": bib.get("venue", ""),
+                    "url": pub.get("pub_url", ""),
+                    "openalex": {},
+                })
+
+            self.logger.info(
+                "scholarly returned %d papers for '%s'.", len(results), keywords
+            )
+            return results
+
+        except Exception as e:
+            self.logger.error("scholarly search failed for '%s': %s", keywords, str(e))
+            return []
+
+    def fetch_from_scholarly(self, keywords: str) -> list:
+        """Public entry point for scholarly Google Scholar search."""
+        return self._fetch_from_scholarly(keywords)

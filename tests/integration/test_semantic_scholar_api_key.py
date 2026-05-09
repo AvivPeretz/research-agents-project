@@ -207,26 +207,21 @@ class TestEnrichSkipsAlreadyEnrichedPapers:
 
 
 class TestRunIncludesOpenAlexResults:
-    """Verifies that run() uses OpenAlex results when Semantic Scholar returns nothing."""
+    """Verifies that run() uses SerpAPI fallback when Semantic Scholar returns nothing."""
 
     def test_run_includes_openalex_results_when_semantic_scholar_fails(
         self, mock_notifier, sample_project_name
     ):
-        """When fetcher.search returns [], OpenAlex papers fill the pipeline and email is sent."""
-        openalex_papers = [
+        """When fetcher.search returns [], SerpAPI papers fill the pipeline and email is sent."""
+        serpapi_papers = [
             {
-                "title": f"OpenAlex Paper {i}",
-                "url": f"https://openalex.org/W{i}",
+                "title": f"SerpAPI Paper {i}",
+                "url": f"https://serpapi.com/W{i}",
                 "abstract": "An abstract about wireless sensor networks.",
                 "year": "2024",
                 "citationCount": "5",
                 "venue": "Sensors Journal",
-                "openalex": {
-                    "topics": ["WSN"],
-                    "keywords": ["energy"],
-                    "is_oa": False,
-                    "oa_url": None,
-                },
+                "openalex": {},
             }
             for i in range(3)
         ]
@@ -240,10 +235,10 @@ class TestRunIncludesOpenAlexResults:
         with patch.object(agent, "_read_project_text", return_value="Sample research text"):
             with patch.object(agent.fetcher, "search", return_value=[]):
                 with patch.object(
-                    agent.fetcher, "fetch_from_openalex", return_value=openalex_papers
+                    agent.fetcher, "fetch_from_serpapi", return_value=serpapi_papers
                 ):
                     with patch.object(
-                        agent.fetcher, "enrich_with_openalex", return_value=openalex_papers
+                        agent.fetcher, "enrich_with_openalex", return_value=serpapi_papers
                     ):
                         with patch(
                             "agents.base_agent.BaseAgent.ask_llm",

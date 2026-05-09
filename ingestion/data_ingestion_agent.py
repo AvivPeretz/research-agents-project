@@ -8,6 +8,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from config import Config
+from utils.captcha_solver import solve_recaptcha_v2, inject_recaptcha_token
 
 class DataIngestionAgent:
     """
@@ -76,24 +77,24 @@ class DataIngestionAgent:
 
     def _perform_manual_login(self):
         """
-        Opens a visible browser (always headless=False — requires human interaction)
-        and pre-fills credentials. Waits for the user to complete any CAPTCHA manually,
-        then saves the resulting session state to disk.
+        Opens a visible browser (always headless=False) and pre-fills credentials.
+        Attempts automatic login with optional CapSolver reCAPTCHA solving.
+        Saves the resulting session state to disk on success.
         """
-        print("\n🛑 No saved session found or session expired! Initiating manual login...")
+        print("\n🛑 No saved session found or session expired! Initiating automated login...")
 
         if self.notifier:
             self.notifier.send_admin_alert(
                 subject="Overleaf Manual Login Required",
                 message=(
                     "The Overleaf session has expired or is missing. "
-                    "The system has opened a stealth browser window. "
-                    "Please complete the login within 90 seconds."
+                    "The system has opened a browser window and attempted automatic login. "
+                    "If CAPTCHA solving fails, manual intervention may be required."
                 )
             )
 
         with sync_playwright() as p:
-            # Manual login always requires a visible browser — override headless to False
+            # Always use a visible browser so user can intervene if CapSolver fails
             browser, context, page = self._build_stealth_context(p, headless=False)
 
             try:
@@ -107,16 +108,39 @@ class DataIngestionAgent:
                     self._human_type(page, "#password", self.password)
                     self._human_delay(500, 1200)
 
-                print("\n🚨 ACTION REQUIRED: Click 'Log In'. Solve reCAPTCHA manually if it appears.")
-                print("⏳ Waiting up to 90 seconds for you to reach the dashboard...")
+                print("🤖 Clicking login button automatically...")
+                page.click('button[type="submit"]')
+                self._human_delay(2000, 3000)
 
-                page.wait_for_url("**/project", timeout=90000)
+                recaptcha_present = (
+                    page.locator('[data-sitekey]').count() > 0 or
+                    page.locator('.g-recaptcha').count() > 0 or
+                    page.locator('iframe[src*="recaptcha"]').count() > 0
+                )
+
+                if recaptcha_present and Config.CAPSOLVER_API_KEY:
+                    print("🔍 reCAPTCHA detected. Attempting automatic solve via CapSolver...")
+                    site_key = page.get_attribute('[data-sitekey]', 'data-sitekey')
+                    token = solve_recaptcha_v2("https://www.overleaf.com/login", site_key)
+                    if token:
+                        inject_recaptcha_token(page, token)
+                        self._human_delay(1000, 2000)
+                        page.click('button[type="submit"]')
+                    else:
+                        self.logger.warning(
+                            "CapSolver failed to return token. Falling through to manual wait."
+                        )
+                elif recaptcha_present:
+                    print("⚠️ reCAPTCHA detected but CAPSOLVER_API_KEY not set. Manual intervention required.")
+
+                print("⏳ Waiting for dashboard...")
+                page.wait_for_url("**/project", timeout=60000)
                 print("✅ Reached dashboard! Saving session securely...")
                 self._human_delay(1500, 2500)
                 context.storage_state(path=self.state_file)
 
             except PlaywrightTimeoutError:
-                print("❌ Login timed out. You did not reach the dashboard in time.")
+                print("❌ Login timed out. Dashboard not reached in time.")
             except Exception as e:
                 print(f"❌ Login failed: {e}")
             finally:

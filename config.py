@@ -55,6 +55,8 @@ class Config:
     SEMANTIC_SCHOLAR_API_KEY: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
     PLAYWRIGHT_TIMEOUT_MS = 30000      # 30 seconds in milliseconds
     OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
+    SERPAPI_API_KEY: str = os.getenv("SERPAPI_API_KEY", "")
+    CAPSOLVER_API_KEY: str = os.getenv("CAPSOLVER_API_KEY", "")
     # Playwright headless mode — set to False only for local debugging
     PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
 

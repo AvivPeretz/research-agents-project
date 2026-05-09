@@ -235,16 +235,30 @@ Papers to analyze:
             # Cap at 12 unique papers total
             all_papers = all_papers[:12]
 
-            # OpenAlex independent search — adds papers not found via Semantic Scholar
-            openalex_results = self.fetcher.fetch_from_openalex(keywords)
-            for paper in openalex_results:
-                title = paper.get("title", "").lower().strip()
-                if title and title not in seen_titles:
-                    seen_titles.add(title)
-                    all_papers.append(paper)
+            # SerpAPI + scholarly fallback chain — only triggered when Semantic Scholar is empty
+            if not all_papers:
+                self.logger.warning(
+                    "Semantic Scholar returned no results for project '%s'. "
+                    "Trying SerpAPI fallback...", project
+                )
+                all_papers = self.fetcher.fetch_from_serpapi(keywords)
 
-            # Re-cap after adding OpenAlex results
-            all_papers = all_papers[:15]
+                if not all_papers:
+                    self.logger.warning(
+                        "SerpAPI returned no results for project '%s'. "
+                        "Trying scholarly as last resort...", project
+                    )
+                    all_papers = self.fetcher.fetch_from_scholarly(keywords)
+
+                if not all_papers:
+                    self.logger.error(
+                        "All search sources failed for project '%s'. "
+                        "No literature update will be sent.", project
+                    )
+                    continue
+
+            # Unified cap after fallback chain
+            all_papers = all_papers[:12]
 
             # Enrich with OpenAlex metadata before LLM processing
             # (papers already enriched by fetch_from_openalex are skipped)
