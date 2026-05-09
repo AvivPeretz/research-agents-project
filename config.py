@@ -52,6 +52,7 @@ class Config:
     # ==========================================
     
     SEMANTIC_SCHOLAR_RATE_LIMIT = 100  # Requests per 5 minutes
+    SEMANTIC_SCHOLAR_API_KEY: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
     PLAYWRIGHT_TIMEOUT_MS = 30000      # 30 seconds in milliseconds
     OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
     # Playwright headless mode — set to False only for local debugging

@@ -121,6 +121,11 @@ class NotificationAgent(BaseAgent):
                 msg.add_attachment(file_data, maintype='text', subtype='csv', filename=f"{project_name.replace(' ', '_')}_literature.csv")
             except Exception as e:
                 self.logger.error("Could not attach CSV: %s", str(e))
+        elif csv_path:
+            self.logger.warning(
+                "CSV path provided but file not found at runtime: %s",
+                csv_path
+            )
 
         result = self._dispatch_email(msg, recipient)
         if not result:

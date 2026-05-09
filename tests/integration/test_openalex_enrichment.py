@@ -242,3 +242,64 @@ class TestRunCallsEnrichWithOpenalex:
         call_args = mock_enrich.call_args[0][0]
         assert isinstance(call_args, list)
         assert len(call_args) > 0
+
+
+# ---------------------------------------------------------------------------
+# OpenAlex year filter and relevance filtering tests
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAlexYearFilterAndRelevance:
+    """Tests for the year filter param and keyword overlap relevance filtering."""
+
+    def test_openalex_url_includes_year_filter(self, fetcher):
+        """requests.get is called with params dict containing publication_year:>2021 filter."""
+        empty_response = MagicMock()
+        empty_response.status_code = 200
+        empty_response.json.return_value = {"results": []}
+
+        with patch.object(Config, "OPENALEX_API_KEY", "test_key"):
+            with patch(
+                "utils.literature_fetcher.requests.get", return_value=empty_response
+            ) as mock_get:
+                fetcher._fetch_from_openalex("some keywords")
+
+        assert mock_get.call_args.kwargs["params"]["filter"] == "publication_year:>2021"
+
+    def test_keyword_overlap_filters_irrelevant_papers(self, fetcher):
+        """Papers with <2 keyword token matches are removed; relevant papers are kept."""
+        irrelevant_work = {
+            "display_name": "Road to 6G",
+            "abstract_inverted_index": {"5G": [0], "network": [1]},
+            "cited_by_count": 5,
+            "publication_year": 2024,
+            "topics": [],
+            "keywords": [],
+            "open_access": {"is_oa": False, "oa_url": None},
+            "primary_location": None,
+        }
+        relevant_work = {
+            "display_name": "Finite blocklength WSN energy",
+            "abstract_inverted_index": {
+                "wireless": [0], "sensor": [1], "network": [2], "optimization": [3]
+            },
+            "cited_by_count": 10,
+            "publication_year": 2023,
+            "topics": [],
+            "keywords": [],
+            "open_access": {"is_oa": False, "oa_url": None},
+            "primary_location": None,
+        }
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"results": [irrelevant_work, relevant_work]}
+
+        with patch.object(Config, "OPENALEX_API_KEY", "test_key"):
+            with patch(
+                "utils.literature_fetcher.requests.get", return_value=mock_response
+            ):
+                result = fetcher._fetch_from_openalex("WSN finite blocklength")
+
+        assert len(result) == 1
+        assert result[0]["title"] == "Finite blocklength WSN energy"

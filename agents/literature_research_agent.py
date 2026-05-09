@@ -224,7 +224,7 @@ Papers to analyze:
                 if not query or not query.strip():
                     continue
                 if i > 0:
-                    time.sleep(5)  # avoid Semantic Scholar rate limiting between queries
+                    time.sleep(1.5)  # 1 req/sec limit; internal rate limiter handles per-call timing
                 results = self.fetcher.search(query)
                 for paper in results:
                     title = paper.get("title", "").lower().strip()
@@ -232,10 +232,22 @@ Papers to analyze:
                         seen_titles.add(title)
                         all_papers.append(paper)
 
-            # Cap at 15 unique papers total
+            # Cap at 12 unique papers total
+            all_papers = all_papers[:12]
+
+            # OpenAlex independent search — adds papers not found via Semantic Scholar
+            openalex_results = self.fetcher.fetch_from_openalex(keywords)
+            for paper in openalex_results:
+                title = paper.get("title", "").lower().strip()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_papers.append(paper)
+
+            # Re-cap after adding OpenAlex results
             all_papers = all_papers[:15]
 
             # Enrich with OpenAlex metadata before LLM processing
+            # (papers already enriched by fetch_from_openalex are skipped)
             all_papers = self.fetcher.enrich_with_openalex(all_papers)
 
             if not all_papers:
@@ -256,7 +268,7 @@ Papers to analyze:
                 
             links_section = "\n\n### 🔗 Direct Links to Found Papers:\n"
             for item in all_papers:
-                links_section += f"* [{item['title']}]({item['link']})\n"
+                links_section += f"* [{item['title']}]({item.get('link', item.get('url', ''))})\n"
 
             summary_text = f"# Literature Review for: {project}\n\n**Keywords Used:** {keywords}\n\n{research_data.get('summary', 'No summary available.')}{links_section}"
 
@@ -281,6 +293,12 @@ Papers to analyze:
                 continue
 
             self.logger.info("Sending literature update email for %s...", project)
+            if not os.path.exists(csv_file_path):
+                self.logger.warning(
+                    "Rolling CSV not found at expected path: %s — "
+                    "email will be sent without attachment.", csv_file_path
+                )
+
             self.notifier.send_literature_update(
                 project_name=project,
                 md_content=summary_text,
