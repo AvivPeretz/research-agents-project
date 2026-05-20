@@ -104,6 +104,12 @@ class DataIngestionAgent:
             except Exception as e:
                 print(f"❌ Login failed: {e}")
             finally:
+                # Close all open pages to prevent tab accumulation in the Chrome profile
+                for p in context.pages:
+                    try:
+                        p.close()
+                    except Exception:
+                        pass
                 context.close()
 
     def sync_all_projects(self, _retry_depth: int = 0) -> list:
@@ -250,16 +256,19 @@ class DataIngestionAgent:
                             page.goto(editor_url)
                             self._human_delay(7000, 10000)
 
-                            print("   📂 Clicking the 'File' menu...")
+                            # Click File menu
                             file_btn = page.locator('text="File"').first
                             file_btn.click()
-                            self._human_delay(1000, 2000)
+                            self._human_delay(800, 1200)
 
-                            print("   📥 Clicking 'Download as PDF'...")
-                            pdf_btn = page.locator('text="Download as PDF"').first
+                            # Hover over Download to open submenu
+                            download_btn = page.locator('text="Download"').first
+                            download_btn.hover()
+                            self._human_delay(600, 1000)
 
+                            # Click Download as PDF from the submenu
                             with page.expect_download(timeout=30000) as pdf_download_info:
-                                pdf_btn.click()
+                                page.locator('text="Download as PDF"').first.click()
 
                             pdf_download = pdf_download_info.value
                             pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
@@ -300,6 +309,12 @@ class DataIngestionAgent:
             except Exception as e:
                 print(f"❌ Sync failed: {e}")
             finally:
+                # Close all open pages to prevent tab accumulation in the Chrome profile
+                for p in context.pages:
+                    try:
+                        p.close()
+                    except Exception:
+                        pass
                 context.close()
 
         if _need_retry:
