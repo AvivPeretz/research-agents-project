@@ -8,14 +8,13 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from config import Config
-from utils.captcha_solver import solve_recaptcha_v2, inject_recaptcha_token
 
 class DataIngestionAgent:
     """
     Data Ingestion Agent: Performs a Delta Sync.
     Downloads BOTH the source ZIP (for text delta extraction) AND the compiled PDF.
-    Uses stealth techniques to minimize CAPTCHA triggers during login.
-    Utilizes the centralized SQLite database for sync state management.
+    Uses a persistent Chrome profile to minimise CAPTCHA triggers and extend session lifetime.
+    Utilises the centralised SQLite database for sync state management.
     """
     def __init__(self, db=None, notifier=None):
         self.logger = logging.getLogger("DataIngestionAgent")
@@ -23,19 +22,19 @@ class DataIngestionAgent:
         self.password = Config.OVERLEAF_PASSWORD
         self.db = db
         self.notifier = notifier
-        self.state_file = Config.OVERLEAF_STATE_PATH
+        self.user_data_dir = Config.OVERLEAF_USER_DATA_DIR
         self.download_dir = Config.OVERLEAF_DIR
 
         if not os.path.exists(self.download_dir):
             os.makedirs(self.download_dir)
 
     def _human_delay(self, min_ms: int = 800, max_ms: int = 2200):
-        """Pauses for a randomized duration to mimic human interaction timing."""
+        """Pauses for a randomised duration to mimic human interaction timing."""
         time.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
 
     def _human_type(self, page, selector: str, text: str):
         """
-        Types text into a field character by character with randomized delays,
+        Types text into a field character by character with randomised delays,
         mimicking natural human keystroke cadence.
         """
         page.click(selector)
@@ -43,61 +42,45 @@ class DataIngestionAgent:
         page.locator(selector).fill(text)
         self._human_delay(300, 700)
 
-    def _build_stealth_context(self, playwright, headless: bool = None, accept_downloads: bool = False):
-        """
-        Creates a hardened browser context with stealth patches applied.
-        Uses Config.PLAYWRIGHT_HEADLESS unless explicitly overridden.
-        Returns (browser, context, page) as a tuple.
-        """
-        # Use Config value if not explicitly overridden by caller
-        if headless is None:
-            headless = Config.PLAYWRIGHT_HEADLESS
-
-        browser = playwright.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ]
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/135.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-            timezone_id="America/New_York",
-            accept_downloads=accept_downloads,
-        )
-        page = context.new_page()
-        return browser, context, page
-
     def _perform_manual_login(self):
         """
-        Opens a visible browser (always headless=False) and pre-fills credentials.
-        Attempts automatic login with optional CapSolver reCAPTCHA solving.
-        Saves the resulting session state to disk on success.
+        Opens a visible browser using a persistent Chrome profile directory.
+        Pre-fills credentials with human-like typing.
+        Saves the entire Chrome profile on successful login.
+        If reCAPTCHA appears, waits for the user to solve it manually.
         """
-        print("\n🛑 No saved session found or session expired! Initiating automated login...")
+        print("\n🛑 No saved session found or session expired! Initiating login...")
 
         if self.notifier:
             self.notifier.send_admin_alert(
-                subject="Overleaf Manual Login Required",
+                subject="Overleaf Login Required",
                 message=(
                     "The Overleaf session has expired or is missing. "
-                    "The system has opened a browser window and attempted automatic login. "
-                    "If CAPTCHA solving fails, manual intervention may be required."
+                    "A browser window has been opened. "
+                    "Please complete the login manually if required."
                 )
             )
 
         with sync_playwright() as p:
-            # Always use a visible browser so user can intervene if CapSolver fails
-            browser, context, page = self._build_stealth_context(p, headless=False)
-
+            context = p.chromium.launch_persistent_context(
+                self.user_data_dir,
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/135.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
             try:
+                page = context.pages[0] if context.pages else context.new_page()
                 page.goto("https://www.overleaf.com/login")
                 self._human_delay(1500, 3000)
 
@@ -108,44 +91,20 @@ class DataIngestionAgent:
                     self._human_type(page, "#password", self.password)
                     self._human_delay(500, 1200)
 
-                print("🤖 Clicking login button automatically...")
+                print("🤖 Clicking login button...")
                 page.click('button[type="submit"]')
-                self._human_delay(2000, 3000)
 
-                recaptcha_present = (
-                    page.locator('[data-sitekey]').count() > 0 or
-                    page.locator('.g-recaptcha').count() > 0 or
-                    page.locator('iframe[src*="recaptcha"]').count() > 0
-                )
-
-                if recaptcha_present and Config.CAPSOLVER_API_KEY:
-                    print("🔍 reCAPTCHA detected. Attempting automatic solve via CapSolver...")
-                    site_key = page.get_attribute('[data-sitekey]', 'data-sitekey')
-                    token = solve_recaptcha_v2("https://www.overleaf.com/login", site_key)
-                    if token:
-                        inject_recaptcha_token(page, token)
-                        self._human_delay(1000, 2000)
-                        page.click('button[type="submit"]')
-                    else:
-                        self.logger.warning(
-                            "CapSolver failed to return token. Falling through to manual wait."
-                        )
-                elif recaptcha_present:
-                    print("⚠️ reCAPTCHA detected but CAPSOLVER_API_KEY not set. Manual intervention required.")
-
-                print("⏳ Waiting for dashboard...")
-                page.wait_for_url("**/project", timeout=60000)
-                print("✅ Reached dashboard! Saving session securely...")
+                print("⏳ Waiting for dashboard (up to 120s — solve CAPTCHA manually if prompted)...")
+                page.wait_for_url("**/project", timeout=120000)
+                print("✅ Login successful! Chrome profile saved.")
                 self._human_delay(1500, 2500)
-                context.storage_state(path=self.state_file)
 
             except PlaywrightTimeoutError:
-                print("❌ Login timed out. Dashboard not reached in time.")
+                print("❌ Login timed out. Dashboard not reached.")
             except Exception as e:
                 print(f"❌ Login failed: {e}")
             finally:
                 context.close()
-                browser.close()
 
     def sync_all_projects(self, _retry_depth: int = 0) -> list:
         """
@@ -160,27 +119,26 @@ class DataIngestionAgent:
             print("❌ Database connection missing! Aborting sync.")
             return []
 
-        if not os.path.exists(self.state_file):
+        if not os.path.exists(self.user_data_dir) or not os.listdir(self.user_data_dir):
             self._perform_manual_login()
 
-        if not os.path.exists(self.state_file):
-            print("❌ Still no session file. Aborting sync.")
+        if not os.path.exists(self.user_data_dir) or not os.listdir(self.user_data_dir):
+            print("❌ Still no session profile. Aborting sync.")
             return []
 
         updated_projects = []
         _need_retry = False
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(
+            context = p.chromium.launch_persistent_context(
+                self.user_data_dir,
                 headless=Config.PLAYWRIGHT_HEADLESS,
+                accept_downloads=True,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
-                ]
-            )
-            context = browser.new_context(
-                storage_state=self.state_file,
+                ],
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -189,9 +147,8 @@ class DataIngestionAgent:
                 viewport={"width": 1440, "height": 900},
                 locale="en-US",
                 timezone_id="America/New_York",
-                accept_downloads=True,
             )
-            page = context.new_page()
+            page = context.pages[0] if context.pages else context.new_page()
 
             try:
                 print("🌐 Navigating to dashboard...")
@@ -207,10 +164,10 @@ class DataIngestionAgent:
                 except PlaywrightTimeoutError:
                     print("⚠️ Timeout waiting for projects. Session may be invalid.")
                     context.close()
-                    browser.close()
 
-                    if os.path.exists(self.state_file):
-                        os.remove(self.state_file)
+                    # Clear the stale profile so next run triggers re-login
+                    if os.path.exists(self.user_data_dir):
+                        shutil.rmtree(self.user_data_dir)
 
                     # Depth limit — prevent infinite recursion
                     if _retry_depth >= MAX_RETRY_DEPTH:
@@ -344,7 +301,6 @@ class DataIngestionAgent:
                 print(f"❌ Sync failed: {e}")
             finally:
                 context.close()
-                browser.close()
 
         if _need_retry:
             print(f"🔄 Retrying sync cycle (attempt {_retry_depth + 1}/{MAX_RETRY_DEPTH})...")

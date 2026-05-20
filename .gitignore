@@ -11,6 +11,9 @@ overleaf_state.json
 sync_registry.json
 scholar_state.json
 
+# Persistent Chrome profile — contains Overleaf session credentials
+playwright_state/
+
 # Downloaded Data & Generated Outputs
 overleaf_projects/
 research_library/

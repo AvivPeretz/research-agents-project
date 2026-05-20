@@ -29,7 +29,7 @@ class Config:
     # the application has migrated data into the SQLite DB.
     RESEARCHERS_MAP_PATH = BASE_DIR / "researchers_map.json"
     SCHOLAR_STATE_PATH = BASE_DIR / "scholar_state.json"
-    OVERLEAF_STATE_PATH = BASE_DIR / "overleaf_state.json"
+    OVERLEAF_USER_DATA_DIR: str = str(BASE_DIR / "playwright_state" / "overleaf_profile")
     
     # ==========================================
     # 3. LLM Configuration (Groq)
@@ -56,7 +56,6 @@ class Config:
     PLAYWRIGHT_TIMEOUT_MS = 30000      # 30 seconds in milliseconds
     OPENALEX_API_KEY: str = os.getenv("OPENALEX_API_KEY", "")
     SERPAPI_API_KEY: str = os.getenv("SERPAPI_API_KEY", "")
-    CAPSOLVER_API_KEY: str = os.getenv("CAPSOLVER_API_KEY", "")
     # Playwright headless mode — set to False only for local debugging
     PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
 
