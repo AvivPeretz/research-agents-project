@@ -6,6 +6,7 @@ from config import Config
 from agents.literature_research_agent import LiteratureResearchAgent
 from agents.progress_tracking_agent import ProgressTrackingAgent
 from agents.research_enhancement_agent import ResearchEnhancementAgent
+from agents.supervisor_status_agent import SupervisorStatusAgent
 from ingestion.data_ingestion_agent import DataIngestionAgent
 from utils.garbage_collector import GarbageCollector
 from agents.notification_agent import NotificationAgent
@@ -49,7 +50,7 @@ def main():
     parser.add_argument(
         "--agent", 
         type=str, 
-        choices=['all', 'ingestion', 'literature', 'progress', 'enhancement', 'gc'], 
+        choices=['all', 'ingestion', 'literature', 'progress', 'enhancement', 'gc', 'supervisor'],
         default='all', 
         help="Specify which agent to run (default: 'all')"
     )
@@ -97,7 +98,7 @@ def main():
 
     # Validate that the targeted projects actually exist before giving them to AI agents
     valid_targets = [p for p in target_projects if p in all_projects]
-    if not valid_targets and args.agent not in ['gc', 'ingestion']:
+    if not valid_targets and args.agent not in ['gc', 'ingestion', 'supervisor']:
         print(f"--- ⚠️ No valid projects found matching '{args.project}' in overleaf_projects/. Exiting. ---")
         return
 
@@ -134,8 +135,14 @@ def main():
     # --- 4. System Cleanup (Garbage Collector) ---
     if args.agent in ['all', 'gc']:
         print(f"\n--- 4. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
-        gc = GarbageCollector(retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS)
+        gc = GarbageCollector(retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS, db=db)
         run_agent_safely(gc)
+
+    # --- 5. Supervisor Status Agent ---
+    if args.agent in ['all', 'supervisor']:
+        print(f"\n--- 5. Running Supervisor Status Agent 📊 ---")
+        supervisor_agent = SupervisorStatusAgent(db=db, notifier=notifier)
+        run_agent_safely(supervisor_agent)
 
     print("\n--- ✅ All Executions Finished Successfully ---")
 

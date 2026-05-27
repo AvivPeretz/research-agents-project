@@ -3,6 +3,7 @@ import time
 import smtplib
 import markdown
 import logging
+import logging.handlers
 from email.message import EmailMessage
 
 # Import centralized configuration
@@ -22,10 +23,25 @@ class NotificationAgent(BaseAgent):
         self.agent_name = "NotificationAgent"
         self.logger = logging.getLogger(self.agent_name)
         if not self.logger.handlers:
-            ch = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+            ch = logging.StreamHandler()
             ch.setFormatter(formatter)
             self.logger.addHandler(ch)
+
+            log_dir = Config.LOGS_DIR
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            log_file = os.path.join(log_dir, "notification_agent.log")
+            fh = logging.handlers.RotatingFileHandler(
+                log_file,
+                maxBytes=Config.MAX_LOG_SIZE_BYTES,
+                backupCount=Config.LOG_BACKUP_COUNT,
+                encoding='utf-8'
+            )
+            fh.setFormatter(formatter)
+            self.logger.addHandler(fh)
+
             self.logger.setLevel(logging.INFO)
 
         # We now accept the DatabaseManager instance via Dependency Injection

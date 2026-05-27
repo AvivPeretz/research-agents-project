@@ -3,6 +3,7 @@
 import pytest
 
 from utils.overleaf_connector import OverleafConnector
+from config import Config
 
 
 class TestCleanLatex:
@@ -117,4 +118,20 @@ class TestReadAndCleanTexFile:
         empty_tex.write_text("")
         connector = OverleafConnector()
         result = connector.read_and_clean_tex_file(str(tmp_path), "empty.tex")
+        assert result == ""
+
+    # TEST A — FIX 1: default path uses Config.OVERLEAF_DIR, not bare string
+    def test_default_base_storage_path_uses_config_overleaf_dir(self):
+        """Instantiating OverleafConnector() with no args must use Config.OVERLEAF_DIR."""
+        connector = OverleafConnector()
+        assert connector.base_storage_path == str(Config.OVERLEAF_DIR)
+        assert connector.base_storage_path != "overleaf_projects"
+
+    # TEST C — FIX 7: invalid UTF-8 bytes in a .tex file return "" without raising
+    def test_read_and_clean_tex_file_invalid_utf8_returns_empty(self, tmp_path):
+        """Files with invalid UTF-8 encoding must return '' instead of raising UnicodeDecodeError."""
+        bad_tex = tmp_path / "main.tex"
+        bad_tex.write_bytes(b"\xff\xfe invalid utf-8 bytes here")
+        connector = OverleafConnector()
+        result = connector.read_and_clean_tex_file(str(tmp_path), "main.tex")
         assert result == ""

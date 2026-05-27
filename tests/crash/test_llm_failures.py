@@ -5,64 +5,151 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _make_stub_agent():
+    """Return a concrete BaseAgent instance with manually wired mock internals.
+
+    Bypasses __init__ so no real API keys are required.
+    """
+    from agents.base_agent import BaseAgent
+
+    class _Stub(BaseAgent):
+        def run(self):
+            pass
+
+    agent = object.__new__(_Stub)
+    agent.agent_name = "StubAgent"
+    agent.logger = MagicMock()
+    agent.groq_client = MagicMock()
+    agent.gemini_available = False
+    agent.openai_available = False
+    return agent
+
+
 class TestLLMFailures:
     """Tests for handling LLM provider failures and retry logic."""
 
     def test_all_providers_exhausted_raises_runtime_error(self):
         """When all LLM providers fail, ask_llm must raise RuntimeError."""
-        from agents.base_agent import BaseAgent
-        mock_agent = MagicMock(spec=BaseAgent)
-        mock_agent.groq_client = MagicMock()
-        mock_agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
-        mock_agent.gemini_available = False
-        mock_agent.openai_available = False
-        mock_agent.logger = MagicMock()
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        # gemini and openai both disabled
 
-        with pytest.raises(RuntimeError):
-            BaseAgent.ask_llm(mock_agent, "test prompt")
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("test prompt")
 
     def test_groq_fails_switches_to_gemini(self):
-        """Asserts that Gemini provider response is used when Groq fails."""
-        from agents.base_agent import BaseAgent
+        """Gemini provider response is returned when Groq raises an exception."""
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq failed")
 
-        with patch.object(BaseAgent, "_ask_provider") as mock_ask:
-            # First call (Groq) fails, second (Gemini) succeeds
-            mock_ask.side_effect = [Exception("Groq failed"), "Valid response from Gemini"]
+        # Enable Gemini fallback
+        agent.gemini_available = True
+        agent.gemini_model_name = "gemini-1.5-flash"
+        mock_gemini_response = MagicMock()
+        mock_gemini_response.text = "Valid response from Gemini"
+        agent.gemini_client = MagicMock()
+        agent.gemini_client.models.generate_content.return_value = mock_gemini_response
 
-            # Should return Gemini response without exception
+        with patch("agents.base_agent.time.sleep"):
+            result = agent.ask_llm("test prompt")
+
+        assert result == "Valid response from Gemini"
 
     def test_groq_empty_response_triggers_retry(self):
-        """Asserts that empty response triggers retry with valid response on second attempt."""
-        with patch("agents.base_agent.BaseAgent._ask_provider") as mock_ask:
-            mock_ask.side_effect = ["", "Valid response"]
-            # Should retry and get valid response
+        """Empty string response from Groq causes a retry; valid response on retry is returned."""
+        agent = _make_stub_agent()
+
+        # First call → empty (raises ValueError inside ask_llm), second call → valid
+        mock_response_empty = MagicMock()
+        mock_response_empty.choices = [MagicMock()]
+        mock_response_empty.choices[0].message.content = ""
+
+        mock_response_valid = MagicMock()
+        mock_response_valid.choices = [MagicMock()]
+        mock_response_valid.choices[0].message.content = "Valid response"
+
+        agent.groq_client.chat.completions.create.side_effect = [
+            mock_response_empty,
+            mock_response_valid,
+        ]
+
+        with patch("agents.base_agent.time.sleep"):
+            result = agent.ask_llm("test prompt")
+
+        assert result == "Valid response"
+        assert agent.groq_client.chat.completions.create.call_count == 2
 
     def test_groq_error_string_response_triggers_retry(self):
-        """Asserts that error string response triggers retry."""
-        with patch("agents.base_agent.BaseAgent._ask_provider") as mock_ask:
-            mock_ask.side_effect = ["Error: something went wrong", "Valid response"]
-            # Should retry
+        """Response starting with 'Error:' from Groq triggers a retry."""
+        agent = _make_stub_agent()
+
+        mock_response_error = MagicMock()
+        mock_response_error.choices = [MagicMock()]
+        mock_response_error.choices[0].message.content = "Error: something went wrong"
+
+        mock_response_valid = MagicMock()
+        mock_response_valid.choices = [MagicMock()]
+        mock_response_valid.choices[0].message.content = "Good answer"
+
+        agent.groq_client.chat.completions.create.side_effect = [
+            mock_response_error,
+            mock_response_valid,
+        ]
+
+        with patch("agents.base_agent.time.sleep"):
+            result = agent.ask_llm("test prompt")
+
+        assert result == "Good answer"
+        assert agent.groq_client.chat.completions.create.call_count == 2
 
     def test_exponential_backoff_called_between_retries(self):
-        """Asserts that time.sleep is called with increasing values for backoff."""
-        with patch("time.sleep") as mock_sleep:
-            with patch("agents.base_agent.BaseAgent._ask_provider", side_effect=["", "", "Valid"]):
-                # Backoff should be called between retries with increasing waits
-                pass
+        """time.sleep is called between retries and sleep value increases (backoff)."""
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception("Always fails")
+
+        sleep_calls = []
+
+        with patch("agents.base_agent.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("agents.base_agent.random.uniform", return_value=0.0):
+                with pytest.raises(RuntimeError):
+                    agent.ask_llm("test prompt")
+
+        # At least 2 sleep calls (between retries), and values should be increasing
+        assert len(sleep_calls) >= 2
+        # First sleep ≤ second sleep (exponential backoff: 2^1, 2^2, …)
+        assert sleep_calls[0] <= sleep_calls[1]
 
     def test_pydantic_failure_returns_fallback_not_crash(self):
         from agents.literature_research_agent import LiteratureResearchAgent
         mock_notifier = MagicMock()
         agent = LiteratureResearchAgent(active_projects=["Test"], notifier=mock_notifier)
-        
+
         with patch.object(agent, "ask_llm", return_value="not valid json {{{{"):
             result = agent.process_results_with_llm("Test", "keywords", [{"title": "Paper"}])
-        
+
         assert "summary" in result
         assert result["papers"] == []
 
     def test_none_response_from_provider_triggers_retry(self):
-        """Asserts that None response from provider triggers retry."""
-        with patch("agents.base_agent.BaseAgent._ask_provider") as mock_ask:
-            mock_ask.side_effect = [None, "Valid response"]
-            # Should retry and get valid response
+        """None content from Groq triggers a retry; valid response is returned."""
+        agent = _make_stub_agent()
+
+        mock_response_none = MagicMock()
+        mock_response_none.choices = [MagicMock()]
+        mock_response_none.choices[0].message.content = None
+
+        mock_response_valid = MagicMock()
+        mock_response_valid.choices = [MagicMock()]
+        mock_response_valid.choices[0].message.content = "Valid answer"
+
+        agent.groq_client.chat.completions.create.side_effect = [
+            mock_response_none,
+            mock_response_valid,
+        ]
+
+        with patch("agents.base_agent.time.sleep"):
+            result = agent.ask_llm("test prompt")
+
+        assert result == "Valid answer"
+        assert agent.groq_client.chat.completions.create.call_count == 2

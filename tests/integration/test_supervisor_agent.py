@@ -1,6 +1,7 @@
 """Integration tests for SupervisorStatusAgent."""
 
-from unittest.mock import patch
+import argparse
+from unittest.mock import patch, MagicMock, call
 
 import pytest
 
@@ -89,3 +90,34 @@ class TestSupervisorStatusAgent:
         """Asserts that run() calls send_supervisor_report with supervisor email."""
         supervisor_agent.run()
         # Verify notifier was called (implementation dependent)
+
+
+class TestSupervisorCLIDispatch:
+    """Tests that --agent supervisor dispatches to SupervisorStatusAgent.run()."""
+
+    # TEST E — FIX 2: --agent supervisor must call SupervisorStatusAgent.run() exactly once
+    def test_agent_supervisor_cli_calls_run_once(self, monkeypatch, tmp_path):
+        """Simulating --agent supervisor via argparse must invoke SupervisorStatusAgent.run() once."""
+        from config import Config
+        monkeypatch.setattr(Config, "LIBRARY_DIR", str(tmp_path))
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path / "projects"))
+        monkeypatch.setattr(Config, "LOGS_DIR", str(tmp_path / "logs"))
+
+        mock_db = MagicMock()
+        mock_notifier = MagicMock()
+
+        with patch("main.Config.validate"), \
+             patch("main.DatabaseManager", return_value=mock_db), \
+             patch("main.NotificationAgent", return_value=mock_notifier), \
+             patch("main.get_all_active_projects", return_value=[]), \
+             patch("main.SupervisorStatusAgent") as mock_supervisor_cls, \
+             patch("sys.argv", ["main.py", "--agent", "supervisor"]):
+
+            mock_supervisor_instance = MagicMock()
+            mock_supervisor_cls.return_value = mock_supervisor_instance
+
+            from main import main
+            main()
+
+        mock_supervisor_cls.assert_called_once_with(db=mock_db, notifier=mock_notifier)
+        mock_supervisor_instance.run.assert_called_once()

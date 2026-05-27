@@ -9,28 +9,28 @@ class TestPipelineResilience:
     """Tests for pipeline fault tolerance and recovery."""
 
     def test_run_agent_safely_returns_false_on_exception(self):
-        """Asserts that agent exception returns False without crashing."""
-        from agents.base_agent import BaseAgent
+        """run_agent_safely returns False when agent.run() raises an exception."""
+        from main import run_agent_safely
 
-        mock_agent = MagicMock(spec=BaseAgent)
-        mock_agent.run.side_effect = Exception("Agent failed")
+        failing_agent = MagicMock()
+        failing_agent.__class__.__name__ = "FailingTestAgent"
+        failing_agent.run.side_effect = Exception("Agent blew up")
 
-        # Test structure validates exception handling
-        try:
-            mock_agent.run()
-        except Exception:
-            # Expected behavior is to catch and return False
-            pass
+        result = run_agent_safely(failing_agent)
+
+        assert result is False
 
     def test_run_agent_safely_returns_true_on_success(self):
-        """Asserts that successful agent returns True."""
-        from agents.base_agent import BaseAgent
+        """run_agent_safely returns True when agent.run() completes without error."""
+        from main import run_agent_safely
 
-        mock_agent = MagicMock(spec=BaseAgent)
-        mock_agent.run.return_value = None  # run() typically returns None
+        good_agent = MagicMock()
+        good_agent.__class__.__name__ = "GoodTestAgent"
+        good_agent.run.return_value = None  # run() returns None on success
 
-        # Should not raise
-        mock_agent.run()
+        result = run_agent_safely(good_agent)
+
+        assert result is True
 
     def test_pipeline_continues_after_agent_failure(self, db_in_memory, mock_notifier):
         from agents.progress_tracking_agent import ProgressTrackingAgent

@@ -219,92 +219,127 @@ class DataIngestionAgent:
                     is_modified = not is_new and db_last_modified != last_modified_text
 
                     if is_new or is_modified:
-                        reason = "NEW" if is_new else "MODIFIED"
-                        safe_project_name = project_name.replace(" ", "_")
-                        href = link.get_attribute("href").rstrip('/')
-
-                        print(f"🔄 [{reason}] '{project_name}' requires sync.")
-                        self._human_delay(800, 1800)
-
-                        # --- 1. DOWNLOAD ZIP SOURCE ---
-                        zip_download_url = f"https://www.overleaf.com{href}/download/zip"
-                        print("   📦 Downloading ZIP source...")
-                        with page.expect_download() as zip_download_info:
-                            page.evaluate(f"window.location.href = '{zip_download_url}'")
-
-                        zip_download = zip_download_info.value
-                        zip_path = os.path.join(self.download_dir, f"{safe_project_name}.zip")
-                        zip_download.save_as(zip_path)
-
-                        if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-                            self.logger.error("ZIP file missing or empty for '%s'. Skipping sync.", project_name)
-                            continue
-
-                        extract_path = os.path.join(self.download_dir, project_name)
-                        if os.path.exists(extract_path):
-                            shutil.rmtree(extract_path)
-
-                        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                            zip_ref.extractall(extract_path)
-
-                        os.remove(zip_path)
-
-                        # --- 2. DOWNLOAD COMPILED PDF ---
-                        print("   📄 Opening editor to download PDF via the 'File' menu...")
                         try:
-                            editor_url = f"https://www.overleaf.com{href}"
-                            page.goto(editor_url)
-                            self._human_delay(7000, 10000)
+                            reason = "NEW" if is_new else "MODIFIED"
+                            safe_project_name = project_name.replace(" ", "_")
+                            href = link.get_attribute("href").rstrip('/')
 
-                            # Click File menu
-                            file_btn = page.locator('text="File"').first
-                            file_btn.click()
-                            self._human_delay(800, 1200)
+                            print(f"🔄 [{reason}] '{project_name}' requires sync.")
+                            self._human_delay(800, 1800)
 
-                            # Hover over Download to open submenu
-                            download_btn = page.locator('text="Download"').first
-                            download_btn.hover()
-                            self._human_delay(600, 1000)
+                            # --- 1. DOWNLOAD ZIP SOURCE ---
+                            zip_download_url = f"https://www.overleaf.com{href}/download/zip"
+                            print("   📦 Downloading ZIP source...")
+                            with page.expect_download() as zip_download_info:
+                                page.evaluate(f"window.location.href = '{zip_download_url}'")
 
-                            # Click Download as PDF from the submenu
-                            with page.expect_download(timeout=30000) as pdf_download_info:
-                                page.locator('text="Download as PDF"').first.click()
+                            zip_download = zip_download_info.value
+                            zip_path = os.path.join(self.download_dir, f"{safe_project_name}.zip")
+                            zip_download.save_as(zip_path)
 
-                            pdf_download = pdf_download_info.value
-                            pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
-                            pdf_download.save_as(pdf_path)
-                            if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
-                                self.logger.warning("PDF file missing or empty for '%s'.", project_name)
-                            else:
-                                print("   ✅ PDF downloaded successfully.")
+                            if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+                                self.logger.error("ZIP file missing or empty for '%s'. Skipping sync.", project_name)
+                                if self.db:
+                                    self.db.log_agent_run(
+                                        agent_name="DataIngestionAgent",
+                                        project_name=project_name,
+                                        status="FAILURE",
+                                        finished_at=datetime.now().isoformat()
+                                    )
+                                continue
+
+                            extract_path = os.path.join(self.download_dir, project_name)
+                            if os.path.exists(extract_path):
+                                shutil.rmtree(extract_path)
+
+                            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                                zip_ref.extractall(extract_path)
+
+                            os.remove(zip_path)
+
+                            # --- 2. DOWNLOAD COMPILED PDF ---
+                            print("   📄 Opening editor to download PDF via the 'File' menu...")
+                            try:
+                                editor_url = f"https://www.overleaf.com{href}"
+                                page.goto(editor_url)
+                                self._human_delay(7000, 10000)
+
+                                # Click File menu
+                                file_btn = page.locator('text="File"').first
+                                file_btn.click()
+                                self._human_delay(800, 1200)
+
+                                # Hover over Download to open submenu
+                                download_btn = page.locator('text="Download"').first
+                                download_btn.hover()
+                                self._human_delay(600, 1000)
+
+                                # Click Download as PDF from the submenu
+                                with page.expect_download(timeout=30000) as pdf_download_info:
+                                    page.locator('text="Download as PDF"').first.click()
+
+                                pdf_download = pdf_download_info.value
+                                pdf_path = os.path.join(extract_path, f"{safe_project_name}.pdf")
+                                pdf_download.save_as(pdf_path)
+                                if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+                                    self.logger.warning("PDF file missing or empty for '%s'.", project_name)
+                                else:
+                                    print("   ✅ PDF downloaded successfully.")
+
+                            except Exception as e:
+                                print(f"   ⚠️ Exception during PDF download: {e}")
+                            finally:
+                                page.goto("https://www.overleaf.com/project")
+                                self._human_delay(2000, 3500)
+                                try:
+                                    page.wait_for_selector(
+                                        'a[href^="/project/"]',
+                                        state='attached',
+                                        timeout=Config.PLAYWRIGHT_TIMEOUT_MS
+                                    )
+                                except PlaywrightTimeoutError:
+                                    self.logger.warning(
+                                        "Timed out waiting for dashboard after processing '%s'. "
+                                        "Continuing to next project.", project_name
+                                    )
+
+                            self.db.update_sync_registry(project_name, last_modified_text)
+                            self.db.add_project(project_name, Config.OVERLEAF_EMAIL)
+
+                            updated_projects.append(project_name)
+                            print(f"✅ Synced '{project_name}'.")
+
+                            if self.db:
+                                self.db.log_agent_run(
+                                    agent_name="DataIngestionAgent",
+                                    project_name=project_name,
+                                    status="SUCCESS",
+                                    finished_at=datetime.now().isoformat()
+                                )
 
                         except Exception as e:
-                            print(f"   ⚠️ Exception during PDF download: {e}")
-                        finally:
-                            page.goto("https://www.overleaf.com/project")
-                            self._human_delay(2000, 3500)
-                            page.wait_for_selector(
-                                'a[href^="/project/"]',
-                                state='attached',
-                                timeout=Config.PLAYWRIGHT_TIMEOUT_MS
+                            self.logger.error(
+                                "Failed to sync project '%s': %s", project_name, str(e)
                             )
-
-                        self.db.update_sync_registry(project_name, last_modified_text)
-                        self.db.add_project(project_name, Config.OVERLEAF_EMAIL)
-
-                        updated_projects.append(project_name)
-                        print(f"✅ Synced '{project_name}'.")
+                            if self.db:
+                                self.db.log_agent_run(
+                                    agent_name="DataIngestionAgent",
+                                    project_name=project_name,
+                                    status="FAILURE",
+                                    finished_at=datetime.now().isoformat()
+                                )
+                            continue
 
                     else:
                         print(f"⏭️  [SKIPPED] '{project_name}' is up to date.")
 
-                    if self.db:
-                        self.db.log_agent_run(
-                            agent_name="DataIngestionAgent",
-                            project_name=project_name,
-                            status="SUCCESS",
-                            finished_at=datetime.now().isoformat()
-                        )
+                        if self.db:
+                            self.db.log_agent_run(
+                                agent_name="DataIngestionAgent",
+                                project_name=project_name,
+                                status="SUCCESS",
+                                finished_at=datetime.now().isoformat()
+                            )
 
             except Exception as e:
                 print(f"❌ Sync failed: {e}")

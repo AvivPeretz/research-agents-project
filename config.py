@@ -43,7 +43,6 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL_NAME = "gpt-4o-mini"
     
-    LLM_MODEL_NAME = "llama-3.3-70b-versatile"
     LLM_MAX_RETRIES = 3
     LLM_TIMEOUT_SECONDS = 30
     
@@ -86,6 +85,7 @@ class Config:
     # 7. System & Maintenance
     # ==========================================
     GARBAGE_COLLECTION_TTL_DAYS = 30
+    PROGRESS_SNAPSHOT_TTL_DAYS = 60
 
     @classmethod
     def validate(cls):

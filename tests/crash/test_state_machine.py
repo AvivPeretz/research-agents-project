@@ -10,22 +10,24 @@ class TestStateMachine:
     """Tests for Stanford review state machine transitions."""
 
     def test_ready_for_upload_triggers_upload_attempt(self, db_in_memory, mock_notifier):
-        """Asserts that READY_FOR_UPLOAD state triggers upload attempt."""
+        """READY_FOR_UPLOAD state causes upload_to_stanford to be called during run()."""
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         project = "Upload_Project"
         db_in_memory.add_project(project, "test@example.com")
 
-        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=True):
-            with patch.object(ResearchEnhancementAgent, "_get_project_pdf_path", return_value="/tmp/paper.pdf"):
-                agent = ResearchEnhancementAgent(
-                    overleaf_projects=[project],
-                    db=db_in_memory,
-                    notifier=mock_notifier,
-                )
-                # After successful upload, state should change
-                state = db_in_memory.get_project_state(project)
-                assert state is not None
+        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=True) as mock_upload, \
+             patch.object(ResearchEnhancementAgent, "_get_project_pdf_path", return_value="/tmp/paper.pdf"), \
+             patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email", return_value=None):
+            agent = ResearchEnhancementAgent(
+                overleaf_projects=[project],
+                db=db_in_memory,
+                notifier=mock_notifier,
+            )
+            agent.run()
+
+        # upload_to_stanford must have been called for a READY_FOR_UPLOAD project
+        mock_upload.assert_called_once_with(project, "/tmp/paper.pdf")
 
     def test_upload_failure_does_not_change_state(self, db_in_memory, mock_notifier):
         """Asserts that failed upload keeps state as READY_FOR_UPLOAD."""
@@ -67,24 +69,34 @@ class TestStateMachine:
                 assert state["stanford_status"] == "WAITING_FOR_REVIEW"
 
     def test_full_happy_path_reaches_completed(self, db_in_memory, mock_notifier):
-        """Asserts that successful full workflow reaches REVIEW_COMPLETED."""
+        """Successful two-cycle workflow transitions project to REVIEW_COMPLETED in DB.
+
+        Cycle 1 (READY_FOR_UPLOAD): upload succeeds → state becomes WAITING_FOR_REVIEW.
+        Cycle 2 (WAITING_FOR_REVIEW): token found, review fetched, tasks generated
+                                       → state becomes REVIEW_COMPLETED.
+        """
         from agents.research_enhancement_agent import ResearchEnhancementAgent
         from tests.fixtures.mock_responses import STANFORD_REVIEW_TEXT
 
         project = "Happy_Path_Project"
         db_in_memory.add_project(project, "test@example.com")
 
-        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=True):
-            with patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email", return_value="token123"):
-                with patch.object(ResearchEnhancementAgent, "_fetch_review_from_stanford", return_value=STANFORD_REVIEW_TEXT):
-                    with patch.object(ResearchEnhancementAgent, "_generate_actionable_tasks", return_value="Tasks"):
-                        agent = ResearchEnhancementAgent(
-                            overleaf_projects=[project],
-                            db=db_in_memory,
-                            notifier=mock_notifier,
-                        )
-                        # After full workflow, should reach completion
-                        # (implementation dependent on how state is updated)
+        with patch.object(ResearchEnhancementAgent, "upload_to_stanford", return_value=True), \
+             patch.object(ResearchEnhancementAgent, "_get_project_pdf_path", return_value="/tmp/paper.pdf"), \
+             patch.object(ResearchEnhancementAgent, "_get_stanford_token_from_email", return_value="token123"), \
+             patch.object(ResearchEnhancementAgent, "_fetch_review_from_stanford", return_value=STANFORD_REVIEW_TEXT), \
+             patch.object(ResearchEnhancementAgent, "_generate_actionable_tasks", return_value="Tasks"):
+            agent = ResearchEnhancementAgent(
+                overleaf_projects=[project],
+                db=db_in_memory,
+                notifier=mock_notifier,
+            )
+            agent.run()  # Cycle 1: READY_FOR_UPLOAD → WAITING_FOR_REVIEW
+            agent.run()  # Cycle 2: WAITING_FOR_REVIEW → REVIEW_COMPLETED
+
+        state = db_in_memory.get_project_state(project)
+        assert state is not None
+        assert state["stanford_status"] == "REVIEW_COMPLETED"
 
     def test_review_completed_state_skips_all_phases(self, db_in_memory, mock_notifier):
         """Asserts that REVIEW_COMPLETED state skips upload and IMAP checks."""

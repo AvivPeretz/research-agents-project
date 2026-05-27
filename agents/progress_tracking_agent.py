@@ -185,7 +185,7 @@ class ProgressTrackingAgent(BaseAgent):
                         self.db.log_agent_run(
                             agent_name=self.agent_name,
                             project_name=project,
-                            status="SUCCESS",
+                            status="SKIPPED",
                             finished_at=datetime.now().isoformat()
                         )
                     continue

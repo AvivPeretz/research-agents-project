@@ -179,6 +179,13 @@ class SupervisorStatusAgent(BaseAgent):
             
             if not projects_by_sup:
                 self.logger.info("No projects with assigned supervisors found. Exiting.")
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name="(none)",
+                        status="SKIPPED",
+                        finished_at=datetime.now().isoformat()
+                    )
                 return
 
             for sup_email, projects in projects_by_sup.items():

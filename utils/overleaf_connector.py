@@ -2,13 +2,18 @@ import os
 import re
 import logging
 
+from config import Config
+
 class OverleafConnector:
     """
     A utility class dedicated to parsing and cleaning local TeX files.
     Web scraping and downloading are now handled externally by the Data Ingestion Agent.
     """
-    def __init__(self, base_storage_path: str = "overleaf_projects"):
-        self.base_storage_path = base_storage_path
+    def __init__(self, base_storage_path: str = None):
+        if base_storage_path is None:
+            self.base_storage_path = str(Config.OVERLEAF_DIR)
+        else:
+            self.base_storage_path = base_storage_path
         
         self.logger = logging.getLogger("OverleafConnector")
         self.logger.setLevel(logging.INFO)
@@ -56,7 +61,11 @@ class OverleafConnector:
             self.logger.error("File not found: %s", file_path)
             return ""
             
-        with open(file_path, 'r', encoding='utf-8') as file:
-            raw_tex = file.read()
-            
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                raw_tex = file.read()
+        except (UnicodeDecodeError, OSError) as e:
+            self.logger.warning("Could not read file '%s': %s. Returning empty string.", file_path, str(e))
+            return ""
+
         return self.clean_latex_text(raw_tex)

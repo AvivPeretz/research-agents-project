@@ -255,6 +255,13 @@ Papers to analyze:
                         "All search sources failed for project '%s'. "
                         "No literature update will be sent.", project
                     )
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="FAILURE",
+                            finished_at=datetime.now().isoformat()
+                        )
                     continue
 
             # Unified cap after fallback chain
@@ -304,6 +311,13 @@ Papers to analyze:
                 self.logger.info(
                     "No papers found for project '%s'. Skipping literature email.", project
                 )
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=project,
+                        status="SKIPPED",
+                        finished_at=datetime.now().isoformat()
+                    )
                 continue
 
             self.logger.info("Sending literature update email for %s...", project)

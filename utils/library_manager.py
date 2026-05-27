@@ -39,9 +39,13 @@ class LibraryManager:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = f"{timestamp}_{filename_prefix}.md"
         filepath = os.path.join(project_dir, filename)
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except OSError as e:
+            self.logger.error("Failed to write markdown file '%s': %s", filepath, str(e))
+            return None
         return filepath
 
     def save_literature_summary(self, project_name: str, summary: str):
