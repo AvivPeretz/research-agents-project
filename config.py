@@ -43,9 +43,9 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL_NAME = "gpt-4o-mini"
     
-    LLM_MODEL_NAME = "llama-3.3-70b-versatile"
     LLM_MAX_RETRIES = 3
     LLM_TIMEOUT_SECONDS = 30
+    EMAIL_MAX_RETRIES = int(os.getenv("EMAIL_MAX_RETRIES", "3"))
     
     # ==========================================
     # 4. API & Network Configuration
@@ -63,10 +63,13 @@ class Config:
     NOTIFICATION_SENDER_EMAIL = os.getenv("NOTIFICATION_SENDER_EMAIL")
     NOTIFICATION_SENDER_PASSWORD = os.getenv("NOTIFICATION_SENDER_PASSWORD")
     
-    # The UNIVERSITY account that RECEIVES the email (default fallback)
+    # The Overleaf LOGIN account (used only for scraping/automation — may differ from researcher email)
     OVERLEAF_EMAIL = os.getenv("OVERLEAF_EMAIL")
-    # Overleaf account password (used for scraping / automation). May be None in some deployments.
+    # Overleaf account password (used for scraping / automation).
     OVERLEAF_PASSWORD = os.getenv("OVERLEAF_PASSWORD")
+
+    # The researcher email that RECEIVES notifications (defaults to OVERLEAF_EMAIL if not set)
+    RESEARCHER_EMAIL = os.getenv("RESEARCHER_EMAIL") or os.getenv("OVERLEAF_EMAIL")
     
     SMTP_SERVER = "smtp.gmail.com"
     SMTP_PORT = 465
@@ -82,7 +85,24 @@ class Config:
     # ==========================================
     # 7. System & Maintenance
     # ==========================================
-    GARBAGE_COLLECTION_TTL_DAYS = 30
+    GARBAGE_COLLECTION_TTL_DAYS = int(os.getenv("GARBAGE_COLLECTION_TTL_DAYS", "30"))
+
+    # ==========================================
+    # 8. Agent Tuning Parameters
+    # ==========================================
+    # Max chars of LaTeX delta text fed to LLM per progress-tracking call
+    MAX_DELTA_CHARS: int = 8000
+    # Min chars of delta before skipping LLM analysis
+    MIN_DELTA_CHARS: int = 50
+    # Max number of unique papers kept per literature search cycle
+    MAX_LITERATURE_PAPERS: int = 15
+    # Max chars of project LaTeX text used for keyword extraction
+    MAX_PROJECT_TEXT_CHARS: int = 4000
+    # Min chars of paper text required to run the internal peer review
+    MIN_REVIEW_LENGTH: int = 3000
+    # ThreadPoolExecutor max_workers for progress + literature agents
+    PROGRESS_MAX_WORKERS: int = int(os.getenv("PROGRESS_MAX_WORKERS", "4"))
+    LITERATURE_MAX_WORKERS: int = int(os.getenv("LITERATURE_MAX_WORKERS", "4"))
 
     @classmethod
     def validate(cls):
@@ -96,6 +116,7 @@ class Config:
             ("NOTIFICATION_SENDER_PASSWORD", cls.NOTIFICATION_SENDER_PASSWORD),
             ("OVERLEAF_EMAIL", cls.OVERLEAF_EMAIL),
             ("OVERLEAF_PASSWORD", cls.OVERLEAF_PASSWORD),
+            ("RESEARCHER_EMAIL (or OVERLEAF_EMAIL as fallback)", cls.RESEARCHER_EMAIL),
         ]
 
         missing = [name for name, val in required if not val]

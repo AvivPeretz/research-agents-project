@@ -1,13 +1,16 @@
 import os
 import re
 import logging
+from config import Config
 
 class OverleafConnector:
     """
     A utility class dedicated to parsing and cleaning local TeX files.
     Web scraping and downloading are now handled externally by the Data Ingestion Agent.
     """
-    def __init__(self, base_storage_path: str = "overleaf_projects"):
+    def __init__(self, base_storage_path: str = None):
+        if base_storage_path is None:
+            base_storage_path = str(Config.OVERLEAF_DIR)
         self.base_storage_path = base_storage_path
         
         self.logger = logging.getLogger("OverleafConnector")
@@ -47,6 +50,22 @@ class OverleafConnector:
         
         return clean_text.strip()
 
+    def read_all_tex_files(self, project_path: str) -> str:
+        """Reads and cleans ALL .tex files in the project directory, concatenated."""
+        text_content = ""
+        if not os.path.exists(project_path):
+            return ""
+        for root, _, files in os.walk(project_path):
+            for file in sorted(files):
+                if file.endswith('.tex'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            text_content += f.read() + "\n"
+                    except OSError as e:
+                        self.logger.warning("Failed to read %s: %s", file_path, str(e))
+        return self.clean_latex_text(text_content) if text_content else ""
+
     def read_and_clean_tex_file(self, project_path: str, main_file: str = "main.tex") -> str:
         """
         Reads the main .tex file of the project from the local directory and returns the cleaned text.
@@ -56,7 +75,11 @@ class OverleafConnector:
             self.logger.error("File not found: %s", file_path)
             return ""
             
-        with open(file_path, 'r', encoding='utf-8') as file:
-            raw_tex = file.read()
-            
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                raw_tex = file.read()
+        except OSError as e:
+            self.logger.error("Failed to read tex file %s: %s", file_path, str(e))
+            return ""
+
         return self.clean_latex_text(raw_tex)

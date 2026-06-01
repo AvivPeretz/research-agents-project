@@ -65,7 +65,7 @@ class BaseAgent(ABC):
 
         # 2. Setup Gemini (Fallback 1)
         self.gemini_available = False
-        gemini_key = getattr(Config, 'GEMINI_API_KEY', None) 
+        gemini_key = getattr(Config, 'GEMINI_API_KEY', None)
         if gemini_key:
             try:
                 self.gemini_client = genai.Client(api_key=gemini_key)
@@ -86,6 +86,13 @@ class BaseAgent(ABC):
             except Exception as e:
                 self.logger.warning("Failed to configure OpenAI Fallback: %s", str(e))
 
+        # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call
+        self._providers_waterfall = ["groq"]
+        if self.gemini_available:
+            self._providers_waterfall.append("gemini")
+        if self.openai_available:
+            self._providers_waterfall.append("openai")
+
     def _ask_provider(self, provider_name: str, prompt: str) -> str:
         """
         Adapter method to format and send the request according to the specific provider's SDK.
@@ -104,7 +111,6 @@ class BaseAgent(ABC):
             response = self.gemini_client.models.generate_content(
                 model=self.gemini_model_name,
                 contents=prompt,
-                config={"timeout": Config.LLM_TIMEOUT_SECONDS}
             )
             return response.text
             
@@ -127,15 +133,8 @@ class BaseAgent(ABC):
         Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> OpenAI) if available.
         """
         max_retries = Config.LLM_MAX_RETRIES
-        
-        # Build the dynamic waterfall
-        providers_waterfall = ["groq"]
-        if getattr(self, 'gemini_available', False):
-            providers_waterfall.append("gemini")
-        if getattr(self, 'openai_available', False):
-            providers_waterfall.append("openai")
 
-        for provider in providers_waterfall:
+        for provider in self._providers_waterfall:
             self.logger.info("Routing request to LLM provider: [%s]", provider.upper())
             
             for attempt in range(max_retries):
@@ -155,19 +154,60 @@ class BaseAgent(ABC):
                     
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
+                    # Permanent errors — retrying won't help, move to next provider immediately
+                    err_str = str(e)
+                    is_auth_error = "401" in err_str or "403" in err_str or "invalid_api_key" in err_str or "Incorrect API key" in err_str
+                    is_size_error = "413" in err_str or "context_length_exceeded" in err_str or ("tokens" in err_str and "reduce" in err_str)
+                    if is_auth_error or is_size_error:
+                        self.logger.error("[%s] Permanent error (auth/size) — skipping retries for this provider.", provider.upper())
+                        break
                     if attempt < max_retries - 1:
                         sleep_time = 2 ** (attempt + 1) + random.uniform(0, 1)
                         time.sleep(sleep_time)
                     else:
                         self.logger.error("Max retries reached for provider [%s]. Exhausted.", provider.upper())
-                        break 
+                        break
                         
-            if provider != providers_waterfall[-1]:
+            if provider != self._providers_waterfall[-1]:
                 self.logger.warning("Initiating LLM Fallback: Switching from [%s] to next provider...", provider.upper())
             else:
                 self.logger.error("All available LLM providers have been exhausted.")
 
-        raise RuntimeError("CRITICAL: Failed to communicate with any LLM provider after evaluating all fallbacks.")
+        raise RuntimeError(f"CRITICAL: All LLM providers exhausted. Tried: {', '.join(self._providers_waterfall)}. Check API keys and rate limits.")
+
+    def ask_llm_json(self, prompt: str) -> dict:
+        """
+        Calls ask_llm and returns a parsed dict. Strips markdown code fences
+        (```json ... ```) before parsing. Retries the LLM once on JSONDecodeError.
+        Raises ValueError if JSON cannot be parsed after retry.
+        """
+        import json
+        import re
+
+        def _extract_and_parse(text: str) -> dict:
+            # Strip markdown code fences
+            clean = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.MULTILINE)
+            clean = re.sub(r'\s*```$', '', clean.strip(), flags=re.MULTILINE)
+            # Find outermost JSON object or array
+            for start_char, end_char in [('{', '}'), ('[', ']')]:
+                start = clean.find(start_char)
+                end = clean.rfind(end_char) + 1
+                if start != -1 and end > start:
+                    return json.loads(clean[start:end])
+            raise json.JSONDecodeError("No JSON object found", clean, 0)
+
+        response = self.ask_llm(prompt)
+        try:
+            return _extract_and_parse(response)
+        except json.JSONDecodeError as e:
+            self.logger.warning("JSON parse failed on first attempt (%s). Retrying with cleaner prompt.", str(e))
+            retry_prompt = prompt + "\n\nIMPORTANT: Return ONLY valid JSON. No markdown. No explanations. Start with { or [."
+            response2 = self.ask_llm(retry_prompt)
+            try:
+                return _extract_and_parse(response2)
+            except json.JSONDecodeError as e2:
+                self.logger.error("JSON parse failed after retry: %s", str(e2))
+                raise ValueError(f"LLM did not return valid JSON after retry: {str(e2)}") from e2
 
     @abstractmethod
     def run(self):

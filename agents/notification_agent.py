@@ -3,6 +3,7 @@ import time
 import smtplib
 import markdown
 import logging
+import logging.handlers
 from email.message import EmailMessage
 
 # Import centralized configuration
@@ -22,10 +23,21 @@ class NotificationAgent(BaseAgent):
         self.agent_name = "NotificationAgent"
         self.logger = logging.getLogger(self.agent_name)
         if not self.logger.handlers:
-            ch = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            ch = logging.StreamHandler()
             ch.setFormatter(formatter)
             self.logger.addHandler(ch)
+
+            log_dir = Config.LOGS_DIR
+            os.makedirs(log_dir, exist_ok=True)
+            fh = logging.handlers.RotatingFileHandler(
+                os.path.join(log_dir, "NotificationAgent.log"),
+                maxBytes=Config.MAX_LOG_SIZE_BYTES,
+                backupCount=Config.LOG_BACKUP_COUNT,
+                encoding='utf-8'
+            )
+            fh.setFormatter(formatter)
+            self.logger.addHandler(fh)
             self.logger.setLevel(logging.INFO)
 
         # We now accept the DatabaseManager instance via Dependency Injection
@@ -35,8 +47,8 @@ class NotificationAgent(BaseAgent):
         self.sender_email = Config.NOTIFICATION_SENDER_EMAIL
         self.sender_password = Config.NOTIFICATION_SENDER_PASSWORD
 
-        # The UNIVERSITY account that RECEIVES the email (default fallback)
-        self.target_email = Config.OVERLEAF_EMAIL
+        # Fallback recipient when no per-project email is found in DB
+        self.target_email = Config.RESEARCHER_EMAIL
 
     def get_researcher_email(self, project_name: str) -> str:
         """
@@ -65,20 +77,22 @@ class NotificationAgent(BaseAgent):
             self.logger.error("Sender credentials missing in configuration!")
             return False
 
-        for attempt in range(3):
+        max_retries = Config.EMAIL_MAX_RETRIES
+        for attempt in range(max_retries):
             try:
                 self.logger.info("Connecting to Gmail SMTP server as a relay...")
                 with smtplib.SMTP_SSL(Config.SMTP_SERVER, Config.SMTP_PORT) as smtp:
                     smtp.login(self.sender_email, self.sender_password)
                     smtp.send_message(msg)
-                self.logger.info("✅ Email successfully sent to %s.", recipient)
+                self.logger.info("Email successfully sent to %s.", recipient)
                 return True
             except Exception as e:
-                if attempt < 2:
-                    self.logger.warning("Email send attempt %d failed: %s. Retrying...", attempt + 1, str(e))
-                    time.sleep(2)
+                if attempt < max_retries - 1:
+                    backoff = 2 ** (attempt + 1)
+                    self.logger.warning("Email send attempt %d failed: %s. Retrying in %ds...", attempt + 1, str(e), backoff)
+                    time.sleep(backoff)
                 else:
-                    self.logger.error("❌ Failed to send email after 3 attempts: %s", str(e))
+                    self.logger.error("Failed to send email after %d attempts: %s", max_retries, str(e))
         return False
 
     # ==========================================

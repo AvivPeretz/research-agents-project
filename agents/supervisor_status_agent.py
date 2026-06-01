@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pydantic import ValidationError
 
 from agents.base_agent import BaseAgent
@@ -49,6 +49,8 @@ class SupervisorStatusAgent(BaseAgent):
             "average_chars_per_active_day": 0,
             "current_silent_streak": 0
         }
+        metrics["chars_this_week"] = 0
+        metrics["chars_last_week"] = 0
 
         # Calculate days since creation (to handle the "New Project" edge case)
         if created_at_str:
@@ -61,7 +63,7 @@ class SupervisorStatusAgent(BaseAgent):
                     except ValueError:
                         continue
                 if created_dt:
-                    metrics["days_since_creation"] = (datetime.utcnow() - created_dt).days
+                    metrics["days_since_creation"] = (datetime.now(timezone.utc).replace(tzinfo=None) - created_dt).days
             except Exception as e:
                 self.logger.warning("Could not parse created_at for %s: %s", project_name, str(e))
 
@@ -85,6 +87,16 @@ class SupervisorStatusAgent(BaseAgent):
                 active_chars.append(snap['delta_char_count'])
             else:
                 metrics["total_silent_days"] += 1
+
+            try:
+                snap_date = datetime.strptime(snap['snapshot_date'][:10], '%Y-%m-%d')
+                now = datetime.now()
+                if snap_date >= now - timedelta(days=7):
+                    metrics["chars_this_week"] += snap['delta_char_count']
+                elif snap_date >= now - timedelta(days=14):
+                    metrics["chars_last_week"] += snap['delta_char_count']
+            except (ValueError, KeyError):
+                pass
 
         if active_chars:
             metrics["average_chars_per_active_day"] = sum(active_chars) / len(active_chars)
@@ -145,13 +157,29 @@ class SupervisorStatusAgent(BaseAgent):
             self.logger.error("Failed to generate LLM report: %s", str(e))
             raise RuntimeError(f"Failed to generate report: {str(e)}") from e
 
-    def _format_to_markdown(self, report: SupervisorReport) -> str:
+    def _format_to_markdown(self, report: SupervisorReport, metrics_list: list = None) -> str:
         """
         Converts the Pydantic object into a beautiful Markdown report for the email.
         """
         md = f"### Executive Summary\n{report.executive_summary}\n\n---\n\n"
         md += "### 📋 Student Progress Breakdown\n\n"
-        
+
+        if metrics_list:
+            metrics_by_project = {m['project_name']: m for m in metrics_list}
+            md += "| Project | Active Days | Silent Streak | Avg Chars/Day | This Week | Last Week |\n"
+            md += "|---|---|---|---|---|---|\n"
+            for eval in report.evaluations:
+                m = metrics_by_project.get(eval.project_name, {})
+                md += (
+                    f"| {eval.project_name} "
+                    f"| {m.get('total_active_days', '-')} "
+                    f"| {m.get('current_silent_streak', '-')} "
+                    f"| {round(m.get('average_chars_per_active_day', 0))} "
+                    f"| {m.get('chars_this_week', '-')} "
+                    f"| {m.get('chars_last_week', '-')} |\n"
+                )
+            md += "\n"
+
         # Status indicators mapping
         status_emoji = {
             "ON_TRACK": "🟢 **ON TRACK**",
@@ -193,16 +221,24 @@ class SupervisorStatusAgent(BaseAgent):
 
                 metrics_list = []
                 for proj in projects:
+                    if not proj.get('student_name'):
+                        self.logger.info(
+                            "Skipping project '%s' — no student_name assigned.", proj['project_name']
+                        )
+                        continue
                     metrics = self._calculate_project_metrics(proj['project_name'], proj['created_at'])
-                    # Append student name so the LLM knows who it is
-                    metrics['student_name'] = proj['student_name'] or 'Unknown Student'
+                    metrics['student_name'] = proj['student_name']
                     metrics_list.append(metrics)
+
+                if not metrics_list:
+                    self.logger.info("No projects with assigned students for supervisor %s. Skipping.", sup_email)
+                    continue
                 
                 # 1. Send metrics to LLM to get the Pydantic structured report
                 report_obj = self._generate_report_via_llm(sup_email, metrics_list)
                 
                 # 2. Convert Pydantic object to Markdown
-                markdown_content = self._format_to_markdown(report_obj)
+                markdown_content = self._format_to_markdown(report_obj, metrics_list)
                 
                 # 3. Send email via NotificationAgent
                 self.logger.info("Dispatching email report to %s...", sup_email)

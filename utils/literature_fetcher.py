@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import urllib.parse
 import requests
 import logging
@@ -28,15 +29,25 @@ class LiteratureFetcher:
         self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL
         self._last_semantic_scholar_call = 0.0
         self._min_seconds_between_calls = 300.0 / Config.SEMANTIC_SCHOLAR_RATE_LIMIT
+        self._rate_limit_lock = threading.Lock()
+        self._stats = {
+            "semantic_scholar_hits": 0,
+            "semantic_scholar_misses": 0,
+            "google_scholar_hits": 0,
+            "total_calls": 0,
+        }
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=False)
     def _fetch_from_semantic_scholar(self, keywords: str, limit: int = 10) -> list:
         """PRIMARY: Uses Semantic Scholar API. Retries up to 3 times on failure."""
 
-        #enforce rate limit
-        elapsed = time.time() - self._last_semantic_scholar_call
-        if elapsed < self._min_seconds_between_calls:
-            sleep_time = self._min_seconds_between_calls - elapsed
+        with self._rate_limit_lock:
+            now = time.time()
+            sleep_time = max(0.0, self._min_seconds_between_calls - (now - self._last_semantic_scholar_call))
+            # Reserve the slot before releasing the lock so concurrent callers queue up
+            self._last_semantic_scholar_call = now + sleep_time
+
+        if sleep_time > 0:
             self.logger.info("Rate limiting: sleeping %.2fs before Semantic Scholar call.", sleep_time)
             time.sleep(sleep_time)
 
@@ -45,9 +56,8 @@ class LiteratureFetcher:
 
         # Searching for papers from 2023 onwards, fetching configurable number of results
         url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={limit}&year=2023-&fields=title,abstract,year,citationCount,venue,url"
-        
+
         response = requests.get(url, timeout=15)
-        self._last_semantic_scholar_call = time.time()
         response.raise_for_status() # Will trigger a retry if HTTP error occurs
         data = response.json()
         
@@ -154,13 +164,20 @@ class LiteratureFetcher:
             self.logger.warning("Empty keywords provided. Returning empty list.")
             return []
 
+        with self._rate_limit_lock:
+            self._stats["total_calls"] += 1
+
         # 1. Try Primary API
         try:
             results = self._fetch_from_semantic_scholar(keywords)
             if results:
+                with self._rate_limit_lock:
+                    self._stats["semantic_scholar_hits"] += 1
                 self.logger.info("Successfully fetched %d results from Semantic Scholar API.", len(results))
                 return results
             else:
+                with self._rate_limit_lock:
+                    self._stats["semantic_scholar_misses"] += 1
                 self.logger.warning("Semantic Scholar API returned empty results.")
         except Exception as e:
             self.logger.warning("Semantic Scholar API failed: %s", str(e))
@@ -168,5 +185,16 @@ class LiteratureFetcher:
         # 2. Try Fallback Scraper
         fallback_results = self._fetch_from_google_scholar(keywords)
         if fallback_results:
+            with self._rate_limit_lock:
+                self._stats["google_scholar_hits"] += 1
             self.logger.info("Successfully fetched %d results from Google Scholar fallback.", len(fallback_results))
+        self.logger.info("Fetcher stats: %s", self._stats)
         return fallback_results
+
+    def get_stats(self) -> dict:
+        """Returns accumulated call statistics since this instance was created."""
+        stats = dict(self._stats)
+        total = stats["total_calls"]
+        hits = stats["semantic_scholar_hits"]
+        stats["semantic_scholar_hit_rate"] = f"{hits/total*100:.1f}%" if total > 0 else "N/A"
+        return stats

@@ -208,6 +208,9 @@ class DataIngestionAgent:
                 ).all()
                 print(f"📊 Found {len(rows)} potential project rows on the dashboard.")
 
+                # Pre-fetch all known last-modified values in one DB query to avoid N+1
+                known_last_modified = self.db.get_all_last_modified() if self.db else {}
+
                 for row in rows:
                     link = row.locator('a[href^="/project/"]').first
                     if link.count() == 0:
@@ -226,7 +229,7 @@ class DataIngestionAgent:
                         )
 
                     last_modified_text = row.inner_text().strip()
-                    db_last_modified = self.db.get_last_modified(project_name)
+                    db_last_modified = known_last_modified.get(project_name)
 
                     is_new = db_last_modified is None
                     is_modified = not is_new and db_last_modified != last_modified_text
@@ -300,7 +303,9 @@ class DataIngestionAgent:
                             )
 
                         self.db.update_sync_registry(project_name, last_modified_text)
-                        self.db.add_project(project_name, Config.OVERLEAF_EMAIL)
+                        self.db.add_project(project_name, Config.RESEARCHER_EMAIL)
+                        # Reset review state so the enhancement agent re-reviews the updated manuscript
+                        self.db.update_project_state(project_name, stanford_status="READY_FOR_UPLOAD")
 
                         updated_projects.append(project_name)
                         print(f"✅ Synced '{project_name}'.")

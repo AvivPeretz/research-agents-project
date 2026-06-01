@@ -25,7 +25,7 @@ class GarbageCollector:
             self.logger.setLevel(logging.INFO)
 
     def run(self, dry_run: bool = False):
-        self.logger.info(f"Starting Garbage Collection. Retention policy: {self.retention_days} days.")
+        self.logger.info("Starting Garbage Collection. Retention policy: %d days.", self.retention_days)
 
         # SAFEGUARD 1: Only scan specific folders. We ignore 'comparison_tables' entirely.
         target_folders = ["literature_reviews", "project_tracking", "project_enhancement"]
@@ -43,19 +43,24 @@ class GarbageCollector:
                     if file.endswith(".md"):
                         filepath = os.path.join(root, file)
 
-                        # Calculate file age based on its Last Modification Time
-                        file_age_seconds = current_time - os.path.getmtime(filepath)
+                        try:
+                            stat = os.stat(filepath)
+                        except OSError:
+                            continue
+
+                        file_age_seconds = current_time - stat.st_mtime
 
                         if file_age_seconds > self.retention_seconds:
+                            age_days = int(file_age_seconds / 86400)
                             if dry_run:
-                                self.logger.info(f"[DRY RUN] Would delete: {file} (Age: {int(file_age_seconds/86400)} days)")
+                                self.logger.info("[DRY RUN] Would delete: %s (Age: %d days)", file, age_days)
                                 deleted_count += 1
                             else:
                                 try:
                                     os.remove(filepath)
-                                    self.logger.info(f"🗑️ Deleted old file: {file} (Age: {int(file_age_seconds/86400)} days)")
+                                    self.logger.info("Deleted old file: %s (Age: %d days)", file, age_days)
                                     deleted_count += 1
-                                except Exception as e:
-                                    self.logger.error(f"Failed to delete {file}: {e}")
+                                except OSError as e:
+                                    self.logger.error("Failed to delete %s: %s", filepath, str(e))
 
-        self.logger.info(f"Garbage collection cycle finished. Total files removed: {deleted_count}.")
+        self.logger.info("Garbage collection cycle finished. Total files removed: %d.", deleted_count)
