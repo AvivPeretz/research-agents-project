@@ -17,6 +17,7 @@ class TestLLMFailures:
         mock_agent.gemini_available = False
         mock_agent.openai_available = False
         mock_agent.logger = MagicMock()
+        mock_agent._providers_waterfall = []
 
         with pytest.raises(RuntimeError):
             BaseAgent.ask_llm(mock_agent, "test prompt")

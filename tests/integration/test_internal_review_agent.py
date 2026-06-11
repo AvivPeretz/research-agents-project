@@ -81,12 +81,8 @@ class TestInternalReviewAgent:
             "## Action Plan\n1. Fix the baseline comparison by 2026-05-15.\n"
         )
 
-        with patch("agents.research_enhancement_agent.OverleafConnector") as mock_cls, \
+        with patch.object(enhancement_agent.connector, "read_all_tex_files", return_value=long_text), \
              patch("agents.base_agent.BaseAgent.ask_llm", return_value=mock_review):
-
-            mock_connector = MagicMock()
-            mock_connector.read_and_clean_tex_file.return_value = long_text
-            mock_cls.return_value = mock_connector
 
             result = enhancement_agent._run_internal_review(sample_project_name)
 

@@ -115,7 +115,7 @@ def main():
 
     # Validate that the targeted projects actually exist before giving them to AI agents
     valid_targets = [p for p in target_projects if p in all_projects]
-    if not valid_targets and args.agent not in ['gc', 'ingestion']:
+    if not valid_targets and args.agent not in ['gc', 'ingestion', 'supervisor']:
         print(f"--- ⚠️ No valid projects found matching '{args.project}' in overleaf_projects/. Exiting. ---")
         return
 
@@ -161,7 +161,7 @@ def main():
     # --- 5. System Cleanup (Garbage Collector) ---
     if args.agent in ['all', 'gc']:
         print(f"\n--- 5. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
-        gc = GarbageCollector(retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS)
+        gc = GarbageCollector(db=db, retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS)
         run_agent_safely(gc, dry_run=args.dry_run)
 
     print(f"\n--- Pipeline completed | Agent={args.agent} | Project={args.project} | Dry-run={args.dry_run} ---")

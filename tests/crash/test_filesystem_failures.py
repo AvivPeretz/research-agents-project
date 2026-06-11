@@ -74,3 +74,12 @@ class TestFilesystemFailures:
         lm = LibraryManager(base_dir=str(tmp_path))
         path = lm.save_literature_summary("TestProject", "# Hello")
         assert path is not None
+
+    # TEST D — FIX 8: _save_markdown must absorb OSError (e.g. disk full) and return None/False
+    def test_library_manager_save_markdown_absorbs_oserror(self, tmp_path):
+        """OSError during file write must not propagate; method returns None instead of raising."""
+        from utils.library_manager import LibraryManager
+        lm = LibraryManager(base_dir=str(tmp_path))
+        with patch("builtins.open", side_effect=OSError("No space left on device")):
+            result = lm._save_markdown("literature_reviews", "TestProject", "summary", "content")
+        assert result is None

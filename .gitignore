@@ -10,6 +10,7 @@ env/
 overleaf_state.json
 sync_registry.json
 scholar_state.json
+researchers_map.json
 
 # Downloaded Data & Generated Outputs
 overleaf_projects/

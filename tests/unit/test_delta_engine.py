@@ -14,8 +14,9 @@ class TestDeltaExtraction:
     def progress_agent(self):
         """Create a ProgressTrackingAgent instance with mocked dependencies."""
         agent = MagicMock(spec=ProgressTrackingAgent)
-        # Bind the real _extract_delta method to the mock
+        # Bind the real _extract_delta and _normalize_lines methods to the mock
         agent._extract_delta = ProgressTrackingAgent._extract_delta.__get__(agent)
+        agent._normalize_lines = ProgressTrackingAgent._normalize_lines
         return agent
 
     def test_extract_delta_detects_new_line(self, progress_agent):

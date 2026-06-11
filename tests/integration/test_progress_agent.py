@@ -35,7 +35,7 @@ class TestProgressTrackingAgent:
 
     def test_check_text_changes_first_run_returns_has_changes_true(self, progress_agent, sample_project_name):
         """Asserts that on first run with no prior state, has_changes is True."""
-        with patch.object(progress_agent.connector, "read_and_clean_tex_file", return_value="New content"):
+        with patch.object(progress_agent.connector, "read_all_tex_files", return_value="New content"):
             result = progress_agent.check_text_changes(sample_project_name)
             assert result["has_changes"] is True
 
@@ -51,7 +51,7 @@ class TestProgressTrackingAgent:
         """Asserts that delta contains new content when text changes."""
         old_text = "Original content"
         new_text = "Original content\nNew addition here"
-        with patch.object(progress_agent.connector, "read_and_clean_tex_file", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_all_tex_files", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 result = progress_agent.check_text_changes(sample_project_name)
                 assert result["has_changes"] is True
@@ -73,7 +73,7 @@ class TestProgressTrackingAgent:
         old_text = "Original"
         new_text = "Original\nNew content added here which is long enough to exceed the fifty character minimum threshold."
 
-        with patch.object(progress_agent.connector, "read_and_clean_tex_file", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_all_tex_files", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 progress_agent.run()
                 mock_notifier.send_progress_feedback.assert_called()

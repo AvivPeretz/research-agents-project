@@ -78,7 +78,7 @@ class OverleafConnector:
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 raw_tex = file.read()
-        except OSError as e:
+        except (UnicodeDecodeError, OSError) as e:
             self.logger.error("Failed to read tex file %s: %s", file_path, str(e))
             return ""
 
