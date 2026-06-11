@@ -20,7 +20,7 @@ def setup_session():
     print("🚀 Opening browser for Overleaf login...")
     print("📋 Credentials will be pre-filled automatically.")
     print("⚠️  If reCAPTCHA appears, solve it manually in the browser window.")
-    print("⏳ You have 120 seconds.\n")
+    print("⏳ You have 300 seconds (5 minutes).\n")
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
@@ -43,7 +43,7 @@ def setup_session():
         page.click('button[type="submit"]')
 
         try:
-            page.wait_for_url("**/project", timeout=120000)
+            page.wait_for_url("**/project", timeout=300000)
             print("✅ Login successful! Chrome profile saved to:")
             print(f"   {Config.OVERLEAF_USER_DATA_DIR}")
             print("\n📤 To deploy to server, run:")

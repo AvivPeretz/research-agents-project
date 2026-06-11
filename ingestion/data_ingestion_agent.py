@@ -88,7 +88,7 @@ class DataIngestionAgent:
                 message=(
                     "The Overleaf session has expired or is missing. "
                     "The system has opened a stealth browser window. "
-                    "Please complete the login within 90 seconds."
+                    "Please complete the login within 300 seconds (5 minutes)."
                 )
             )
 
@@ -108,9 +108,9 @@ class DataIngestionAgent:
                     self._human_delay(500, 1200)
 
                 print("\n🚨 ACTION REQUIRED: Click 'Log In'. Solve reCAPTCHA manually if it appears.")
-                print("⏳ Waiting up to 90 seconds for you to reach the dashboard...")
+                print("⏳ Waiting up to 300 seconds (5 minutes) for you to reach the dashboard...")
 
-                page.wait_for_url("**/project", timeout=90000)
+                page.wait_for_url("**/project", timeout=300000)
                 print("✅ Reached dashboard! Saving session securely...")
                 self._human_delay(1500, 2500)
                 context.storage_state(path=self.state_file)

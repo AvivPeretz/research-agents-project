@@ -1,180 +1,493 @@
-# Academic Research Multi-Agent System 🔬🤖
+# Academic Research Multi-Agent System
 
-A Python-based, multi-agent artificial intelligence system designed to automate and enhance
-academic research workflows. This project utilizes LLMs (Groq, Gemini, OpenAI), browser
-automation (Playwright), strict Object-Oriented Programming (OOP) principles, Defensive
-Programming, and Centralized SQLite state management to create an autonomous, decoupled
-pipeline that fetches real-time data, conducts targeted literature reviews, tracks writing
-progress, enhances manuscripts via Stanford's paperreview.ai, and delivers beautifully
-formatted email reports.
+A Python multi-agent pipeline that automates research workflows for academic labs. Six
+specialized agents — orchestrated by `main.py` — handle Overleaf project synchronization,
+literature discovery, manuscript progress tracking, external peer-review submission, lab
+supervision reporting, and email delivery. The system is designed to run unattended on a
+lab server and notify researchers and supervisors by email.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-- [Features & Architecture](#-features--architecture)
-- [Project Structure](#-project-structure)
-- [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
-  - [Option A — Automated Setup](#-option-a--automated-setup-recommended)
-  - [Option B — Manual Setup](#-option-b--manual-setup)
-- [Configuration](#-configuration)
-- [Usage & CLI](#-usage--command-line-interface-cli)
-- [Agent Reference](#-agent-reference)
-  - [First-Time Overleaf Login](#first-time-setup-overleaf-login)
-  - [Stanford Email Forwarding Rule](#setting-up-the-stanford-review-email-forwarding-rule)
-  - [Registering Projects](#registering-a-project-and-researcher-email)
-- [Troubleshooting](#-troubleshooting)
-- [Roadmap](#-roadmap)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [How to Run](#how-to-run)
+- [Testing](#testing)
+- [File Structure](#file-structure)
+- [Known Limitations](#known-limitations)
+- [Roadmap](#roadmap)
 
 ---
 
-## 🌟 Features & Architecture
+## Architecture
 
-The system is built on a modular, scalable architecture separating data ingestion from LLM
-processing. It operates a preliminary web-scraping agent followed by four specialized AI
-agents, all utilizing a shared `BaseAgent` class for robust API connectivity and centralized
-logging.
-
-A core feature of the system is its **Dual-Email Architecture**: It utilizes an official
-University Microsoft 365 account for academic credibility (e.g., retrieving source files and
-external submissions) while employing a decoupled Gmail relay account to safely dispatch
-internal notifications, successfully bypassing strict institutional SMTP blocks.
+The pipeline runs in five sequential phases. Each phase is owned by a dedicated agent.
+All agents extend a shared `BaseAgent` abstract class that provides the Multi-LLM waterfall,
+exponential-backoff retry logic, and rotating file logging.
 
 ---
 
-### Phase 0: Data Ingestion (Delta Sync)
-**Data Ingestion Agent:**
-* Operates completely autonomously using Microsoft's **Playwright** framework.
-* Incorporates **Session Persistence** to securely bypass login screens and CAPTCHA after
-  an initial manual authentication.
-* Implements a **Delta Sync** mechanism: Scans the researcher's Overleaf dashboard and
-  downloads *only* new or recently modified projects (fetching both ZIP source codes and
-  compiled PDFs), saving bandwidth and processing time.
-* Uses direct endpoint navigation to reliably download archives, immune to front-end UI
-  changes.
-* Uses `RotatingFileHandler` and `StreamHandler` for logging, consistent with all other
-  agents and supporting container-friendly stdout output.
+### Phase 0 — Data Ingestion (Delta Sync)
+**`DataIngestionAgent`** (`ingestion/data_ingestion_agent.py`)
+
+- Uses Playwright with a persisted browser session (JSON storage state) to log into
+  Overleaf and scan the project dashboard.
+- Implements a **Delta Sync**: only projects whose "last modified" timestamp changed
+  since the previous run are re-downloaded, saving bandwidth and processing time.
+- Downloads both the ZIP source archive and the compiled PDF for each changed project.
+- On session expiry, opens a visible browser window and waits up to 5 minutes for the
+  operator to log in manually; sends an admin alert email before opening the window.
+- Per-project failures are isolated: one failing download does not abort the rest of
+  the sync cycle.
 
 ---
 
-### Phase 1: Global Research & Data Extraction
-**Literature Research Agent:**
-* Autonomously reads the actual `.tex` manuscript text to dynamically extract highly
-  targeted research keywords.
-* **Three-Tier API Search Pipeline (no browser automation):**
-  1. **Semantic Scholar API** (primary) — authenticated with API key, 1 req/sec rate
-     limit, returns up to 12 papers with full abstracts, citation counts, and venues.
-     Requires `SEMANTIC_SCHOLAR_API_KEY` (optional — unauthenticated requests work at
-     lower rate limits).
-  2. **SerpAPI Google Scholar** (fallback) — activated only when all Semantic Scholar
-     queries return empty. Returns structured JSON directly from Google Scholar; no
-     browser or login required. 250 free searches/month at serpapi.com. Requires
-     `SERPAPI_API_KEY` (optional).
-  3. **scholarly Python library** (last resort) — activated only when both Semantic
-     Scholar and SerpAPI fail. Pure Python; no API key, no Playwright, no login required.
-  4. If all three sources fail, the agent logs an error and skips the project gracefully —
-     no empty report is sent to the researcher.
-* **OpenAlex Enrichment Layer:** After papers are found by any of the three sources above,
-  OpenAlex enriches each paper with topics, keywords, open-access status, and OA URL.
-  This metadata is fed to the LLM to help fill the comparison table. OpenAlex is not
-  an independent search source.
-* **Strict LLM Contracts (Pydantic):** Enforces a rigid JSON schema for all LLM outputs,
-  guaranteeing data integrity and completely eliminating hallucinations.
-* Automatically populates a **15-Column Rolling CSV Comparison Table** (including a new
-  *Data Representation* column) per project and generates comprehensive Markdown summaries
-  featuring direct, clickable URLs to the discovered papers.
-* The agent is context-aware and can accurately identify and categorize
-  theoretical-mathematical papers without inventing empirical metrics.
-* **Multi-Query Fan-Out:** Generates three search queries per project (primary keywords,
-  domain query, and methodology query), deduplicates results by title, and caps the pool
-  at 12 unique papers per run, significantly increasing coverage over the previous
-  single-query approach. The Semantic Scholar API `limit` parameter is configurable
-  (default: 10).
-* Skips the literature update email when no papers are found, preventing empty reports
-  from reaching researchers.
+### Phase 1 — Literature Research
+**`LiteratureResearchAgent`** (`agents/literature_research_agent.py`)
+
+- Reads the downloaded `.tex` files for each project and uses the LLM to extract two
+  targeted search queries: a topic keyword set and a method keyword set.
+- Runs a **three-tier search pipeline**:
+  1. **Semantic Scholar API** (primary) — authenticated with `SEMANTIC_SCHOLAR_API_KEY`
+     for higher rate limits; returns full abstracts, citation counts, and venues.
+  2. **SerpAPI Google Scholar** (fallback) — activated only when Semantic Scholar returns
+     no results; returns structured JSON without browser automation.
+     Requires `SERPAPI_API_KEY` (250 free searches/month at serpapi.com).
+  3. **scholarly Python library** (last resort) — activated only when both above sources
+     fail; pure Python, no API key required.
+  4. If all three sources fail, the agent logs an error and skips the project — no empty
+     report is sent.
+- After collection, each paper is enriched via the **OpenAlex API** (topics, keywords,
+  open-access URL). OpenAlex is an enrichment layer, not a search source.
+- An LLM relevance filter drops papers that are clearly off-topic before capping the
+  pool at 15 unique papers per run.
+- LLM output is validated against a **Pydantic v2 schema** (`LiteratureReport`) before
+  any downstream processing, eliminating hallucinated or malformed records.
+- Results are written to a rolling CSV comparison table and a Markdown summary per
+  project; a formatted HTML email is sent to the researcher.
+- All projects are processed in parallel via `ThreadPoolExecutor`.
 
 ---
 
-### Phase 2: Manuscript Analysis
-**Progress Tracking Agent** *(Triggered only on new data):*
-* Analyzes the newly ingested plain text extracted from LaTeX files.
-* Utilizes a **SQLite Database** to store historical project states and isolate only the
-  *delta* (newly added or modified sentences) since the last run, saving LLM tokens.
-* Acts as an academic reviewer to provide highly targeted, surgical feedback on the tone,
-  structure, and clarity of the day's specific writing additions.
+### Phase 2 — Manuscript Progress Tracking
+**`ProgressTrackingAgent`** (`agents/progress_tracking_agent.py`)
+
+- Reads the plain text extracted from `.tex` files and computes the delta versus the
+  text seen on the previous run (SQLite-backed, per-project).
+- Sends only the new or modified sentences to the LLM, saving tokens on unchanged content.
+- The LLM acts as an academic reviewer and provides targeted feedback on the tone,
+  structure, and clarity of the day's additions.
+- Records a progress snapshot (date, delta character count, `had_changes` flag) to the
+  `progress_snapshots` table; used by SupervisorStatusAgent for trend analysis.
+- All projects are processed in parallel via `ThreadPoolExecutor`.
 
 ---
 
-### Phase 3: Peer-Review & Innovation
-**Research Enhancement Agent** *(Triggered autonomously):*
-* Automates a rigorous external peer-review submission process by interfacing with
-  Stanford's **paperreview.ai**.
-* **Phase 1 (Upload):** Uses Playwright to autonomously upload the PDF manuscript and
-  submit the university email address.
-* **Phase 2 (Fetch & Analyze):** Operates an IMAP connector to read incoming automated
-  emails, utilizes Regex to extract the unique Stanford access token, and uses Playwright
-  to scrape the generated peer-review from the web portal.
-* Uses the LLM to translate harsh academic critiques into an actionable, supportive To-Do
-  list with estimated effort hours and strict deadlines for the research team.
-* **Internal Review Fallback:** When the Stanford pipeline fails at any phase, an
-  automated internal fallback activates. It reads the manuscript via `OverleafConnector`,
-  intelligently truncates long papers (40% introduction / 35% body / 25% conclusion),
-  loads related papers from the project's existing rolling CSV, and makes a single LLM
-  call producing a full academic review across the same 7 evaluation dimensions. The
-  result is saved to the same path Stanford would use, emailed to the researcher, and
-  recorded in the database as `INTERNAL_REVIEW_COMPLETED`.
-* Both pipelines skip projects with fewer than 3,000 characters of manuscript text,
-  setting their status to `SKIPPED_INSUFFICIENT_TEXT`.
-* Correctly bypasses projects already in `REVIEW_COMPLETED` or
-  `INTERNAL_REVIEW_COMPLETED` state without re-processing them.
-* The Chromium instances launched during upload and review-fetch phases run with
-  `--no-sandbox` and `--disable-dev-shm-usage` flags, making the agent compatible
-  with Docker and Linux container environments.
+### Phase 3 — Research Enhancement (External Peer Review)
+**`ResearchEnhancementAgent`** (`agents/research_enhancement_agent.py`)
+
+- Manages a two-phase external review cycle via Stanford's `paperreview.ai`:
+  - **Upload phase**: Playwright uploads the compiled PDF and submits the university email.
+  - **Fetch phase**: IMAP polls the Gmail relay for Stanford's reply, extracts the access
+    token via regex, and Playwright scrapes the generated review from the web portal.
+- Translates the raw academic critique into an actionable to-do list with estimated effort
+  and deadlines using the LLM.
+- **Internal review fallback**: when the Stanford pipeline fails at any stage, the agent
+  generates a full internal review directly from the manuscript text and rolling CSV data
+  via a single LLM call. The result is saved and emailed identically to a Stanford review,
+  and the project status is recorded as `INTERNAL_REVIEW_COMPLETED`.
+- Projects shorter than 3,000 characters are skipped (`SKIPPED_INSUFFICIENT_TEXT`).
+- Projects already in `REVIEW_COMPLETED` or `INTERNAL_REVIEW_COMPLETED` are not
+  re-processed.
+- Chromium is launched with `--no-sandbox` and `--disable-dev-shm-usage` for Docker/Linux
+  compatibility.
 
 ---
 
-### Phase 4: Communication & Alerting
-**Notification Agent** *(Event-Driven & Injected):*
-* Acts as the system's external communication hub. Completely decoupled from the main
-  execution flow, triggered via an **Event-Driven Architecture**.
-* Implements **Dependency Injection (DI)**: The Orchestrator (`main.py`) instantiates a
-  single shared notification service and injects it into all operational agents, preventing
-  tight coupling and redundant connections.
-* Uses the central **SQLite Database** to dynamically route specific project feedback to
-  the appropriate researcher's inbox.
-* Translates raw Markdown reports into beautifully styled, professional HTML layouts
-  dynamically branded per agent (e.g., green for literature, purple for project
-  management).
-* Automatically sends executive summaries via a secure SMTP relay connection, with full
-  detailed reports embedded directly in the email body.
+### Phase 4 — Supervisor Status Report
+**`SupervisorStatusAgent`** (`agents/supervisor_status_agent.py`)
+
+- Groups all active projects by their assigned supervisor email address.
+- For each supervisor, calculates 28-day objective metrics per project: active vs silent
+  days, average characters per active day, current silent streak, weekly character counts.
+- Sends the raw metrics to the LLM for classification into `ON_TRACK`, `NEEDS_ATTENTION`,
+  or `STALLED`, validated against a `SupervisorReport` Pydantic schema.
+- Formats the result as a Markdown table and dispatches a weekly email to each supervisor.
+- New projects (under 14 days old) are automatically classified as `ON_TRACK`.
 
 ---
 
-## 📁 Project Structure
+### Support — Notifications
+**`NotificationAgent`** (`agents/notification_agent.py`)
+
+- Instantiated once by `main.py` and injected into all agents (Dependency Injection).
+- Formats Markdown reports as styled HTML emails branded per agent (colour-coded).
+- Routes each notification to the correct researcher via the SQLite database.
+- Sends via a Gmail SMTP relay account using App Passwords; retries on transient failures.
+- `send_admin_alert()` delivers operational alerts (session expiry, pipeline crashes) to
+  the operator email.
+- Does not use the LLM and does not extend `BaseAgent`.
+
+---
+
+### Infrastructure
+**`BaseAgent`** (`agents/base_agent.py`) — abstract base class for all LLM agents.
+
+- **Multi-LLM Waterfall**: tries Groq (primary) → Gemini (fallback 1) → OpenAI
+  (fallback 2). Each provider gets up to 3 retries with exponential backoff before the
+  waterfall advances. Permanent auth/context-size errors skip retries immediately.
+- Raises `RuntimeError` when all providers are exhausted — never returns `None` silently.
+- Sets up a `RotatingFileHandler` (5 MB limit, 3 backups) plus `StreamHandler` for each
+  agent, writing to `logs/<AgentName>.log`.
+
+**`main.py`** — orchestrator and CLI entry point. See [How to Run](#how-to-run).
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Python 3.10–3.13 |
+| LLM providers | Groq (`llama-3.3-70b-versatile`), Gemini (`gemini-1.5-flash`), OpenAI (`gpt-4o-mini`) |
+| LLM contracts | Pydantic v2 |
+| Browser automation | Playwright (Chromium) |
+| Literature search | Semantic Scholar API → SerpAPI → scholarly |
+| Literature enrichment | OpenAlex API |
+| Email | smtplib (Gmail SMTP relay), imaplib (Gmail IMAP) |
+| Database | SQLite via a custom `DatabaseManager` wrapper |
+| Dashboard | Streamlit (`dashboard.py`) |
+| Logging | Python `RotatingFileHandler` |
+| Testing | pytest (250 tests) |
+
+---
+
+## Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.10–3.13 (not 3.14+) | [python.org](https://www.python.org/downloads/) |
+| pip | Latest | Bundled with Python |
+| Git | Any | For cloning the repository |
+| A Groq API Key | Free | [console.groq.com](https://console.groq.com) — **required** |
+| A Gmail account | Any | Used as the SMTP relay for outbound notifications |
+| Gmail App Password | — | See [Configuration](#configuration) |
+| An Overleaf account | Free/Pro | Your university Overleaf account |
+
+Gemini and OpenAI API keys are **optional**. They activate as automatic LLM fallbacks
+when Groq is unavailable. The system runs correctly with only Groq configured.
+
+---
+
+## Setup
+
+### Option A — Automated Setup (Recommended)
+
+A setup script handles virtual environment creation, dependency installation, Playwright
+browser download, and `.env` file scaffolding.
+
+```bash
+git clone https://github.com/AvivPeretz/research-agents-project.git
+cd research-agents
+bash setup.sh
+```
+
+After the script finishes:
+
+1. Open `.env` and fill in your credentials (see [Configuration](#configuration)).
+2. Create `researchers_map.json` in the project root (see
+   [Registering Projects](#registering-projects)).
+3. Run the Overleaf session setup (see [First-Time Overleaf Login](#first-time-overleaf-login)).
+
+---
+
+### Option B — Manual Setup
+
+```bash
+git clone https://github.com/AvivPeretz/research-agents-project.git
+cd research-agents
+
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate          # macOS / Linux
+# .\venv\Scripts\Activate.ps1    # Windows PowerShell
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Download Playwright browser
+playwright install chromium
+# On Linux if you encounter permission errors:
+# playwright install --with-deps chromium
+
+# Create your .env file
+cp .env.example .env
+```
+
+Open `.env` and fill in your credentials (see [Configuration](#configuration)).
+
+---
+
+### First-Time Overleaf Login
+
+The Data Ingestion Agent stores its Overleaf session as a JSON file (`scholar_state.json`).
+Before the first automated run, create this session file by running the dedicated setup script:
+
+```bash
+python setup_overleaf_session.py
+```
+
+A visible browser window opens. Your credentials are pre-filled automatically. If a
+reCAPTCHA appears, solve it manually. You have **5 minutes** to reach the Overleaf dashboard.
+Once you do, the session is saved and the window closes. All future runs use the saved
+session silently.
+
+Re-run this script whenever the session expires (typically once per quarter).
+
+If you are deploying to a remote server, run this script locally and copy the state file:
+
+```bash
+scp scholar_state.json user@server:/path/to/project/
+```
+
+---
+
+### Registering Projects
+
+For email notifications to be routed to the correct researcher, each Overleaf project
+must be registered in the database. Create `researchers_map.json` in the project root:
+
+```json
+{
+  "Your_Overleaf_Project_Name": "student.name@university.edu",
+  "Another_Project": "another.student@university.edu"
+}
+```
+
+Project names must match **exactly** the names shown on the Overleaf dashboard
+(case-sensitive, spaces included). On the first run, `main.py` migrates this data into
+the SQLite database automatically. The JSON file is only needed once.
+
+---
+
+### Setting Up Stanford Email Forwarding
+
+The Research Enhancement Agent submits manuscripts to Stanford's `paperreview.ai` using
+the university email address and reads the reply token from the Gmail relay. Because
+Stanford's confirmation goes to the university inbox (which blocks automated IMAP), you
+must configure a one-time forwarding rule:
+
+1. Log in to your university email at [outlook.office.com](https://outlook.office.com).
+2. **Settings** → **View all Outlook settings** → **Mail** → **Rules** → **Add new rule**.
+3. Configure:
+
+| Field | Value |
+|---|---|
+| Rule name | `Forward Stanford Review to Gmail` |
+| Condition | **From** contains `paperreview.ai` |
+| Action | **Forward to** → `your-relay@gmail.com` |
+
+4. Save. No further maintenance is required.
+
+The Gmail account receiving forwarded emails must be the same account configured as
+`NOTIFICATION_SENDER_EMAIL` in `.env`.
+
+---
+
+## Configuration
+
+All settings are managed via a `.env` file in the project root. Never commit this file
+to Git — it is already in `.gitignore`.
+
+```dotenv
+# ── LLM PROVIDERS ─────────────────────────────────────────────────────────────
+
+# [REQUIRED] Primary LLM — free tier at console.groq.com
+GROQ_API_KEY=gsk_...
+
+# [OPTIONAL] Fallback LLM #1 — free tier at aistudio.google.com
+GEMINI_API_KEY=AIza...
+
+# [OPTIONAL] Fallback LLM #2 — paid, at platform.openai.com
+OPENAI_API_KEY=sk-...
+
+
+# ── EMAIL — GMAIL RELAY (sender account) ──────────────────────────────────────
+# A Gmail account used only for sending notifications. Does not need to be your
+# university email. Recommendation: create a dedicated Gmail account for this.
+
+NOTIFICATION_SENDER_EMAIL=your-relay@gmail.com
+NOTIFICATION_SENDER_PASSWORD=xxxx xxxx xxxx xxxx
+# ^ This is a Gmail App Password (16 characters with spaces), NOT your login password.
+# To generate: Google Account → Security → 2-Step Verification → App Passwords
+
+
+# ── OVERLEAF / UNIVERSITY ACCOUNT ─────────────────────────────────────────────
+# Your university email connected to Overleaf.
+# Used for logging in to Overleaf and receiving Stanford review tokens.
+
+OVERLEAF_EMAIL=your.name@university.edu
+OVERLEAF_PASSWORD=your-overleaf-password
+
+
+# ── OPTIONAL API KEYS ─────────────────────────────────────────────────────────
+
+# [OPTIONAL] Semantic Scholar API key — higher rate limits for literature search.
+# Without it the API still works but at a lower unauthenticated rate limit.
+# Register at semanticscholar.org/product/api
+SEMANTIC_SCHOLAR_API_KEY=
+
+# [OPTIONAL] SerpAPI key — Google Scholar fallback for literature search.
+# Activated only when Semantic Scholar returns no results.
+# Free tier: 250 searches/month at https://serpapi.com/
+SERPAPI_API_KEY=
+```
+
+### How to generate a Gmail App Password
+
+1. Go to your [Google Account](https://myaccount.google.com).
+2. Navigate to **Security** → **2-Step Verification** (must be enabled first).
+3. Scroll to **App Passwords**.
+4. Select app: **Mail**, device: **Other** → type a name (e.g., "ResearchAgents").
+5. Copy the 16-character password into `NOTIFICATION_SENDER_PASSWORD`, including spaces.
+
+---
+
+## How to Run
+
+```bash
+source venv/bin/activate
+python main.py [--agent AGENT] [--project PROJECT] [--dry-run]
+```
+
+### Agent flags
+
+| `--agent` value | Description |
+|---|---|
+| `all` | Run the full pipeline *(default)* |
+| `ingestion` | Phase 0 — Delta-sync Overleaf projects |
+| `literature` | Phase 1 — Fetch and summarize related papers |
+| `progress` | Phase 2 — Analyse manuscript delta and provide feedback |
+| `enhancement` | Phase 3 — Submit to Stanford peer-review and collect results |
+| `supervisor` | Phase 4 — Generate and send the supervisor status report |
+| `gc` | Garbage collector — delete Markdown files older than 30 days |
+
+### Common invocations
+
+```bash
+# Run the full pipeline across all projects
+python main.py
+
+# Run only the literature agent across all projects
+python main.py --agent literature
+
+# Run only the progress agent for a single project
+python main.py --agent progress --project "My_Thesis"
+
+# Run the supervisor report
+python main.py --agent supervisor
+
+# Run the full pipeline on one project only
+python main.py --project "My_Thesis"
+
+# Dry run — prints what would execute without running any agent
+python main.py --dry-run
+
+# Show help
+python main.py --help
+```
+
+When running `--agent all`, agents 1–3 (literature, progress, enhancement) are skipped
+for projects that the ingestion agent did not update in the same run. Use an explicit
+`--agent` flag to run any agent on existing (already-downloaded) projects regardless of
+whether they changed.
+
+### Checking logs
+
+Each agent writes to its own rotating log file in `logs/`:
+
+```
+logs/
+├── LiteratureResearchAgent.log
+├── ProgressTrackingAgent.log
+├── ResearchEnhancementAgent.log
+├── SupervisorStatusAgent.log
+├── NotificationAgent.log
+└── DatabaseManager.log
+```
+
+Log files rotate at 5 MB; up to 3 backups are kept per agent.
+
+### Running the dashboard
+
+A Streamlit dashboard (`dashboard.py`) provides a UI for inspecting project state,
+agent run history, and progress snapshots without using the CLI.
+
+```bash
+streamlit run dashboard.py
+```
+
+---
+
+## Testing
+
+The test suite uses pytest and covers unit tests, integration tests, crash/resilience
+tests, DB tests, idempotency tests, and stress tests.
+
+```bash
+source venv/bin/activate
+pytest tests/ -v
+```
+
+Current count: **250 tests, 0 failures**.
+
+Tests are organized under `tests/`:
+
+| Directory | Coverage area |
+|---|---|
+| `tests/unit/` | Config, schemas, OverleafConnector, GarbageCollector, delta engine |
+| `tests/integration/` | DataIngestionAgent, LiteratureAgent, ProgressAgent, EnhancementAgent, NotificationAgent, SupervisorAgent, CSV paths, search fallback chain |
+| `tests/crash/` | LLM provider failures, Playwright failures, alerting reliability, pipeline resilience, state machine, DB failures, email failures, filesystem failures |
+| `tests/db/` | DatabaseManager — table creation, CRUD, migration, snapshots |
+| `tests/idempotency/` | Re-running agents on unchanged data produces no side effects |
+| `tests/stress/` | Concurrent project processing under load |
+
+---
+
+## File Structure
 
 ```
 research-agents/
 ├── agents/
-│   ├── __init__.py
-│   ├── base_agent.py               # Abstract base class: logging, Multi-LLM waterfall
+│   ├── base_agent.py               # Abstract base class: LLM waterfall, logging
 │   ├── literature_research_agent.py
 │   ├── progress_tracking_agent.py
 │   ├── research_enhancement_agent.py
 │   ├── supervisor_status_agent.py
 │   └── notification_agent.py
 ├── ingestion/
-│   └── data_ingestion_agent.py     # Overleaf Delta Sync via Playwright
+│   └── data_ingestion_agent.py     # Overleaf delta sync via Playwright
 ├── domain/
-│   └── schemas.py                  # Pydantic contracts for all LLM outputs
+│   └── schemas.py                  # Pydantic v2 contracts for all LLM outputs
 ├── utils/
-│   ├── __init__.py
-│   ├── captcha_solver.py           # CapSolver API: auto-solve Overleaf reCAPTCHA
-│   ├── database_manager.py         # SQLite single source of truth
-│   ├── library_manager.py          # File I/O: Markdown, CSV, directories
-│   ├── literature_fetcher.py       # Semantic Scholar → SerpAPI → scholarly fallback chain
-│   ├── overleaf_connector.py       # LaTeX → plain text via RegEx
-│   └── garbage_collector.py        # TTL-based .md file cleanup
+│   ├── database_manager.py         # SQLite wrapper — single source of truth
+│   ├── garbage_collector.py        # TTL-based Markdown file cleanup
+│   ├── library_manager.py          # File I/O: Markdown summaries, rolling CSVs
+│   ├── literature_fetcher.py       # Semantic Scholar → SerpAPI → scholarly chain
+│   └── overleaf_connector.py       # LaTeX → plain text via regex
+├── tests/                          # 250 pytest tests
+│   ├── crash/
+│   ├── db/
+│   ├── idempotency/
+│   ├── integration/
+│   ├── stress/
+│   ├── unit/
+│   ├── fixtures/
+│   └── conftest.py
 ├── research_library/               # Generated output (gitignored)
 │   ├── literature_reviews/
 │   ├── project_tracking/
@@ -183,8 +496,11 @@ research-agents/
 │   └── system.db                   # SQLite database
 ├── overleaf_projects/              # Downloaded .tex + PDF files (gitignored)
 ├── logs/                           # Rotating log files (gitignored)
-├── config.py                       # Centralized configuration class
+├── config.py                       # Centralized Config class
 ├── main.py                         # Orchestrator + argparse CLI
+├── dashboard.py                    # Streamlit monitoring dashboard
+├── setup_overleaf_session.py       # One-time Overleaf session bootstrap
+├── setup.sh                        # Automated setup script (venv + deps + .env)
 ├── requirements.txt
 ├── .env.example                    # Template — copy to .env and fill in
 └── .gitignore
@@ -192,507 +508,51 @@ research-agents/
 
 ---
 
-## ✅ Prerequisites
+## Known Limitations
 
-Before installing, make sure the following are available on your machine:
+**Overleaf session renewal (manual, ~quarterly)**
+The Overleaf session is stored as a JSON file. Overleaf's sessions expire roughly once
+per quarter. When that happens, re-run `setup_overleaf_session.py` locally, then copy
+the resulting `scholar_state.json` to the server. Full zero-intervention operation is
+not achievable for the Overleaf login step.
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Python | 3.10-3.13 (DO NOT USE 3.14.x) | [python.org](https://www.python.org/downloads/) |
-| pip | Latest | Bundled with Python |
-| Git | Any | For cloning the repository |
-| Google Chrome | Latest | Used by Playwright for browser automation |
-| A Groq API Key | Free | [console.groq.com](https://console.groq.com) — **required** |
-| A Gmail Account | Any | Used as the SMTP relay for sending emails |
-| Gmail App Password | — | See [Configuration](#-configuration) section below |
-| An Overleaf Account | Free/Pro | Your university Overleaf account |
+**Google Scholar scraping removed**
+Direct Google Scholar scraping via Playwright has been removed. The fallback chain for
+literature search is now: Semantic Scholar → SerpAPI → scholarly Python library. The
+scholarly library may hit rate limits under heavy use; SerpAPI (250 free searches/month)
+is the more reliable fallback.
 
-> **Note:** Gemini and OpenAI API keys are **optional**. They are used as automatic LLM
-> fallbacks if Groq is unavailable. The system will run correctly with only Groq configured.
+**SerpAPI free tier**
+The SerpAPI fallback is limited to 250 Google Scholar searches per month on the free
+plan. If your lab tracks many projects simultaneously, monitor usage at serpapi.com.
 
----
+**Stanford `paperreview.ai` dependency**
+The external peer-review phase depends on Stanford's third-party service. If that service
+changes its login flow, email format, or web portal structure, the scraping logic in
+`ResearchEnhancementAgent` will need updating. The internal review fallback activates
+automatically in these cases, maintaining continuity.
 
-## 🚀 Installation
-
-Start by cloning the repository — this is required for both installation methods below.
-
-```bash
-git https://github.com/AvivPeretz/research-agents-project.git
-cd research-agents
-```
-
-Choose one of the two installation methods:
-
----
-
-### ⚡ Option A — Automated Setup (Recommended)
-
-A single script handles everything: virtual environment creation, dependency installation,
-Playwright browser download, and `.env` file creation.
-
-```bash
-bash setup.sh
-```
-
-The script will print clear progress for each step and tell you exactly what to do next.
-Once it finishes, come back here and continue with the two remaining steps below.
-
-> **Windows users:** Run the script inside **Git Bash** (included with Git for Windows),
-> not PowerShell or Command Prompt.
-
-#### Step A1 — Fill In Your Credentials
-
-Open the `.env` file that was just created and fill in your values.
-See the [Configuration](#-configuration) section below for a full explanation of each field.
-
-```bash
-nano .env   # or open in any text editor
-```
-
-#### Step A2 — Register Your Project and Email
-
-Create a file named `researchers_map.json` in the project root. This tells the system
-which Overleaf project belongs to which researcher, so email notifications are routed
-correctly.
-
-```json
-{
-  "Your_Overleaf_Project_Name": "your.name@university.edu"
-}
-```
-
-> The project name must match **exactly** the name shown on your Overleaf dashboard
-> (case-sensitive, spaces included). On the first run, this file is automatically
-> imported into the database. It is only needed once.
+**Single-machine deployment**
+The current architecture runs all agents sequentially in a single process. On a lab server
+with many projects, long runs (literature + enhancement for 10+ projects) may take
+30–60 minutes per cycle. The `ThreadPoolExecutor` parallelism inside individual agents
+mitigates this, but cross-agent parallelism is not implemented.
 
 ---
 
-### 🔧 Option B — Manual Setup
-
-Follow these steps if you prefer full control over the installation process.
-
-#### Step 1 — Create a Virtual Environment
-
-```bash
-# Create the environment
-python -m venv venv
-
-# Activate it — macOS / Linux
-source venv/bin/activate
-
-# Activate it — Windows (PowerShell)
-.\venv\Scripts\Activate.ps1
-```
-
-> **Important:** Always activate the virtual environment before running any project command.
-> You will need to re-activate it every time you open a new terminal session.
-
-#### Step 2 — Install Python Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-#### Step 3 — Install Playwright Browser
-
-Playwright requires a one-time download of the Chromium browser engine used for
-Overleaf automation and web scraping.
-
-```bash
-playwright install chromium
-```
-
-> If you encounter permission errors on Linux, run:
-> `playwright install --with-deps chromium`
-
-#### Step 4 — Create Your `.env` File
-
-```bash
-cp .env.example .env
-```
-
-Then open `.env` in any text editor and fill in your credentials.
-See the [Configuration](#-configuration) section below for a full explanation of each field.
-
-#### Step 5 — Register Your Project and Email
-
-Create a file named `researchers_map.json` in the project root. This tells the system
-which Overleaf project belongs to which researcher, so email notifications are routed
-correctly.
-
-```json
-{
-  "Your_Overleaf_Project_Name": "your.name@university.edu"
-}
-```
-
-> The project name must match **exactly** the name shown on your Overleaf dashboard
-> (case-sensitive, spaces included). On the first run, this file is automatically
-> imported into the database. It is only needed once.
-
-#### Step 6 — Verify the Installation
-
-```bash
-python main.py --agent literature --project "Your_Overleaf_Project_Name"
-```
-
-If you see log output and no `ValueError` on startup, the installation is successful.
-
----
-
-## ⚙️ Configuration
-
-All credentials and settings are managed through a `.env` file in the project root.
-**Never commit this file to Git.** It is already listed in `.gitignore`.
-
-### Creating Your `.env` File
-
-```bash
-cp .env.example .env
-```
-
-### Variables Reference
-
-```dotenv
-# ============================================================
-# LLM PROVIDERS
-# ============================================================
-
-# [REQUIRED] Primary LLM — Free tier at console.groq.com
-GROQ_API_KEY=gsk_...
-
-# [OPTIONAL] Fallback LLM #1 — Free tier at aistudio.google.com
-GEMINI_API_KEY=AIza...
-
-# [OPTIONAL] Fallback LLM #2 — Paid, at platform.openai.com
-OPENAI_API_KEY=sk-...
-
-
-# ============================================================
-# EMAIL — GMAIL RELAY (Sender Account)
-# ============================================================
-# This is a Gmail account used ONLY for sending notification emails.
-# It does NOT need to be your university email.
-# Recommendation: create a dedicated dummy Gmail account for this.
-
-NOTIFICATION_SENDER_EMAIL=your-relay@gmail.com
-NOTIFICATION_SENDER_PASSWORD=xxxx xxxx xxxx xxxx
-# ↑ This is a Gmail App Password (16 chars with spaces), NOT your Gmail login password.
-# To generate one: Google Account → Security → 2-Step Verification → App Passwords
-
-
-# ============================================================
-# OVERLEAF / UNIVERSITY ACCOUNT (Receiver Account)
-# ============================================================
-# This is your university email connected to Overleaf.
-# Used for: logging into Overleaf and receiving Stanford review tokens.
-
-OVERLEAF_EMAIL=your.name@university.edu
-OVERLEAF_PASSWORD=your-overleaf-password
-
-
-# ============================================================
-# OPTIONAL API KEYS — Literature Search & Auto-Login
-# ============================================================
-
-# [OPTIONAL] SerpAPI key — Google Scholar fallback for literature search.
-# Activated only when Semantic Scholar returns no results.
-# Free tier: 250 searches/month at https://serpapi.com/
-SERPAPI_API_KEY=
-
-# [OPTIONAL] CapSolver key — automatic reCAPTCHA solving during Overleaf login.
-# If set, the agent will solve reCAPTCHA automatically without manual intervention.
-# If absent, the browser opens for manual login as before.
-# Pay-as-you-go: ~$5 credit lasts years at this volume. https://dashboard.capsolver.com/
-CAPSOLVER_API_KEY=
-```
-
-### How to Generate a Gmail App Password
-
-1. Go to your [Google Account](https://myaccount.google.com)
-2. Navigate to **Security** → **2-Step Verification** (must be enabled)
-3. Scroll down to **App Passwords**
-4. Select app: **Mail**, device: **Other** → type "ResearchAgents"
-5. Copy the 16-character password into `NOTIFICATION_SENDER_PASSWORD`
-
-> **Important:** Use the App Password exactly as shown, including spaces.
-
----
-
-## 🖥️ Usage & Command Line Interface (CLI)
-
-The system includes a powerful built-in CLI using `argparse` for fine-grained control
-over which agents and projects are executed.
-
-### 1. Basic Execution — Run Everything
-
-Runs all agents across all active projects found in the `overleaf_projects/` directory.
-
-```bash
-python main.py
-```
-
-> On the **first run**, the Data Ingestion Agent will open a visible browser window and
-> ask you to log into Overleaf manually (to handle reCAPTCHA). After a successful login,
-> the session is saved and all subsequent runs are fully automated.
-
----
-
-### 2. Run a Specific Agent
-
-Use the `--agent` flag to isolate a single phase. Useful during development and testing.
-
-| Value | Description |
-|---|---|
-| `all` | Run the full pipeline *(default)* |
-| `ingestion` | Phase 0 — Download new/modified Overleaf projects |
-| `literature` | Phase 1 — Fetch and summarize related papers |
-| `progress` | Phase 2 — Analyze manuscript delta and provide feedback |
-| `enhancement` | Phase 3 — Upload to Stanford peer-review and collect results |
-| `gc` | Garbage collector — delete Markdown files older than 30 days |
-
-```bash
-# Run only the Literature Research Agent
-python main.py --agent literature
-
-# Run only the Garbage Collector
-python main.py --agent gc
-```
-
----
-
-### 3. Target a Specific Project
-
-Use `--project` to process a single project, ignoring all others.
-Enclose the project name in quotes if it contains spaces.
-
-```bash
-python main.py --project "My_Thesis"
-```
-
----
-
-### 4. Combined Execution — The Recommended Workflow
-
-Combine `--agent` and `--project` for precise, targeted runs.
-This is the optimal pattern during development and debugging.
-
-```bash
-# Run only the Progress Tracking Agent for a specific project
-python main.py --agent progress --project "My_Thesis"
-
-# Run only the Literature Agent for a specific project
-python main.py --agent literature --project "Physics_Lab_1"
-
-# Run the full pipeline on one project only
-python main.py --project "Physics_Lab_1"
-```
-
----
-
-### 5. Help Menu
-
-```bash
-python main.py --help
-```
-
----
-
-## 🤖 Agent Reference
-
-### First-Time Setup: Overleaf Login
-
-The `DataIngestionAgent` requires a one-time login to Overleaf to create a persistent
-browser session. This only needs to be done once (or when the session expires):
-
-```bash
-python main.py --agent ingestion
-```
-
-A browser window will open automatically. The agent pre-fills your credentials and clicks
-the login button. If a reCAPTCHA appears:
-
-* **With `CAPSOLVER_API_KEY` set** — the reCAPTCHA is solved automatically via the
-  CapSolver API. No manual action is needed.
-* **Without `CAPSOLVER_API_KEY`** — the browser stays open for you to solve the
-  reCAPTCHA manually within 60 seconds.
-
-Once you reach the Overleaf dashboard, the session is saved to `overleaf_state.json`
-(gitignored) and the browser will close. All future runs will use the saved session
-silently.
-
----
-
-### Setting Up the Stanford Review Email Forwarding Rule
-
-The Research Enhancement Agent (`--agent enhancement`) relies on a **two-account email
-architecture** to retrieve peer-review results from Stanford's `paperreview.ai`:
-
-1. The system submits the manuscript PDF to Stanford along with your **university email address**.
-2. Stanford sends the access token **only to that university email** (institutional emails only).
-3. The agent polls your **Gmail account** via IMAP to extract the token and fetch the review.
-
-For step 3 to work, you must configure an **automatic forwarding rule** on your university
-inbox that forwards Stanford's emails to your Gmail relay account. This is a one-time manual
-setup.
-
-#### Instructions for Microsoft 365 (Outlook Web)
-
-1. Log in to your university email at [outlook.office.com](https://outlook.office.com)
-2. Click the **Settings** gear icon (top-right) → **View all Outlook settings**
-3. Navigate to **Mail** → **Rules**
-4. Click **Add new rule** and configure it as follows:
-
-| Field | Value |
-|---|---|
-| Rule name | `Forward Stanford Review to Gmail` |
-| Condition | **From** contains `paperreview.ai` |
-| Action | **Forward to** → `your-relay@gmail.com` |
-
-5. Click **Save**. The rule is now active and requires no further maintenance.
-
-> **Why is this necessary?** Stanford's `paperreview.ai` only sends review access tokens
-> to institutional (non-Gmail) email addresses. The university's Microsoft 365 environment
-> blocks automated IMAP access from external scripts. The forwarding rule bridges both
-> constraints: Stanford's email lands in the university inbox and is immediately forwarded
-> to the Gmail account where the agent can read it programmatically.
-
-> **Security note:** The Gmail account receiving these forwarded emails should be the
-> same account configured in `NOTIFICATION_SENDER_EMAIL` in your `.env` file.
-
----
-
-### Registering a Project and Researcher Email
-
-For the system to correctly route email notifications to the right researcher, each
-project must be associated with an email address in the SQLite database.
-
-Create or edit `researchers_map.json` in the project root using this format:
-
-```json
-{
-  "My_Thesis": "student.name@university.edu",
-  "Physics_Lab_1": "another.student@university.edu"
-}
-```
-
-On the next run, `main.py` will automatically migrate this data into the database.
-This step only needs to be done once per project. After migration, you can delete the
-JSON file — the database is the live source of truth.
-
----
-
-### Checking Logs
-
-Each agent writes to its own rotating log file inside the `logs/` directory:
-
-```
-logs/
-├── LiteratureResearchAgent.log
-├── ProgressTrackingAgent.log
-├── ResearchEnhancementAgent.log
-├── NotificationAgent.log
-└── DatabaseManager.log
-```
-
-Log files are automatically rotated at 5MB and up to 3 backups are kept per agent.
-
----
-
-## 🛠️ Utility Modules & Infrastructure
-
-* **Multi-LLM Waterfall Strategy:** The `BaseAgent` incorporates a dynamic fallback
-  mechanism (`Groq → Gemini → OpenAI`). If the primary model encounters errors or rate
-  limits, the system automatically routes the request to the next available provider,
-  ensuring maximum uptime.
-
-* **Centralized Configuration (`config.py`):** Acts as the Single Source of Truth for the
-  entire system. Eliminates "magic numbers" and hardcoded paths by centrally managing all
-  environment variables, API limits, UI timeouts, models, and directory structures.
-  Includes a `validate()` function operating on a **Fail-Fast** principle — checking all
-  required environment variables before execution begins.
-
-* **Single Source of Truth (Database):** Uses `DatabaseManager` backed by SQLite to safely
-  manage project routing emails and synchronization states, replacing fragile JSON files.
-  Includes built-in, idempotent JSON-to-SQLite migration for legacy `researchers_map.json`
-  data. Exposes `get_projects_by_supervisor()` and `get_project_snapshots()` as public
-  query methods. All five agents record `STARTED`, `SUCCESS`, and `FAILURE` audit entries
-  per project cycle into the `agent_runs` table via `db.log_agent_run()`.
-
-* **Defensive Programming & Resilience:** Built into the `BaseAgent`, featuring strict
-  validation for all LLM inputs and outputs. Implements **Exponential Backoff** for API
-  rate limits, secure JSON parsing with graceful fallbacks, and real exception bubbling
-  (`RuntimeError`) to prevent silent systemic crashes. The orchestration layer uses
-  `run_agent_safely()` to isolate individual agent failures from crashing the entire
-  pipeline.
-
-* **Library Manager:** Automates the creation of an organized directory structure and
-  handles all file I/O operations to maintain a pristine `research_library` ecosystem,
-  including Markdown reports and rolling CSV tables.
-
-* **Overleaf Connector:** Extracts downloaded ZIP files and uses highly optimized Regular
-  Expressions (RegEx) to strip heavy LaTeX formatting, delivering clean plain text to the
-  LLM agents.
-
-* **Garbage Collector:** Implements a strict Data Retention Policy (TTL). Safely scans
-  specific directories to automatically purge outdated Markdown reports older than 30 days,
-  preventing disk space exhaustion while preserving critical rolling CSVs and system state
-  files.
-
-* **Production Logging System:** Uses Python's `RotatingFileHandler` implemented within the
-  `BaseAgent`. Automatically generates distinct `.log` files for each running agent,
-  backing them up once they reach 5MB. This ensures infinite system uptime and safe
-  monitoring without bloating server storage.
-
----
-
-## 🔧 Troubleshooting
-
-### `ValueError: Missing required environment variables`
-Your `.env` file is missing one or more required keys. Open `.env` and verify that
-`GROQ_API_KEY`, `NOTIFICATION_SENDER_EMAIL`, `NOTIFICATION_SENDER_PASSWORD`,
-`OVERLEAF_EMAIL`, and `OVERLEAF_PASSWORD` are all filled in.
-
-### `playwright._impl._errors.Error: Executable doesn't exist`
-You skipped the Playwright browser installation step. Run:
-```bash
-playwright install chromium
-```
-
-### `SMTPAuthenticationError` when sending emails
-Your Gmail App Password is incorrect or 2-Step Verification is not enabled on the
-sending Gmail account. Regenerate the App Password from your Google Account settings.
-
-### The browser opens but the login times out
-If reCAPTCHA appears and `CAPSOLVER_API_KEY` is not set, you have 60 seconds to solve it
-manually. If the window closes before you finish, re-run `python main.py --agent ingestion`
-to open a fresh browser window. To skip manual intervention entirely, add a `CAPSOLVER_API_KEY`
-to your `.env` — the agent will solve reCAPTCHA automatically on the next run.
-
-### `No valid projects found matching '...'`
-The project name you passed via `--project` does not match any folder inside
-`overleaf_projects/`. Project names are case-sensitive and must match exactly.
-Run without `--project` first to let the ingestion agent download the project.
-
-### Groq rate limit errors
-The free Groq tier has per-minute token limits. The system will automatically retry
-with exponential backoff. If it exhausts all retries, configure a Gemini or OpenAI
-API key as a fallback in your `.env` file.
-
----
-
-## 🗺️ Roadmap
+## Roadmap
 
 - [ ] **Docker containerization** — Package the system into a Docker image with persistent
-  volumes for the SQLite database and downloaded project files.
-- [ ] **Scheduled execution** — Replace manual CLI triggers with a cron-based or
-  APScheduler-based autonomous scheduler (e.g., literature search daily, progress
-  tracking every 8 hours, supervisor report weekly).
-- [ ] **Web Dashboard** — A local intranet Streamlit/Flask UI for lab managers to
-  visualize `progress_snapshots` as velocity graphs and manage project/researcher
-  assignments without CLI access.
-- [x] **Internal peer-review pipeline** — Replace the Stanford `paperreview.ai` dependency
-  with a self-contained review pipeline powered by multi-query arXiv and Semantic Scholar
-  searches, grounded in the same 7-dimension evaluation framework.
-- [ ] **Microservices migration** — Split agents into independently deployable services
-  communicating over a message queue (e.g., RabbitMQ or Redis Streams).
+  volumes for SQLite and downloaded project files; deploy to the university lab server.
+- [ ] **Streamlit/Flask intranet dashboard** — A hosted lab manager UI for visualizing
+  `progress_snapshots` as velocity graphs, managing project/researcher assignments, and
+  reviewing agent run history without CLI access.
+- [ ] **External Status Agent** — Track research velocity across time (paper submission
+  rate, citation growth, collaboration patterns) and surface early-warning signals for
+  stalled projects.
+- [x] **Internal peer-review pipeline** — Self-contained review powered by manuscript
+  text + rolling CSV data; activated automatically as fallback when Stanford pipeline fails.
+- [x] **Three-tier literature search** — Semantic Scholar → SerpAPI → scholarly, with
+  OpenAlex enrichment and LLM relevance filtering.
+- [x] **Multi-LLM waterfall** — Groq → Gemini → OpenAI with per-provider exponential
+  backoff and automatic failover.

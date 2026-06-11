@@ -105,7 +105,7 @@ class LiteratureFetcher:
             print("\n🚨 ACTION REQUIRED: Complete the login and solve any CAPTCHAs.")
             
             try:
-                page.wait_for_url("https://scholar.google.com/**", timeout=90000)
+                page.wait_for_url("https://scholar.google.com/**", timeout=300000)
                 print("✅ Reached Google Scholar! Saving session securely...")
                 context.storage_state(path=self.state_file)
                 time.sleep(2)
