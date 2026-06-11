@@ -1,5 +1,6 @@
 """Tests for Playwright browser automation failure handling."""
 
+import json
 import os
 import zipfile
 from pathlib import Path
@@ -16,9 +17,11 @@ from ingestion.data_ingestion_agent import DataIngestionAgent
 def _make_playwright_mocks():
     mock_page = MagicMock()
     mock_context = MagicMock()
-    mock_context.pages = [mock_page]
+    mock_context.new_page.return_value = mock_page
+    mock_browser = MagicMock()
+    mock_browser.new_context.return_value = mock_context
     mock_p = MagicMock()
-    mock_p.chromium.launch_persistent_context.return_value = mock_context
+    mock_p.chromium.launch.return_value = mock_browser
     mock_pw = MagicMock()
     mock_pw.return_value.__enter__.return_value = mock_p
     mock_pw.return_value.__exit__.return_value = False
@@ -46,14 +49,14 @@ class TestPlaywrightFailures:
     @pytest.fixture
     def ingestion_agent(self, tmp_path, mock_notifier, monkeypatch):
         """Lightweight DataIngestionAgent wired to tmp_path."""
-        profile_dir = str(tmp_path / "profile")
+        state_file = str(tmp_path / "state.json")
+        Path(state_file).write_text(json.dumps({"cookies": [], "origins": []}))
         downloads_dir = str(tmp_path / "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
-        os.makedirs(profile_dir, exist_ok=True)
-        (Path(profile_dir) / "Cookies").write_bytes(b"session")
 
         monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", profile_dir)
+        monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
+        monkeypatch.setattr(Config, "SCHOLAR_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
         monkeypatch.setattr(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000)
         monkeypatch.setattr(Config, "OVERLEAF_EMAIL", "test@example.com")
@@ -80,20 +83,19 @@ class TestPlaywrightFailures:
         assert result == []
 
     def test_overleaf_session_expired_deletes_state_file(self, ingestion_agent):
-        """Stale profile dir is removed with shutil.rmtree on session expiry."""
+        """State file is removed with os.remove on session expiry."""
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         mock_pw, mock_context, mock_page = _make_playwright_mocks()
         mock_page.wait_for_selector.side_effect = PlaywrightTimeoutError("Selector not found")
-        mock_page.locator.return_value.all.return_value = []
 
         with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
              patch("ingestion.data_ingestion_agent.time.sleep"), \
-             patch("ingestion.data_ingestion_agent.shutil.rmtree") as mock_rmtree:
+             patch("ingestion.data_ingestion_agent.os.remove") as mock_remove:
             ingestion_agent.sync_all_projects(_retry_depth=2)
 
-        # The profile dir (user_data_dir) must be deleted so next run triggers re-login
-        mock_rmtree.assert_called_once_with(ingestion_agent.user_data_dir)
+        # The state file must be deleted so the next run triggers re-login
+        mock_remove.assert_called_once_with(ingestion_agent.state_file)
 
     def test_overleaf_no_projects_found_returns_empty_list(self, ingestion_agent):
         """sync_all_projects returns [] when no project rows appear on dashboard."""

@@ -210,6 +210,31 @@ class LiteratureResearchAgent(BaseAgent):
         all_papers = all_papers[:15]
 
         if not all_papers:
+            self.logger.warning(
+                "Semantic Scholar returned no results for project '%s'. Trying SerpAPI fallback...", project
+            )
+            all_papers = self.fetcher.fetch_from_serpapi(topic_kw)
+            if not all_papers:
+                self.logger.warning(
+                    "SerpAPI returned no results for project '%s'. Trying scholarly as last resort...", project
+                )
+                all_papers = self.fetcher.fetch_from_scholarly(topic_kw)
+            if not all_papers:
+                self.logger.error(
+                    "All search sources failed for project '%s'. No literature update will be sent.", project
+                )
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=project,
+                        status="FAILURE",
+                        finished_at=datetime.now().isoformat()
+                    )
+                return
+
+        all_papers = self.fetcher.enrich_with_openalex(all_papers)
+
+        if not all_papers:
             self.logger.warning("No data fetched for %s. Skipping LLM processing.", project)
             if self.db:
                 self.db.log_agent_run(
@@ -228,7 +253,8 @@ class LiteratureResearchAgent(BaseAgent):
 
         links_section = "\n\n### 🔗 Direct Links to Found Papers:\n"
         for item in all_papers:
-            links_section += f"* [{item['title']}]({item['link']})\n"
+            url = item.get("link") or item.get("url", "")
+            links_section += f"* [{item['title']}]({url})\n"
 
         summary_text = f"# Literature Review for: {project}\n\n**Keywords Used:** {keywords}\n\n{research_data.get('summary', 'No summary available.')}{links_section}"
 
@@ -246,6 +272,11 @@ class LiteratureResearchAgent(BaseAgent):
         if not research_data.get("papers"):
             self.logger.info("No papers found for project '%s'. Skipping literature email.", project)
             return
+
+        if not os.path.exists(csv_file_path):
+            self.logger.warning(
+                "Rolling CSV not found for project '%s'; sending email without attachment.", project
+            )
 
         self.logger.info("Sending literature update email for %s...", project)
         self.notifier.send_literature_update(

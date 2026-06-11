@@ -29,8 +29,7 @@ class LibraryManager:
         """Returns and ensures a project-specific subfolder exists."""
         safe_name = project_name.replace(" ", "_")
         path = os.path.join(self.base_dir, category, safe_name)
-        if not os.path.exists(path):
-            os.makedirs(path)
+        os.makedirs(path, exist_ok=True)
         return path
 
     def _save_markdown(self, category: str, project_name: str, filename_prefix: str, content: str):

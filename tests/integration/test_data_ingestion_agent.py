@@ -20,16 +20,22 @@ from ingestion.data_ingestion_agent import DataIngestionAgent
 def _make_playwright_mocks():
     """Return (mock_sync_playwright, mock_context, mock_page) ready to inject.
 
-    The mock replicates the launch_persistent_context usage in DataIngestionAgent:
+    The mock replicates the launch + new_context + new_page usage in DataIngestionAgent:
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(...)
-            page = context.pages[0]
+            browser = p.chromium.launch(...)
+            context = browser.new_context(...)
+            page = context.new_page()
     """
     mock_page = MagicMock()
     mock_context = MagicMock()
+    mock_context.new_page.return_value = mock_page
     mock_context.pages = [mock_page]
 
+    mock_browser = MagicMock()
+    mock_browser.new_context.return_value = mock_context
+
     mock_p = MagicMock()
+    mock_p.chromium.launch.return_value = mock_browser
     mock_p.chromium.launch_persistent_context.return_value = mock_context
 
     mock_pw = MagicMock()
@@ -105,12 +111,14 @@ class TestDataIngestionAgent:
     @pytest.fixture
     def agent(self, tmp_path, mock_notifier, monkeypatch):
         """DataIngestionAgent pointing at tmp_path; DB is a MagicMock."""
-        profile_dir = str(tmp_path / "profile")
+        state_file = str(tmp_path / "state.json")
         downloads_dir = str(tmp_path / "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
 
         monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", profile_dir)
+        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", str(tmp_path / "profile"))
+        monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
+        monkeypatch.setattr(Config, "SCHOLAR_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
         monkeypatch.setattr(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000)
         monkeypatch.setattr(Config, "OVERLEAF_EMAIL", "researcher@university.edu")
@@ -120,7 +128,7 @@ class TestDataIngestionAgent:
 
         a = DataIngestionAgent(db=mock_db, notifier=mock_notifier)
         # Attach test helpers as private attributes for convenience
-        a._profile_dir = profile_dir
+        a._profile_dir = state_file  # state_file is checked with os.path.exists
         a._downloads_dir = downloads_dir
         a._mock_db = mock_db
         return a
@@ -128,10 +136,10 @@ class TestDataIngestionAgent:
     # ─── Helper ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _populate_profile(profile_dir: str) -> None:
-        """Create a non-empty Chrome profile dir so session checks pass."""
-        os.makedirs(profile_dir, exist_ok=True)
-        (Path(profile_dir) / "Cookies").write_bytes(b"fake session data")
+    def _populate_profile(state_file: str) -> None:
+        """Create a minimal Playwright storage-state JSON so session checks pass."""
+        import json
+        Path(state_file).write_text(json.dumps({"cookies": [], "origins": []}))
 
     # ─── Tests ───────────────────────────────────────────────────────────────
 
@@ -248,7 +256,7 @@ class TestDataIngestionAgent:
         agent._mock_db.add_project.assert_not_called()
 
     def test_session_expired_deletes_stale_profile(self, agent):
-        """Dashboard selector timeout triggers shutil.rmtree on the profile dir."""
+        """Dashboard selector timeout triggers deletion of the state file."""
         self._populate_profile(agent._profile_dir)
 
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -259,10 +267,10 @@ class TestDataIngestionAgent:
 
         with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
              patch("ingestion.data_ingestion_agent.time.sleep"), \
-             patch("ingestion.data_ingestion_agent.shutil.rmtree") as mock_rmtree:
+             patch("ingestion.data_ingestion_agent.os.remove") as mock_remove:
             result = agent.sync_all_projects(_retry_depth=2)  # at max → no recursion
 
-        mock_rmtree.assert_called_once_with(agent._profile_dir)
+        mock_remove.assert_called_once_with(Path(agent._profile_dir))
         assert result == []
 
     def test_max_retry_depth_sends_admin_alert_and_returns_empty(self, agent):

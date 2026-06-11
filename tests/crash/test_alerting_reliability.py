@@ -1,5 +1,6 @@
 """Tests for alerting system reliability."""
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,14 +18,14 @@ class TestAlertingReliability:
         from ingestion.data_ingestion_agent import DataIngestionAgent
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-        profile_dir = str(tmp_path / "profile")
+        state_file = str(tmp_path / "state.json")
+        Path(state_file).write_text(json.dumps({"cookies": [], "origins": []}))
         downloads_dir = str(tmp_path / "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
-        os.makedirs(profile_dir, exist_ok=True)
-        (Path(profile_dir) / "Cookies").write_bytes(b"session")
 
         monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", profile_dir)
+        monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
+        monkeypatch.setattr(Config, "SCHOLAR_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
         monkeypatch.setattr(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000)
 
@@ -32,18 +33,19 @@ class TestAlertingReliability:
 
         mock_page = MagicMock()
         mock_context = MagicMock()
-        mock_context.pages = [mock_page]
+        mock_context.new_page.return_value = mock_page
+        mock_browser = MagicMock()
+        mock_browser.new_context.return_value = mock_context
         mock_p = MagicMock()
-        mock_p.chromium.launch_persistent_context.return_value = mock_context
+        mock_p.chromium.launch.return_value = mock_browser
         mock_pw = MagicMock()
         mock_pw.return_value.__enter__.return_value = mock_p
         mock_pw.return_value.__exit__.return_value = False
         mock_page.wait_for_selector.side_effect = PlaywrightTimeoutError("timeout")
-        mock_page.locator.return_value.all.return_value = []
 
         with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
              patch("ingestion.data_ingestion_agent.time.sleep"), \
-             patch("ingestion.data_ingestion_agent.shutil.rmtree"):
+             patch("ingestion.data_ingestion_agent.os.remove"):
             agent.sync_all_projects(_retry_depth=2)  # at max depth → triggers alert
 
         mock_notifier.send_admin_alert.assert_called_once()
@@ -55,14 +57,14 @@ class TestAlertingReliability:
         from ingestion.data_ingestion_agent import DataIngestionAgent
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-        profile_dir = str(tmp_path / "profile")
+        state_file = str(tmp_path / "state.json")
+        Path(state_file).write_text(json.dumps({"cookies": [], "origins": []}))
         downloads_dir = str(tmp_path / "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
-        os.makedirs(profile_dir, exist_ok=True)
-        (Path(profile_dir) / "Cookies").write_bytes(b"session")
 
         monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", profile_dir)
+        monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
+        monkeypatch.setattr(Config, "SCHOLAR_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
         monkeypatch.setattr(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000)
 
@@ -70,18 +72,19 @@ class TestAlertingReliability:
 
         mock_page = MagicMock()
         mock_context = MagicMock()
-        mock_context.pages = [mock_page]
+        mock_context.new_page.return_value = mock_page
+        mock_browser = MagicMock()
+        mock_browser.new_context.return_value = mock_context
         mock_p = MagicMock()
-        mock_p.chromium.launch_persistent_context.return_value = mock_context
+        mock_p.chromium.launch.return_value = mock_browser
         mock_pw = MagicMock()
         mock_pw.return_value.__enter__.return_value = mock_p
         mock_pw.return_value.__exit__.return_value = False
         mock_page.wait_for_selector.side_effect = PlaywrightTimeoutError("timeout")
-        mock_page.locator.return_value.all.return_value = []
 
         with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
              patch("ingestion.data_ingestion_agent.time.sleep"), \
-             patch("ingestion.data_ingestion_agent.shutil.rmtree"):
+             patch("ingestion.data_ingestion_agent.os.remove"):
             agent.sync_all_projects(_retry_depth=2)
 
         # The subject kwarg must contain "Overleaf"
@@ -127,6 +130,7 @@ class TestAlertingReliability:
         agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
         agent.gemini_available = False
         agent.openai_available = False
+        agent._providers_waterfall = []
 
         with patch("agents.base_agent.time.sleep"):
             with pytest.raises(RuntimeError):

@@ -22,6 +22,7 @@ def _make_stub_agent():
     agent.groq_client = MagicMock()
     agent.gemini_available = False
     agent.openai_available = False
+    agent._providers_waterfall = ["groq"]
     return agent
 
 
@@ -47,6 +48,7 @@ class TestLLMFailures:
         # Enable Gemini fallback
         agent.gemini_available = True
         agent.gemini_model_name = "gemini-1.5-flash"
+        agent._providers_waterfall = ["groq", "gemini"]
         mock_gemini_response = MagicMock()
         mock_gemini_response.text = "Valid response from Gemini"
         agent.gemini_client = MagicMock()

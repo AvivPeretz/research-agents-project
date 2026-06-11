@@ -29,6 +29,7 @@ class Config:
     # the application has migrated data into the SQLite DB.
     RESEARCHERS_MAP_PATH = BASE_DIR / "researchers_map.json"
     SCHOLAR_STATE_PATH = BASE_DIR / "scholar_state.json"
+    OVERLEAF_STATE_PATH = BASE_DIR / "scholar_state.json"
     OVERLEAF_USER_DATA_DIR: str = str(BASE_DIR / "playwright_state" / "overleaf_profile")
     
     # ==========================================

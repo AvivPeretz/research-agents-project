@@ -235,6 +235,7 @@ class DataIngestionAgent:
                     is_modified = not is_new and db_last_modified != last_modified_text
 
                     if is_new or is_modified:
+                      try:
                         reason = "NEW" if is_new else "MODIFIED"
                         safe_project_name = project_name.replace(" ", "_")
                         href = link.get_attribute("href").rstrip('/')
@@ -309,6 +310,18 @@ class DataIngestionAgent:
 
                         updated_projects.append(project_name)
                         print(f"✅ Synced '{project_name}'.")
+
+                      except Exception as e:
+                        self.logger.error("Failed to sync project '%s': %s", project_name, str(e))
+                        print(f"❌ Sync failed: {e}")
+                        if self.db:
+                            self.db.log_agent_run(
+                                agent_name="DataIngestionAgent",
+                                project_name=project_name,
+                                status="FAILURE",
+                                finished_at=datetime.now().isoformat()
+                            )
+                        continue
 
                     else:
                         print(f"⏭️  [SKIPPED] '{project_name}' is up to date.")
