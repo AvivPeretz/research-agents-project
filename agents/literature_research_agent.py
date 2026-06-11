@@ -1,7 +1,7 @@
 import os
 import json
-import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import ValidationError
 from domain.schemas import LiteratureReport
 import re
@@ -12,7 +12,8 @@ from utils.library_manager import LibraryManager
 from agents.notification_agent import NotificationAgent
 
 # NEW: Import our dedicated fetcher
-from utils.literature_fetcher import LiteratureFetcher 
+from utils.literature_fetcher import LiteratureFetcher
+from utils.overleaf_connector import OverleafConnector
 
 class LiteratureResearchAgent(BaseAgent):
     """
@@ -27,55 +28,85 @@ class LiteratureResearchAgent(BaseAgent):
 
         # Initialize the dedicated fetcher service
         self.fetcher = LiteratureFetcher()
+        self.connector = OverleafConnector()
 
         self.db = db
         self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
 
     def _read_project_text(self, project_name: str) -> str:
-        """Reads the local extracted text of the project to generate context-aware keywords."""
+        """Reads all .tex files for the project using the shared OverleafConnector."""
         project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
-        text_content = ""
-        if os.path.exists(project_dir):
-            for root, _, files in os.walk(project_dir):
-                if files:
-                    for file in files:
-                        if file.endswith('.tex'):
-                            try:
-                                with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
-                                    text_content += f.read() + "\n"
-                            except Exception as e:
-                                self.logger.warning("Failed to read .tex file: %s", str(e))
-                            
-        # Defensive check
-        if not text_content or text_content.strip() == "":
+        text_content = self.connector.read_all_tex_files(project_dir)
+        if not text_content:
             self.logger.warning("No valid LaTeX text extracted for project: %s", project_name)
             return ""
-            
-        return text_content[:4000]
+        max_chars = getattr(Config, 'MAX_PROJECT_TEXT_CHARS', 4000)
+        if len(text_content) > max_chars:
+            self.logger.info("Truncating project text to %d chars for LLM (original: %d chars).", max_chars, len(text_content))
+        return text_content[:max_chars]
 
-    def extract_keywords_from_text(self, project_name: str, text: str) -> str:
-        """Uses the actual manuscript text to generate highly targeted search keywords."""
+    def extract_keywords_from_text(self, project_name: str, text: str) -> tuple[str, str]:
+        """Returns (topic_keywords, method_keywords) derived from manuscript text."""
         if not text or text.strip() == "":
             self.logger.warning("Empty text provided for keyword extraction. Using project name as fallback.")
-            return project_name
-            
+            return project_name, project_name + " method"
+
         self.logger.info("Extracting keywords based on manuscript text for: %s", project_name)
-        
+
         prompt = f"""
         Analyze the following excerpt from an academic manuscript titled '{project_name}':
-        
+
         {text}
-        
-        Generate a highly specific search query (3-5 keywords) that can be used in academic databases 
-        to find the most recent and relevant literature for this specific research.
-        Return ONLY the keywords separated by spaces (e.g., "machine learning automated testing framework").
+
+        Generate TWO distinct search queries for academic databases (Semantic Scholar):
+        1. TOPIC query (3-5 keywords): the core research domain and problem being solved.
+        2. METHOD query (3-5 keywords): the specific technique or algorithmic approach used.
+
+        Return EXACTLY two lines, no labels, no quotes:
+        <topic keywords>
+        <method keywords>
         """
         try:
-            keywords = self.ask_llm(prompt).strip()
-            return keywords.replace('"', '').replace("'", "")
+            response = self.ask_llm(prompt).strip()
+            lines = [l.strip().replace('"', '').replace("'", "") for l in response.splitlines() if l.strip()]
+            if len(lines) >= 2:
+                return lines[0], lines[1]
+            return lines[0], lines[0] + " methodology"
         except RuntimeError as e:
             self.logger.error("LLM failed to generate keywords: %s", str(e))
-            return project_name
+            return project_name, project_name + " method"
+
+    def _filter_relevant_papers(self, project_name: str, text: str, papers: list) -> list:
+        """Drops papers whose abstract is clearly off-topic using a quick LLM relevance check."""
+        if not papers:
+            return papers
+
+        abstracts = "\n".join(
+            f"{i+1}. {p.get('title','?')}: {(p.get('snippet') or '')[:300]}"
+            for i, p in enumerate(papers)
+        )
+        prompt = f"""
+        Research project: '{project_name}'
+        Project summary (first 500 chars): {text[:500]}
+
+        Below are candidate papers (number: title: abstract snippet):
+        {abstracts}
+
+        Return ONLY a comma-separated list of the numbers that are clearly relevant to this project's topic.
+        Example: 1,3,5,7
+        If unsure, include the paper. Exclude only papers that are obviously off-topic.
+        """
+        try:
+            response = self.ask_llm(prompt).strip()
+            keep_indices = {int(x.strip()) - 1 for x in response.split(",") if x.strip().isdigit()}
+            filtered = [p for i, p in enumerate(papers) if i in keep_indices]
+            dropped = len(papers) - len(filtered)
+            if dropped:
+                self.logger.info("Relevance filter dropped %d off-topic papers for %s.", dropped, project_name)
+            return filtered if filtered else papers  # never return empty if filter misfires
+        except Exception as e:
+            self.logger.warning("Relevance filter failed for %s: %s. Using all papers.", project_name, str(e))
+            return papers
 
     def process_results_with_llm(self, project: str, keywords: str, scholar_data: list) -> dict:
         """Feeds the scraped data to the LLM and validates the output strictly against Pydantic schemas."""
@@ -89,93 +120,43 @@ class LiteratureResearchAgent(BaseAgent):
             return fallback_data
             
         self.logger.info("Processing fetched literature data via LLM with Pydantic validation...")
-        papers_json = json.dumps(scholar_data, indent=2)
+        data_str = json.dumps(scholar_data, indent=2)
+        
+        prompt = f"""
+        Act as an expert academic research assistant. 
+        I have fetched recent papers related to the project: '{project}'.
+        Keywords used: {keywords}
+        
+        Here are the enriched results (containing full abstracts, exact citation counts, and venues):
+        {data_str}
 
-        prompt = f"""You are an academic research assistant. Analyze the following list of \
-research papers and extract structured metadata for each one.
-
-For each paper, you are given:
-- title, abstract, year, citation count, venue, url
-- openalex: a dict with topics, keywords, is_oa, oa_url (may be empty)
-
-Extract the following fields for EACH paper. Read the column definitions carefully:
-
-COLUMN DEFINITIONS:
-- "paper name": The full title of the paper. Copy it exactly.
-- "cited": The number of times this paper has been cited (integer as string).
-- "source": The URL where the paper can be accessed.
-- "year published": The year the paper was published (4-digit string).
-- "types of available data": What type of dataset does the paper use or \
-describe? Look for mentions of dataset names, data types (e.g., network \
-traffic, sensor readings, images, signals). Use OpenAlex topics/keywords \
-to help identify. If not mentioned, use "N/A".
-- "number of samples": How many data samples/instances are in the dataset? \
-Look for phrases like "X samples", "dataset of X", "X instances". \
-If not stated, use "N/A".
-- "number of features": What features or attributes does the data have? \
-In communication/networking papers, look for feature types like SNR, RSSI, \
-packet size, frequency bands. List them briefly or count them. \
-If not stated, use "N/A".
-- "number of classes": How many classes or categories are in the dataset? \
-For classification papers, look for "X-class", "X categories", \
-"binary classification". If not stated, use "N/A".
-- "location": Where was the data collected? Lab name, university, city, \
-or type of environment (e.g., "indoor lab", "outdoor testbed", \
-"simulation"). If not stated, use "N/A".
-- "for how long": Over what duration was the data collected? \
-Look for "X days", "X weeks", "X hours". If not stated, use "N/A".
-- "is there privacy issues?": Does the paper mention privacy concerns about \
-its data? Look for mentions of anonymization, GDPR, personal data, \
-user consent. Answer "Yes", "No", or "N/A".
-- "is it reproducible?": Is there a link to code, GitHub repository, or \
-dataset that allows reproducing results? Check oa_url from OpenAlex too. \
-If is_oa is True, mention it. Answer "Yes (link: URL)", "No", or "N/A".
-- "data representation": How is the raw data represented as input features? \
-Look for how the paper converts raw signals/data into model inputs: \
-e.g., "spectrogram image", "feature vector", "graph", "time series array", \
-"frequency-domain matrix", "raw bytes". Use OpenAlex topics/keywords to help. \
-If not stated, use "N/A".
-- "how complicated is it?": Leave this field COMPLETELY EMPTY — do not write \
-anything, not even N/A.
-- "can i control the application collected?": Leave this field COMPLETELY \
-EMPTY — do not write anything, not even N/A.
-
-IMPORTANT RULES:
-- Base your answers primarily on the abstract text provided.
-- Use OpenAlex topics and keywords as supplementary hints, not as the \
-primary source.
-- If a field truly cannot be determined from the available text, use "N/A".
-- Do NOT hallucinate values — only extract what is explicitly stated or \
-strongly implied in the text.
-- Return ONLY a valid JSON object. No markdown, no explanation.
-
-Return format:
-{{
-  "summary": "A 2-3 sentence overview of the literature landscape for this project based on all papers combined.",
-  "papers": [
-    {{
-      "paper name": "...",
-      "cited": "...",
-      "source": "...",
-      "year published": "...",
-      "types of available data": "...",
-      "number of samples": "...",
-      "number of features": "...",
-      "number of classes": "...",
-      "location": "...",
-      "for how long": "...",
-      "is there privacy issues?": "...",
-      "is it reproducible?": "...",
-      "data representation": "...",
-      "how complicated is it?": "",
-      "can i control the application collected?": ""
-    }}
-  ]
-}}
-
-Papers to analyze:
-{papers_json}
-"""
+        You MUST return your response as a valid JSON object with EXACTLY the following structure:
+        {{
+            "summary": "A 1-2 paragraph engaging summary describing how these specific papers relate to the project. Embed the Markdown links to the papers in the text (e.g., [Paper Title](url)).",
+            "papers": [
+                {{
+                    "paper_name": "Title of the paper",
+                    "cited": "Use the 'citationCount' from the data (e.g., '15' or 'N/A')",
+                    "source": "Use the 'venue' from the data (e.g., 'IEEE Transactions...' or 'N/A')",
+                    "year_published": "Use the 'year' from the data",
+                    "types of available data": "Describe data type based on abstract. IF this is a Theoretical/Mathematical paper, explicitly write 'Theoretical Paper - No Dataset'",
+                    "number of samples": "e.g., 20000. IF theoretical, write 'N/A (Theoretical)'",
+                    "number of features": "e.g., 14. IF theoretical, write 'N/A (Theoretical)'",
+                    "number of classes": "e.g., 5. IF theoretical, write 'N/A (Theoretical)'",
+                    "location": "e.g., In-lab testbed. IF theoretical, write 'N/A (Theoretical)'",
+                    "for how long": "e.g., 3 weeks (or N/A)",
+                    "reproducible": "Must be EXACTLY 'Yes', 'No', or 'N/A'",
+                    "complexity": "Must be EXACTLY 'High', 'Moderate', 'Low', or 'N/A'",
+                    "is there privacy issues?": "Must be EXACTLY 'Yes', 'No', 'Minimal', 'High', or 'N/A'",
+                    "can i control the application collected": "Must be EXACTLY 'Yes', 'No', or 'N/A'"
+                }}
+            ]
+        }}
+        Important constraints:
+        1. Keep the EXACT JSON keys as defined above.
+        2. Obey the strict EXACTLY string match rules for dropdown fields (like reproducible, complexity).
+        3. ESCAPE ALL STRINGS properly. Do NOT use markdown blocks like ```json.
+        """
         
         try:
             response = self.ask_llm(prompt)
@@ -183,10 +164,11 @@ Papers to analyze:
             end = response.rfind('}') + 1
             
             if start == -1 or end == 0:
-                 raise ValueError("LLM response did not contain JSON brackets.")
+                raise ValueError(f"LLM response did not contain JSON brackets. Response preview: {response[:200]!r}")
                  
             raw_json = response[start:end]
-            raw_json = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw_json)
+            # Strip all ASCII control chars except \x09 (tab) and \x0a (newline)
+            raw_json = re.sub(r'[\x00-\x08\x0b-\x0c\x0d\x0e-\x1f]', '', raw_json)
             validated_report = LiteratureReport.model_validate_json(raw_json)
             return validated_report.model_dump(by_alias=True)
             
@@ -197,141 +179,38 @@ Papers to analyze:
             self.logger.error("Failed to parse or extract JSON from LLM: %s", str(e))
             return fallback_data
 
-    def run(self):
-        self.logger.info("Starting the literature research cycle.")
-        for project in self.projects:
-            if self.db:
-                self.db.log_agent_run(
-                    agent_name=self.agent_name,
-                    project_name=project,
-                    status="STARTED",
-                    started_at=datetime.now().isoformat()
-                )
-            print(f"\n{'='*40}\n🔬 Literature Search & Data Extraction for: {project}\n{'='*40}")
-
-            text = self._read_project_text(project)
-            keywords = self.extract_keywords_from_text(project, text) if text else project
-            
-            # Generate 2 additional keyword angles from the project name and text
-            domain_keywords = project  # project name as domain query
-            method_keywords = keywords + " methodology" if keywords else project + " method"
-
-            # Run search for each query angle and merge results
-            all_papers = []
-            seen_titles = set()
-
-            for i, query in enumerate([keywords, domain_keywords, method_keywords]):
-                if not query or not query.strip():
-                    continue
-                if i > 0:
-                    time.sleep(1.5)  # 1 req/sec limit; internal rate limiter handles per-call timing
-                results = self.fetcher.search(query)
-                for paper in results:
-                    title = paper.get("title", "").lower().strip()
-                    if title and title not in seen_titles:
-                        seen_titles.add(title)
-                        all_papers.append(paper)
-
-            # Cap at 12 unique papers total
-            all_papers = all_papers[:12]
-
-            # SerpAPI + scholarly fallback chain — only triggered when Semantic Scholar is empty
-            if not all_papers:
-                self.logger.warning(
-                    "Semantic Scholar returned no results for project '%s'. "
-                    "Trying SerpAPI fallback...", project
-                )
-                all_papers = self.fetcher.fetch_from_serpapi(keywords)
-
-                if not all_papers:
-                    self.logger.warning(
-                        "SerpAPI returned no results for project '%s'. "
-                        "Trying scholarly as last resort...", project
-                    )
-                    all_papers = self.fetcher.fetch_from_scholarly(keywords)
-
-                if not all_papers:
-                    self.logger.error(
-                        "All search sources failed for project '%s'. "
-                        "No literature update will be sent.", project
-                    )
-                    if self.db:
-                        self.db.log_agent_run(
-                            agent_name=self.agent_name,
-                            project_name=project,
-                            status="FAILURE",
-                            finished_at=datetime.now().isoformat()
-                        )
-                    continue
-
-            # Unified cap after fallback chain
-            all_papers = all_papers[:12]
-
-            # Enrich with OpenAlex metadata before LLM processing
-            # (papers already enriched by fetch_from_openalex are skipped)
-            all_papers = self.fetcher.enrich_with_openalex(all_papers)
-
-            if not all_papers:
-                self.logger.warning("No data fetched for %s. Skipping LLM processing.", project)
-                if self.db:
-                    self.db.log_agent_run(
-                        agent_name=self.agent_name,
-                        project_name=project,
-                        status="SUCCESS",
-                        finished_at=datetime.now().isoformat()
-                    )
-                continue
-
-            research_data = self.process_results_with_llm(project, keywords, all_papers)
-            
-            if not research_data.get("papers"):
-                self.logger.warning("No parsed papers available for %s. Saving summary only.", project)
-                
-            links_section = "\n\n### 🔗 Direct Links to Found Papers:\n"
-            for item in all_papers:
-                links_section += f"* [{item['title']}]({item.get('link', item.get('url', ''))})\n"
-
-            summary_text = f"# Literature Review for: {project}\n\n**Keywords Used:** {keywords}\n\n{research_data.get('summary', 'No summary available.')}{links_section}"
-
-            self.library.save_literature_summary(project, summary_text)
-            self.logger.info("Saved literature markdown summary for project: %s", project)
-
-            papers_list = research_data.get("papers", [])
-            for paper in papers_list:
-                self.library.append_to_project_literature_table(project, paper)
-
-                # Using .get() gracefully defaults if the key somehow wasn't mapped
-                paper_title = paper.get("paper name", "Unknown")
-                self.logger.info("Appended paper '%s' to rolling CSV table.", paper_title)
-
-            safe_name = project.replace(" ", "_")
-            csv_file_path = os.path.join(Config.LIBRARY_DIR, "comparison_tables", safe_name, f"{safe_name}_rolling_table.csv")
-
-            if not research_data.get("papers"):
-                self.logger.info(
-                    "No papers found for project '%s'. Skipping literature email.", project
-                )
-                if self.db:
-                    self.db.log_agent_run(
-                        agent_name=self.agent_name,
-                        project_name=project,
-                        status="SKIPPED",
-                        finished_at=datetime.now().isoformat()
-                    )
-                continue
-
-            self.logger.info("Sending literature update email for %s...", project)
-            if not os.path.exists(csv_file_path):
-                self.logger.warning(
-                    "Rolling CSV not found at expected path: %s — "
-                    "email will be sent without attachment.", csv_file_path
-                )
-
-            self.notifier.send_literature_update(
+    def _process_project(self, project: str):
+        """Per-project logic extracted so ThreadPoolExecutor can run projects in parallel."""
+        if self.db:
+            self.db.log_agent_run(
+                agent_name=self.agent_name,
                 project_name=project,
-                md_content=summary_text,
-                csv_path=csv_file_path if os.path.exists(csv_file_path) else None
+                status="STARTED",
+                started_at=datetime.now().isoformat()
             )
+        print(f"\n{'='*40}\n🔬 Literature Search & Data Extraction for: {project}\n{'='*40}")
+
+        text = self._read_project_text(project)
+        topic_kw, method_kw = self.extract_keywords_from_text(project, text) if text else (project, project + " method")
+
+        all_papers = []
+        seen_titles = set()
+
+        for query in [topic_kw, method_kw]:
+            if not query or not query.strip():
+                continue
+            results = self.fetcher.search(query)
+            for paper in results:
+                title = paper.get("title", "").lower().strip()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_papers.append(paper)
+
+        all_papers = self._filter_relevant_papers(project, text, all_papers)
+        all_papers = all_papers[:15]
+
+        if not all_papers:
+            self.logger.warning("No data fetched for %s. Skipping LLM processing.", project)
             if self.db:
                 self.db.log_agent_run(
                     agent_name=self.agent_name,
@@ -339,5 +218,57 @@ Papers to analyze:
                     status="SUCCESS",
                     finished_at=datetime.now().isoformat()
                 )
+            return
 
+        keywords = f"{topic_kw} | {method_kw}"
+        research_data = self.process_results_with_llm(project, keywords, all_papers)
+
+        if not research_data.get("papers"):
+            self.logger.warning("No parsed papers available for %s. Saving summary only.", project)
+
+        links_section = "\n\n### 🔗 Direct Links to Found Papers:\n"
+        for item in all_papers:
+            links_section += f"* [{item['title']}]({item['link']})\n"
+
+        summary_text = f"# Literature Review for: {project}\n\n**Keywords Used:** {keywords}\n\n{research_data.get('summary', 'No summary available.')}{links_section}"
+
+        self.library.save_literature_summary(project, summary_text)
+        self.logger.info("Saved literature markdown summary for project: %s", project)
+
+        papers_list = research_data.get("papers", [])
+        if papers_list:
+            self.library.batch_append_to_project_literature_table(project, papers_list)
+            self.logger.info("Batch-appended %d papers to rolling CSV table for %s.", len(papers_list), project)
+
+        safe_name = project.replace(" ", "_")
+        csv_file_path = os.path.join(Config.LIBRARY_DIR, "comparison_tables", safe_name, f"{safe_name}_rolling_table.csv")
+
+        if not research_data.get("papers"):
+            self.logger.info("No papers found for project '%s'. Skipping literature email.", project)
+            return
+
+        self.logger.info("Sending literature update email for %s...", project)
+        self.notifier.send_literature_update(
+            project_name=project,
+            md_content=summary_text,
+            csv_path=csv_file_path if os.path.exists(csv_file_path) else None
+        )
+        if self.db:
+            self.db.log_agent_run(
+                agent_name=self.agent_name,
+                project_name=project,
+                status="SUCCESS",
+                finished_at=datetime.now().isoformat()
+            )
+
+    def run(self):
+        self.logger.info("Starting the literature research cycle.")
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(self._process_project, p): p for p in self.projects}
+            for future in as_completed(futures):
+                project = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logger.error("Unhandled error processing project '%s': %s", project, str(e))
         self.logger.info("Literature research cycle completed successfully.")

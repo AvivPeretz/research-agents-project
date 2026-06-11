@@ -44,7 +44,7 @@ class LibraryManager:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
         except OSError as e:
-            self.logger.error("Failed to write markdown file '%s': %s", filepath, str(e))
+            self.logger.error("Failed to write markdown file %s: %s", filepath, str(e))
             return None
         return filepath
 
@@ -92,4 +92,62 @@ class LibraryManager:
                 return
 
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df.to_csv(csv_path, index=False)
+        try:
+            df.to_csv(csv_path, index=False)
+        except OSError as e:
+            self.logger.error("Failed to write CSV for %s: %s", project_name, str(e))
+
+    def batch_append_to_project_literature_table(self, project_name: str, papers: list):
+        """
+        Appends multiple papers to the rolling CSV in a single read-deduplicate-write pass.
+        Avoids N+1 CSV reads when called with a list from a single agent run.
+        """
+        if not papers:
+            return
+
+        project_dir = self._get_project_dir("comparison_tables", project_name)
+        safe_name = project_name.replace(" ", "_")
+        csv_path = os.path.join(project_dir, f"{safe_name}_rolling_table.csv")
+
+        columns = [
+            "paper name", "cited", "source", "year published",
+            "types of available data", "number of samples", "number of features",
+            "number of classes", "location", "for how long",
+            "is it reproducible?", "how complicated is it?",
+            "is there privacy issues?", "data representation",
+            "can i control the application collected?"
+        ]
+
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path)
+            except Exception as e:
+                self.logger.error("Failed to read CSV for %s: %s", project_name, str(e))
+                df = pd.DataFrame(columns=columns)
+        else:
+            df = pd.DataFrame(columns=columns)
+
+        existing_names = (
+            set(df["paper name"].fillna("").str.lower())
+            if not df.empty and "paper name" in df.columns
+            else set()
+        )
+
+        new_rows = []
+        for paper_data in papers:
+            new_row = {col: paper_data.get(col, "N/A") for col in columns}
+            name_lower = new_row.get("paper name", "N/A").lower()
+            if name_lower not in existing_names:
+                existing_names.add(name_lower)
+                new_rows.append(new_row)
+            else:
+                self.logger.info("Paper '%s' already exists. Skipping.", new_row.get("paper name", "N/A"))
+
+        if not new_rows:
+            return
+
+        df = pd.concat([df, pd.DataFrame(new_rows, columns=columns)], ignore_index=True)
+        try:
+            df.to_csv(csv_path, index=False)
+        except OSError as e:
+            self.logger.error("Failed to write CSV for %s: %s", project_name, str(e))

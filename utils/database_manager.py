@@ -116,6 +116,28 @@ class DatabaseManager:
             self.logger.error("Failed to get last modified: %s", str(e))
             return None
 
+    def get_project_count(self) -> int:
+        """Returns the number of rows in project_state. Used to skip JSON migration after first run."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM project_state")
+                return cursor.fetchone()[0]
+        except sqlite3.Error as e:
+            self.logger.error("Failed to count projects: %s", str(e))
+            return 0
+
+    def get_all_last_modified(self) -> dict:
+        """Returns {project_name: last_modified_text} for all tracked projects in one query."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT project_name, last_modified_text FROM sync_registry")
+                return {row['project_name']: row['last_modified_text'] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get all last modified: %s", str(e))
+            return {}
+
     def update_sync_registry(self, project_name: str, last_modified_text: str):
         # Using SQLite 'UPSERT' (ON CONFLICT) to insert or update seamlessly
         query = """
@@ -181,6 +203,21 @@ class DatabaseManager:
                 return dict(row) if row else None
         except sqlite3.Error as e:
             self.logger.error("Failed to fetch project state %s: %s", project_name, str(e))
+            return None
+
+    def get_project_state_slim(self, project_name: str) -> dict:
+        """Returns project state without last_seen_text — use when the blob is not needed."""
+        query = """SELECT project_name, stanford_status, last_upload_time, researcher_email,
+                   student_status, update_frequency, supervisor_email, student_name, created_at
+                   FROM project_state WHERE project_name = ?"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (project_name,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except sqlite3.Error as e:
+            self.logger.error("Failed to fetch slim project state %s: %s", project_name, str(e))
             return None
 
     def update_project_state(self, project_name: str, **kwargs):
@@ -272,6 +309,61 @@ class DatabaseManager:
             self.logger.error("Failed to get snapshots for %s: %s", project_name, str(e))
             return []
 
+    def get_agent_run_stats(self) -> list:
+        """
+        Returns per-agent run statistics for dashboard analytics.
+        Each row: {agent_name, total, successes, failures, avg_duration_s}
+        avg_duration_s is the mean of (finished_at - started_at) in seconds
+        for rows where both timestamps are present.
+        """
+        query = """
+            SELECT
+                agent_name,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS successes,
+                SUM(CASE WHEN status IN ('FAILED', 'ERROR') THEN 1 ELSE 0 END) AS failures,
+                AVG(
+                    CASE
+                        WHEN started_at IS NOT NULL AND started_at != ''
+                             AND finished_at IS NOT NULL AND finished_at != ''
+                        THEN (julianday(finished_at) - julianday(started_at)) * 86400
+                        ELSE NULL
+                    END
+                ) AS avg_duration_s
+            FROM agent_runs
+            GROUP BY agent_name
+            ORDER BY total DESC
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get agent run stats: %s", str(e))
+            return []
+
+    def get_all_project_snapshots(self, days: int = 28) -> list:
+        """
+        Returns progress snapshots for ALL projects within the last N days.
+        Each row: {project_name, snapshot_date, had_changes, delta_char_count}
+        Used by the Analytics dashboard page.
+        """
+        query = """
+            SELECT project_name, snapshot_date, had_changes, delta_char_count
+            FROM progress_snapshots
+            WHERE snapshot_date >= date('now', ?)
+            ORDER BY project_name, snapshot_date
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (f'-{days} days',))
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get all project snapshots: %s", str(e))
+            return []
+
     def migrate_from_json(self, json_path: str):
         """
         Safely migrate projects from a legacy researchers_map.json file into the
@@ -309,7 +401,7 @@ class DatabaseManager:
                             break
 
             if not email:
-                email = Config.OVERLEAF_EMAIL
+                email = Config.RESEARCHER_EMAIL
 
             try:
                 self.add_project(project_name, email)

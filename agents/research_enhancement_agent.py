@@ -3,7 +3,8 @@ import time
 import imaplib
 import email
 import re
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 import pandas as pd
 
@@ -26,20 +27,27 @@ class ResearchEnhancementAgent(BaseAgent):
         super().__init__(agent_name="ResearchEnhancementAgent")
         self.projects = overleaf_projects
         self.library = LibraryManager()
-        self.notifier = notifier 
-        
-        # --- NEW: Dependency Injection for Database ---
-        self.db = db 
-        
+        self.notifier = notifier
+        self.connector = OverleafConnector()
+
+        # --- Dependency Injection for Database ---
+        self.db = db
+
         # Use Config for credentials
-        self.uni_email = Config.OVERLEAF_EMAIL 
+        self.uni_email = Config.OVERLEAF_EMAIL
         self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL
         self.dummy_password = Config.NOTIFICATION_SENDER_PASSWORD
-        
+
         self.logger.info("ResearchEnhancementAgent initialized for %d projects.", len(self.projects))
 
     def _get_project_pdf_path(self, project_name: str) -> str:
+        safe_name = project_name.replace(" ", "_")
         project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
+        # Look for the canonical PDF saved by DataIngestionAgent first
+        direct_path = os.path.join(project_dir, f"{safe_name}.pdf")
+        if os.path.exists(direct_path):
+            return direct_path
+        # Fallback: walk for any .pdf (covers edge cases)
         if os.path.exists(project_dir):
             for root, _, files in os.walk(project_dir):
                 for file in files:
@@ -51,9 +59,9 @@ class ResearchEnhancementAgent(BaseAgent):
         """Retrieves Stanford status from SQLite database."""
         if not self.db:
             return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
-            
+
         try:
-            state = self.db.get_project_state(project_name)
+            state = self.db.get_project_state_slim(project_name)
             if state:
                 return {
                     "status": state.get('stanford_status') or "READY_FOR_UPLOAD",
@@ -61,7 +69,7 @@ class ResearchEnhancementAgent(BaseAgent):
                 }
         except Exception as e:
             self.logger.warning("Could not read DB state for %s: %s", project_name, str(e))
-            
+
         return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
 
     def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None):
@@ -102,27 +110,24 @@ class ResearchEnhancementAgent(BaseAgent):
                 
                 print("📂 Uploading the PDF manuscript...")
                 file_input = page.locator('input[type="file"]')
-                if file_input.count() > 0:
-                    file_input.set_input_files(pdf_path)
-                else:
-                    time.sleep(15)
-                
-                time.sleep(2)
-                
+                file_input.wait_for(state="attached", timeout=15000)
+                file_input.set_input_files(pdf_path)
+
                 print("📧 Entering the University email address...")
                 email_input = page.locator('input[type="email"]')
-                if email_input.count() > 0:
-                    email_input.fill(self.uni_email)
-                
+                email_input.wait_for(state="visible", timeout=5000)
+                email_input.fill(self.uni_email)
+
                 print("🚀 Submitting the paper for review...")
-                submit_button = page.locator('button:has-text("Submit"), button:has-text("Review"), button[type="submit"]')
-                if submit_button.count() > 0:
-                    submit_button.first.click()
-                else:
-                    time.sleep(10)
-                
-                print("✅ Upload process finished! Waiting 5 seconds to ensure the server received it...")
-                time.sleep(5)
+                submit_button = page.locator('button:has-text("Submit"), button:has-text("Review"), button[type="submit"]').first
+                submit_button.wait_for(state="visible", timeout=10000)
+                submit_button.click()
+
+                print("✅ Upload process finished! Waiting for server acknowledgement...")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass  # networkidle timeout is non-fatal — page loaded but may still have background XHR
                 return True
                 
             except Exception as e:
@@ -135,12 +140,14 @@ class ResearchEnhancementAgent(BaseAgent):
     def _get_stanford_token_from_email(self, project_name: str) -> str:
         """Phase 2a: Connects to Gmail and extracts the token specifically for this project."""
         print(f"   🔍 Checking Gmail for Stanford review token for '{project_name}'...")
+        mail = None
         try:
             mail = imaplib.IMAP4_SSL(Config.IMAP_SERVER, Config.IMAP_PORT)
             mail.login(self.dummy_email, self.dummy_password)
             mail.select("INBOX")
-            
-            status, messages = mail.search(None, 'ALL')
+
+            since_date = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
+            status, messages = mail.search(None, f'(SINCE {since_date})')
             if status == "OK":
                 email_ids = messages[0].split()
                 for e_id in reversed(email_ids[-30:]):
@@ -148,15 +155,15 @@ class ResearchEnhancementAgent(BaseAgent):
                     for response_part in msg_data:
                         if isinstance(response_part, tuple):
                             msg = email.message_from_bytes(response_part[1])
-                            
+
                             subject = str(msg.get("Subject", "")).replace('\r', '').replace('\n', '')
                             clean_proj_name = project_name.strip().lower()
-                            
+
                             if clean_proj_name not in subject.lower():
                                 continue
-                                
+
                             print(f"   📧 Found matching email subject: {subject}")
-                            
+
                             body = ""
                             if msg.is_multipart():
                                 for part in msg.walk():
@@ -168,24 +175,29 @@ class ResearchEnhancementAgent(BaseAgent):
                                             pass
                             else:
                                 body = msg.get_payload(decode=True).decode(errors='ignore')
-                            
+
                             clean_body = re.sub(r'<[^>]+>', ' ', body)
                             clean_body = re.sub(r'\s+', ' ', clean_body)
-                            
+
                             match = re.search(r'Your Access Token:\s*([^\s]{20,})', clean_body, re.IGNORECASE)
                             if match:
                                 token = match.group(1).strip()
                                 print(f"   ✅ Found Correct Stanford Token: {token} (Length: {len(token)})")
-                                mail.logout()
                                 return token
                             else:
                                 print("   ⚠️ Email matched subject, but token not found in body! (Check email formatting)")
-            mail.logout()
+
             print(f"   ⏳ No token found yet for '{project_name}'.")
             return None
         except Exception as e:
             self.logger.error("IMAP Error: %s", str(e))
             return None
+        finally:
+            if mail is not None:
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
 
     def _fetch_review_from_stanford(self, token: str) -> str:
         """Phase 2b: Uses Playwright to submit the token and scrape the review."""
@@ -335,15 +347,15 @@ class ResearchEnhancementAgent(BaseAgent):
         if len(paper_text) <= max_chars:
             return paper_text
 
-        # Allocation: 40% intro, 35% body, 25% conclusion
-        intro_end = int(max_chars * 0.40)
-        body_size = int(max_chars * 0.35)
-        conclusion_start = int(max_chars * 0.25)
+        # Allocation: 40% intro, 35% body, 25% conclusion (sums to 100% of max_chars)
+        intro_chars = int(max_chars * 0.40)
+        body_chars = int(max_chars * 0.35)
+        conclusion_chars = max_chars - intro_chars - body_chars  # remaining ~25%
 
-        intro = paper_text[:intro_end]
-        mid_start = len(paper_text) // 2 - body_size // 2
-        body = paper_text[mid_start:mid_start + body_size]
-        conclusion = paper_text[-conclusion_start:]
+        intro = paper_text[:intro_chars]
+        mid_start = len(paper_text) // 2 - body_chars // 2
+        body = paper_text[mid_start:mid_start + body_chars]
+        conclusion = paper_text[-conclusion_chars:]
 
         return (
             intro +
@@ -488,16 +500,16 @@ avoid vague tasks like "improve the writing."
         """
         self.logger.info("Activating internal review fallback for project: %s", project_name)
 
-        # Step 1: Get paper text via OverleafConnector
-        connector = OverleafConnector()
+        # Step 1: Get paper text via injected OverleafConnector
         project_path = os.path.join(Config.OVERLEAF_DIR, project_name)
-        paper_text = connector.read_and_clean_tex_file(project_path, "main.tex")
+        paper_text = self.connector.read_all_tex_files(project_path)
 
         # Step 2: Minimum text check
-        if not paper_text or len(paper_text.strip()) < MINIMUM_REVIEW_LENGTH:
+        min_len = getattr(Config, 'MIN_REVIEW_LENGTH', MINIMUM_REVIEW_LENGTH)
+        if not paper_text or len(paper_text.strip()) < min_len:
             self.logger.warning(
                 "Project '%s' has insufficient text (%d chars < %d minimum). "
-                "Skipping internal review.", project_name, len(paper_text or ""), MINIMUM_REVIEW_LENGTH
+                "Skipping internal review.", project_name, len(paper_text or ""), min_len
             )
             self._update_stanford_state(project_name, "SKIPPED_INSUFFICIENT_TEXT")
             return False
@@ -540,44 +552,27 @@ avoid vague tasks like "improve the writing."
         self.logger.info("Internal review completed successfully for %s.", project_name)
         return True
 
-    def run(self):
-        self.logger.info("Starting Research Enhancement cycle.")
-        for project in self.projects:
-            if self.db:
-                self.db.log_agent_run(
-                    agent_name=self.agent_name,
-                    project_name=project,
-                    status="STARTED",
-                    started_at=datetime.now().isoformat()
-                )
-            print(f"\n{'-'*40}\n🧠 Stanford Peer-Review Engine: {project}\n{'-'*40}")
+    def _process_project(self, project: str):
+        """Per-project logic run in parallel via ThreadPoolExecutor."""
+        if self.db:
+            self.db.log_agent_run(
+                agent_name=self.agent_name,
+                project_name=project,
+                status="STARTED",
+                started_at=datetime.now().isoformat()
+            )
+        print(f"\n{'-'*40}\n🧠 Stanford Peer-Review Engine: {project}\n{'-'*40}")
 
-            state = self._get_stanford_state(project)
+        state = self._get_stanford_state(project)
 
-            if state["status"] == "SKIPPED_INSUFFICIENT_TEXT":
-                self.logger.info("Project '%s' was previously skipped (insufficient text). Skipping.", project)
-                if self.db:
-                    self.db.log_agent_run(
-                        agent_name=self.agent_name,
-                        project_name=project,
-                        status="SUCCESS",
-                        finished_at=datetime.now().isoformat()
-                    )
-                continue
+        if state["status"] == "SKIPPED_INSUFFICIENT_TEXT":
+            self.logger.info("Project '%s' was previously skipped (insufficient text). Skipping.", project)
 
-            if state["status"] == "READY_FOR_UPLOAD":
-                pdf_path = self._get_project_pdf_path(project)
-                if not pdf_path:
-                    self.logger.warning("No PDF found for %s. Cannot upload.", project)
-                    if self.db:
-                        self.db.log_agent_run(
-                            agent_name=self.agent_name,
-                            project_name=project,
-                            status="SKIPPED",
-                            finished_at=datetime.now().isoformat()
-                        )
-                    continue
-                    
+        elif state["status"] == "READY_FOR_UPLOAD":
+            pdf_path = self._get_project_pdf_path(project)
+            if not pdf_path:
+                self.logger.warning("No PDF found for %s. Cannot upload.", project)
+            else:
                 success = self.upload_to_stanford(project, pdf_path)
                 if success:
                     self._update_stanford_state(project, "WAITING_FOR_REVIEW", datetime.now().isoformat())
@@ -585,68 +580,79 @@ avoid vague tasks like "improve the writing."
                 else:
                     self.logger.warning("Stanford upload failed for '%s'. Activating internal fallback.", project)
                     self._run_internal_review(project)
-                    
-            elif state["status"] == "WAITING_FOR_REVIEW":
-                if state.get("last_upload_time"):
-                    try:
-                        upload_dt = datetime.fromisoformat(state["last_upload_time"])
-                        hours_waiting = (datetime.now() - upload_dt).total_seconds() / 3600
-                        if hours_waiting > 48:
-                            self.logger.warning(
-                                "Project '%s' has been WAITING_FOR_REVIEW for %.1f hours. Sending alert.",
-                                project, hours_waiting
-                            )
-                            self.notifier.send_admin_alert(
-                                subject=f"Stanford Review Stuck: {project}",
-                                message=f"Project '{project}' has been waiting for a Stanford review token for {hours_waiting:.0f} hours. Manual intervention may be required."
-                            )
-                            self._update_stanford_state(project, "READY_FOR_UPLOAD")
-                            if self.db:
-                                self.db.log_agent_run(
-                                    agent_name=self.agent_name,
-                                    project_name=project,
-                                    status="SUCCESS",
-                                    finished_at=datetime.now().isoformat()
-                                )
-                            continue
-                    except Exception as e:
-                        self.logger.warning("Could not parse upload time for %s: %s", project, str(e))
-                print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
-                token = self._get_stanford_token_from_email(project)
 
-                if token:
-                    review_text = self._fetch_review_from_stanford(token)
-                    if review_text:
-                        tasks = self._generate_actionable_tasks(project, review_text)
-                        if tasks is not None and tasks.strip():
-                            self._update_stanford_state(project, "REVIEW_COMPLETED")
-                            print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
-
-                            self.logger.info("Sending Stanford task list email for %s...", project)
-                            self.notifier.send_stanford_tasks(
-                                project_name=project,
-                                md_content=tasks
-                            )
-                    else:
+        elif state["status"] == "WAITING_FOR_REVIEW":
+            if state.get("last_upload_time"):
+                try:
+                    upload_dt = datetime.fromisoformat(state["last_upload_time"])
+                    hours_waiting = (datetime.now() - upload_dt).total_seconds() / 3600
+                    if hours_waiting > 48:
                         self.logger.warning(
-                            "Stanford review fetch returned empty for '%s'. Activating internal fallback.", project
+                            "Project '%s' has been WAITING_FOR_REVIEW for %.1f hours. Sending alert.",
+                            project, hours_waiting
                         )
-                        self._run_internal_review(project)
+                        self.notifier.send_admin_alert(
+                            subject=f"Stanford Review Stuck: {project}",
+                            message=f"Project '{project}' has been waiting for a Stanford review token for {hours_waiting:.0f} hours. Manual intervention may be required."
+                        )
+                        self._update_stanford_state(project, "READY_FOR_UPLOAD")
+                        if self.db:
+                            self.db.log_agent_run(
+                                agent_name=self.agent_name,
+                                project_name=project,
+                                status="SUCCESS",
+                                finished_at=datetime.now().isoformat()
+                            )
+                        return
+                except Exception as e:
+                    self.logger.warning("Could not parse upload time for %s: %s", project, str(e))
+
+            print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
+            token = self._get_stanford_token_from_email(project)
+
+            if token:
+                review_text = self._fetch_review_from_stanford(token)
+                if review_text:
+                    tasks = self._generate_actionable_tasks(project, review_text)
+                    if tasks is not None and tasks.strip():
+                        self._update_stanford_state(project, "REVIEW_COMPLETED")
+                        print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
+                        self.logger.info("Sending Stanford task list email for %s...", project)
+                        self.notifier.send_stanford_tasks(
+                            project_name=project,
+                            md_content=tasks
+                        )
                 else:
-                    print("   ⏭️ Review email not yet received or token not found. Will try again next run.")
+                    self.logger.warning(
+                        "Stanford review fetch returned empty for '%s'. Activating internal fallback.", project
+                    )
+                    self._run_internal_review(project)
+            else:
+                print("   ⏭️ Review email not yet received or token not found. Will try again next run.")
 
-            elif state["status"] in ("REVIEW_COMPLETED", "INTERNAL_REVIEW_COMPLETED"):
-                self.logger.info(
-                    "Project '%s' review is already complete (status: %s). Skipping.",
-                    project, state["status"]
-                )
+        elif state["status"] in ("REVIEW_COMPLETED", "INTERNAL_REVIEW_COMPLETED"):
+            self.logger.info(
+                "Project '%s' review is already complete (status: %s). Skipping.",
+                project, state["status"]
+            )
 
-            if self.db:
-                self.db.log_agent_run(
-                    agent_name=self.agent_name,
-                    project_name=project,
-                    status="SUCCESS",
-                    finished_at=datetime.now().isoformat()
-                )
+        if self.db:
+            self.db.log_agent_run(
+                agent_name=self.agent_name,
+                project_name=project,
+                status="SUCCESS",
+                finished_at=datetime.now().isoformat()
+            )
 
+    def run(self):
+        self.logger.info("Starting Research Enhancement cycle.")
+        max_workers = getattr(Config, 'ENHANCEMENT_MAX_WORKERS', 3)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._process_project, p): p for p in self.projects}
+            for future in as_completed(futures):
+                project = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logger.error("Unhandled error processing project '%s': %s", project, str(e))
         self.logger.info("Research Enhancement cycle completed.")

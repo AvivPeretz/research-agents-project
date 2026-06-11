@@ -27,11 +27,13 @@ class TestLiteratureResearchAgent:
                 yield agent
 
     def test_extract_keywords_returns_string(self, literature_agent, sample_project_name):
-        """Asserts that extract_keywords_from_text returns a non-empty string."""
+        """Asserts that extract_keywords_from_text returns a non-empty tuple of two strings."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value="keyword1 keyword2"):
             result = literature_agent.extract_keywords_from_text(sample_project_name, "Sample research text about AI")
-            assert isinstance(result, str)
-            assert result != ""
+            assert isinstance(result, tuple)
+            assert len(result) == 2
+            assert result[0] != ""
+            assert result[1] != ""
 
     def test_extract_keywords_falls_back_to_project_name_on_empty_text(self, literature_agent, sample_project_name):
         """Asserts that extract_keywords returns project name when text input is empty."""
@@ -43,8 +45,9 @@ class TestLiteratureResearchAgent:
         """Asserts that quotes returned by LLM are stripped from result."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value='"deep learning" "neural networks"'):
             result = literature_agent.extract_keywords_from_text(sample_project_name, "Test text")
-            assert '"' not in result
-            assert "deep learning" in result.lower() or "neural" in result.lower()
+            assert isinstance(result, tuple)
+            assert '"' not in result[0]
+            assert "deep learning" in result[0].lower() or "neural" in result[0].lower()
 
     def test_process_results_with_llm_returns_valid_dict(self, literature_agent, sample_project_name):
         """Asserts that process_results_with_llm returns dict with 'summary' and 'papers' keys."""

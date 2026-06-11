@@ -120,7 +120,7 @@ class TestReadAndCleanTexFile:
         result = connector.read_and_clean_tex_file(str(tmp_path), "empty.tex")
         assert result == ""
 
-    # TEST A — FIX 1: default path uses Config.OVERLEAF_DIR, not bare string
+    # TEST A — FIX 1: default base_storage_path must use Config.OVERLEAF_DIR
     def test_default_base_storage_path_uses_config_overleaf_dir(self):
         """Instantiating OverleafConnector() with no args must use Config.OVERLEAF_DIR."""
         connector = OverleafConnector()

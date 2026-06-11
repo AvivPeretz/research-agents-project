@@ -32,6 +32,7 @@ class TestLLMFailures:
         """When all LLM providers fail, ask_llm must raise RuntimeError."""
         agent = _make_stub_agent()
         agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent._providers_waterfall = []
         # gemini and openai both disabled
 
         with patch("agents.base_agent.time.sleep"):

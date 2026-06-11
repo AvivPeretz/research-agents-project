@@ -1,5 +1,7 @@
 import os
+import logging
 import argparse
+import time
 
 # Import the centralized configuration
 from config import Config
@@ -10,6 +12,7 @@ from agents.supervisor_status_agent import SupervisorStatusAgent
 from ingestion.data_ingestion_agent import DataIngestionAgent
 from utils.garbage_collector import GarbageCollector
 from agents.notification_agent import NotificationAgent
+from agents.supervisor_status_agent import SupervisorStatusAgent
 from utils.database_manager import DatabaseManager
 
 def get_all_active_projects() -> list:
@@ -23,18 +26,23 @@ def get_all_active_projects() -> list:
     return [name for name in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, name))]
 
 
-def run_agent_safely(agent, *args, **kwargs) -> bool:
-    """
-    Helper to run an agent and catch/log exceptions so the main loop continues.
-    Returns True on success, False on failure.
-    """
+_pipeline_logger = logging.getLogger("Pipeline")
+
+def run_agent_safely(agent, dry_run: bool = False, *args, **kwargs) -> bool:
+    name = agent.__class__.__name__
+    if dry_run:
+        print(f"--- [DRY RUN] Would run: {name} ---")
+        return True
     try:
-        print(f"--- Running agent: {agent.__class__.__name__} ---")
+        t0 = time.time()
+        print(f"--- Running agent: {name} ---")
         agent.run(*args, **kwargs)
-        print(f"--- Agent {agent.__class__.__name__} finished successfully ---")
+        elapsed = time.time() - t0
+        print(f"--- Agent {name} finished in {elapsed:.1f}s ---")
         return True
     except Exception as e:
-        print(f"!!! Agent {agent.__class__.__name__} failed: {e}")
+        _pipeline_logger.error("Agent %s failed: %s", name, str(e), exc_info=True)
+        print(f"!!! Agent {name} failed: {e}")
         return False
 
 def main():
@@ -50,18 +58,25 @@ def main():
     parser.add_argument(
         "--agent", 
         type=str, 
-        choices=['all', 'ingestion', 'literature', 'progress', 'enhancement', 'gc', 'supervisor'],
+        choices=['all', 'ingestion', 'literature', 'progress', 'enhancement', 'supervisor', 'gc'],
         default='all', 
         help="Specify which agent to run (default: 'all')"
     )
     
     parser.add_argument(
-        "--project", 
-        type=str, 
-        default='all', 
+        "--project",
+        type=str,
+        default='all',
         help="Specify a single project name to process (default: 'all' projects)"
     )
-    
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print what would run without executing any agents."
+    )
+
     args = parser.parse_args()
     print(f"\n🚀 Starting ResearchAgents Pipeline | Target Agent: [{args.agent.upper()}] | Target Project: [{args.project}]\n")
 
@@ -74,8 +89,11 @@ def main():
     db = DatabaseManager()
     notifier = NotificationAgent(db=db)
     
-    db.migrate_from_json(str(Config.RESEARCHERS_MAP_PATH))
-    print("--- DB Migration Completed / Verified ---\n")
+    if db.get_project_count() == 0:
+        db.migrate_from_json(str(Config.RESEARCHERS_MAP_PATH))
+        print("--- DB Migration Completed ---\n")
+    else:
+        print("--- DB already populated, skipping JSON migration ---\n")
 
     # Determine scope based on CLI args
     all_projects = get_all_active_projects()
@@ -104,12 +122,14 @@ def main():
 
     # --- 1. Literature Research Agent ---
     if args.agent in ['all', 'literature']:
-        if valid_targets:
-            print(f"\n--- 1. Running Literature Research Agent for: {valid_targets} ---")
-            lit_agent = LiteratureResearchAgent(active_projects=valid_targets, notifier=notifier, db=db)
-            run_agent_safely(lit_agent)
+        # When running 'all', only search literature for projects that actually changed
+        lit_targets = valid_targets if args.agent == 'literature' else [p for p in updated_projects if p in all_projects]
+        if lit_targets:
+            print(f"\n--- 1. Running Literature Research Agent for: {lit_targets} ---")
+            lit_agent = LiteratureResearchAgent(active_projects=lit_targets, notifier=notifier, db=db)
+            run_agent_safely(lit_agent, dry_run=args.dry_run)
         else:
-            print("\n--- No projects available for Literature Research. ---")
+            print("\n--- No updated projects for Literature Research. Skipping. ---")
     
     # --- 2. Progress Tracking Agent ---
     if args.agent in ['all', 'progress']:
@@ -119,31 +139,33 @@ def main():
         if projects_to_track:
             print(f"\n--- 2. Running Progress Tracking Agent for: {projects_to_track} 🚀 ---")
             prog_agent = ProgressTrackingAgent(overleaf_projects=projects_to_track, notifier=notifier, db=db)
-            run_agent_safely(prog_agent)
+            run_agent_safely(prog_agent, dry_run=args.dry_run)
         else:
             print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
     
     # --- 3. Research Enhancement Agent ---
     if args.agent in ['all', 'enhancement']:
-        if valid_targets:
-            print(f"\n--- 3. Running Research Enhancement Agent for: {valid_targets} 🚀 ---")
-            enhancement_agent = ResearchEnhancementAgent(overleaf_projects=valid_targets, notifier=notifier, db=db)
-            run_agent_safely(enhancement_agent)
+        enh_targets = valid_targets if args.agent == 'enhancement' else [p for p in updated_projects if p in all_projects]
+        if enh_targets:
+            print(f"\n--- 3. Running Research Enhancement Agent for: {enh_targets} 🚀 ---")
+            enhancement_agent = ResearchEnhancementAgent(overleaf_projects=enh_targets, notifier=notifier, db=db)
+            run_agent_safely(enhancement_agent, dry_run=args.dry_run)
         else:
-            print("\n--- No projects available for Research Enhancement. ---")
+            print("\n--- No updated projects for Research Enhancement. Skipping. ---")
     
-    # --- 4. System Cleanup (Garbage Collector) ---
-    if args.agent in ['all', 'gc']:
-        print(f"\n--- 4. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
-        gc = GarbageCollector(retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS, db=db)
-        run_agent_safely(gc)
-
-    # --- 5. Supervisor Status Agent ---
+    # --- 4. Supervisor Status Agent ---
     if args.agent in ['all', 'supervisor']:
-        print(f"\n--- 5. Running Supervisor Status Agent 📊 ---")
+        print(f"\n--- 4. Running Supervisor Status Agent ---")
         supervisor_agent = SupervisorStatusAgent(db=db, notifier=notifier)
-        run_agent_safely(supervisor_agent)
+        run_agent_safely(supervisor_agent, dry_run=args.dry_run)
 
+    # --- 5. System Cleanup (Garbage Collector) ---
+    if args.agent in ['all', 'gc']:
+        print(f"\n--- 5. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
+        gc = GarbageCollector(db=db, retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS)
+        run_agent_safely(gc, dry_run=args.dry_run)
+
+    print(f"\n--- Pipeline completed | Agent={args.agent} | Project={args.project} | Dry-run={args.dry_run} ---")
     print("\n--- ✅ All Executions Finished Successfully ---")
 
 if __name__ == "__main__":
