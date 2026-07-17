@@ -153,7 +153,7 @@ exponential-backoff retry logic, and rotating file logging.
 | Layer | Technology |
 |---|---|
 | Language | Python 3.10–3.13 |
-| LLM providers | Groq (`llama-3.3-70b-versatile`), Gemini (`gemini-1.5-flash`), OpenAI (`gpt-4o-mini`) |
+| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-1.5-flash`), OpenAI (`gpt-4o-mini`) |
 | LLM contracts | Pydantic v2 |
 | Browser automation | Playwright (Chromium) |
 | Literature search | Semantic Scholar API → SerpAPI → scholarly |

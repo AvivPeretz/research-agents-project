@@ -36,7 +36,7 @@ class Config:
     # 3. LLM Configuration (Groq)
     # ==========================================
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    LLM_MODEL_NAME = "llama-3.3-70b-versatile"
+    LLM_MODEL_NAME = "openai/gpt-oss-120b"
     
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL_NAME = "gemini-1.5-flash"

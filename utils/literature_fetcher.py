@@ -138,7 +138,7 @@ class LiteratureFetcher:
                 
                 if page.locator('form[id="captcha-form"]').count() > 0:
                     print("⚠️ Scholar CAPTCHA detected! Please solve it in the browser window.")
-                    page.wait_for_selector('div.gs_ri', timeout=60000)
+                    page.wait_for_selector('div.gs_ri', timeout=300000)
                 
                 # Fetch up to 3 results from the fallback
                 page.wait_for_selector('div.gs_ri', timeout=Config.PLAYWRIGHT_TIMEOUT_MS)
