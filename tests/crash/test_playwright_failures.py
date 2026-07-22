@@ -266,8 +266,11 @@ class TestPlaywrightFailures:
         db = MagicMock()
         notifier = MagicMock()
 
+        state_file = str(tmp_path / "nonexistent_state.json")
+
         with patch.object(Config, "OVERLEAF_DIR", downloads_dir), \
              patch.object(Config, "OVERLEAF_USER_DATA_DIR", profile_dir), \
+             patch.object(Config, "OVERLEAF_STATE_PATH", state_file), \
              patch.object(Config, "PLAYWRIGHT_HEADLESS", True), \
              patch.object(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000):
             agent = DataIngestionAgent(db=db, notifier=notifier)

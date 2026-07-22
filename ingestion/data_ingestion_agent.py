@@ -108,9 +108,9 @@ class DataIngestionAgent:
                     self._human_delay(500, 1200)
 
                 print("\n🚨 ACTION REQUIRED: Click 'Log In'. Solve reCAPTCHA manually if it appears.")
-                print("⏳ Waiting up to 300 seconds (5 minutes) for you to reach the dashboard...")
+                print("⏳ Waiting up to 600 seconds (10 minutes) for you to reach the dashboard...")
 
-                page.wait_for_url("**/project", timeout=300000)
+                page.wait_for_url("**/project", timeout=600000)
                 print("✅ Reached dashboard! Saving session securely...")
                 self._human_delay(1500, 2500)
                 context.storage_state(path=self.state_file)
@@ -278,8 +278,14 @@ class DataIngestionAgent:
                             file_btn.click()
                             self._human_delay(1000, 2000)
 
+                            print("   📂 Hovering 'Download' submenu...")
+                            download_menu = page.locator('[role="menuitem"]:has-text("Download")').filter(has_not_text="as PDF").first
+                            download_menu.hover()
+                            self._human_delay(600, 1000)
+
                             print("   📥 Clicking 'Download as PDF'...")
                             pdf_btn = page.locator('text="Download as PDF"').first
+                            page.wait_for_selector('text="Download as PDF"', timeout=5000)
 
                             with page.expect_download(timeout=30000) as pdf_download_info:
                                 pdf_btn.click()
