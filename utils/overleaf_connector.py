@@ -53,7 +53,14 @@ class OverleafConnector:
         return clean_text.strip()
 
     _ABSTRACT_RE = re.compile(r'\\begin\{abstract\}(.*?)\\end\{abstract\}', re.DOTALL)
-    _HEADING_RE = re.compile(r'\\(?:chapter|section|subsection|subsubsection)\*?\{([^}]*)\}')
+    # Captures the heading argument allowing up to two levels of nested
+    # braces (e.g. \section{Results (Fig.~\ref{fig:1})} or
+    # \section{\textbf{Motivation}}), since a naive [^}]* stops at the
+    # first inner '}' and truncates/corrupts real academic headings.
+    _HEADING_RE = re.compile(
+        r'\\(?:chapter|section|subsection|subsubsection)\*?'
+        r'\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}'
+    )
 
     def extract_representative_sample(self, raw_tex: str, max_chars: int, heading_body_chars: int = 300) -> str:
         """
@@ -79,7 +86,7 @@ class OverleafConnector:
                 parts.append(abstract_clean)
 
         for i, match in enumerate(headings):
-            heading_text = match.group(1)
+            heading_text = self.clean_latex_text(match.group(1)).strip()
             body_start = match.end()
             body_end = headings[i + 1].start() if i + 1 < len(headings) else len(raw_tex)
             body_clean = self.clean_latex_text(raw_tex[body_start:body_end]).strip()

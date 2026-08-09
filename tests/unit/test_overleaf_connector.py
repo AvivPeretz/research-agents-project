@@ -229,3 +229,20 @@ patterns in real-world network deployments.
         sample = connector.extract_representative_sample(self.STRUCTURED_DOC, max_chars=4000)
         assert r"\section" not in sample
         assert r"\begin" not in sample
+
+    def test_heading_with_nested_braces_is_not_truncated(self):
+        """Headings with nested braces (e.g. \\ref inside \\section) must be captured in full."""
+        connector = OverleafConnector()
+        doc = r"""
+\section{Results (Fig.~\ref{fig:1})}
+We observed a significant improvement over the baseline.
+
+\section{\textbf{Motivation}}
+This work is motivated by real-world deployment constraints.
+"""
+        sample = connector.extract_representative_sample(doc, max_chars=4000)
+        assert "Results (Fig.~" in sample
+        assert "Motivation" in sample
+        assert ")}" not in sample
+        assert r"\ref" not in sample
+        assert r"\textbf" not in sample
