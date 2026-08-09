@@ -1,6 +1,5 @@
-"""Tests for email (IMAP/SMTP) failure handling."""
+"""Tests for email (SMTP) failure handling."""
 
-import imaplib
 import smtplib
 from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
@@ -11,97 +10,15 @@ from config import Config
 
 
 class TestEmailFailures:
-    """Tests for handling email service failures."""
+    """Tests for handling email service failures.
 
-    def test_imap_auth_failure_returns_none_token(self):
-        """IMAP login failure causes _get_stanford_token_from_email to return None."""
-        from agents.research_enhancement_agent import ResearchEnhancementAgent
-
-        mock_self = MagicMock()
-        mock_self.dummy_email = "dummy@example.com"
-        mock_self.dummy_password = "password"
-        mock_self.logger = MagicMock()
-
-        with patch("agents.research_enhancement_agent.imaplib.IMAP4_SSL") as mock_imap_cls:
-            mock_imap_cls.return_value.login.side_effect = imaplib.IMAP4.error("Authentication failed")
-            result = ResearchEnhancementAgent._get_stanford_token_from_email(mock_self, "Test_Project")
-
-        assert result is None
-
-    def test_imap_connection_error_returns_none_token(self):
-        """IMAP connection error causes _get_stanford_token_from_email to return None."""
-        from agents.research_enhancement_agent import ResearchEnhancementAgent
-
-        mock_self = MagicMock()
-        mock_self.dummy_email = "dummy@example.com"
-        mock_self.dummy_password = "password"
-        mock_self.logger = MagicMock()
-
-        with patch("agents.research_enhancement_agent.imaplib.IMAP4_SSL",
-                   side_effect=ConnectionRefusedError("Cannot connect to IMAP")):
-            result = ResearchEnhancementAgent._get_stanford_token_from_email(mock_self, "Test_Project")
-
-        assert result is None
-
-    def test_token_regex_no_match_returns_none(self):
-        """Email body without token pattern causes _get_stanford_token_from_email to return None."""
-        from agents.research_enhancement_agent import ResearchEnhancementAgent
-        import email as email_module
-
-        mock_self = MagicMock()
-        mock_self.dummy_email = "dummy@example.com"
-        mock_self.dummy_password = "password"
-        mock_self.logger = MagicMock()
-
-        # Build a real email message with NO token pattern
-        raw_msg = email_module.message_from_bytes(
-            b"Subject: Test_Project review\r\nFrom: paperreview@example.com\r\n\r\n"
-            b"Thank you for your submission. No token provided here."
-        )
-        raw_bytes = raw_msg.as_bytes()
-
-        with patch("agents.research_enhancement_agent.imaplib.IMAP4_SSL") as mock_imap_cls:
-            mock_mail = MagicMock()
-            mock_imap_cls.return_value = mock_mail
-            mock_mail.search.return_value = ("OK", [b"1"])
-            mock_mail.fetch.return_value = ("OK", [(b"1 (RFC822 {100})", raw_bytes)])
-            mock_mail.logout.return_value = None
-
-            result = ResearchEnhancementAgent._get_stanford_token_from_email(mock_self, "test_project")
-
-        # No "Your Access Token:" pattern → returns None
-        assert result is None
-
-    def test_token_subject_mismatch_skips_email(self):
-        """Email whose subject does not contain the project name is skipped."""
-        from agents.research_enhancement_agent import ResearchEnhancementAgent
-        import email as email_module
-
-        mock_self = MagicMock()
-        mock_self.dummy_email = "dummy@example.com"
-        mock_self.dummy_password = "password"
-        mock_self.logger = MagicMock()
-
-        # Email subject does NOT mention the project
-        raw_msg = email_module.message_from_bytes(
-            b"Subject: Unrelated Newsletter\r\nFrom: news@example.com\r\n\r\n"
-            b"Your Access Token: ABCDEFGHIJKLMNOPQRST"
-        )
-        raw_bytes = raw_msg.as_bytes()
-
-        with patch("agents.research_enhancement_agent.imaplib.IMAP4_SSL") as mock_imap_cls:
-            mock_mail = MagicMock()
-            mock_imap_cls.return_value = mock_mail
-            mock_mail.search.return_value = ("OK", [b"1"])
-            mock_mail.fetch.return_value = ("OK", [(b"1 (RFC822 {100})", raw_bytes)])
-            mock_mail.logout.return_value = None
-
-            result = ResearchEnhancementAgent._get_stanford_token_from_email(
-                mock_self, "My_Research_Project"
-            )
-
-        # Subject mismatch → token not extracted → None
-        assert result is None
+    Note: ResearchEnhancementAgent no longer polls IMAP for the Stanford review
+    token — the token is captured directly from the upload confirmation page
+    (see tests/crash/test_playwright_failures.py) since paperreview.ai itself
+    warns that email delivery of the token is unreliable. IMAP-specific test
+    coverage for that removed code path was removed accordingly; the SMTP
+    notification tests below are unaffected and remain.
+    """
 
     def test_smtp_connection_failure_returns_false(self, monkeypatch):
         """_dispatch_email returns False when SMTP server is unreachable."""

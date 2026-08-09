@@ -39,7 +39,7 @@ class TestFilesystemFailures:
         with patch.object(Config, "OVERLEAF_DIR", str(tmp_path)):
             agent.run()  # No PDF found — should skip gracefully without crashing
 
-    def test_enhancement_agent_pdf_path_none_returns_false(self):
+    def test_enhancement_agent_pdf_path_none_returns_none(self):
         mock_notifier = MagicMock()
         mock_db = MagicMock()
         agent = ResearchEnhancementAgent(
@@ -48,7 +48,7 @@ class TestFilesystemFailures:
             db=mock_db
         )
         result = agent.upload_to_stanford("Test", None)
-        assert result is False
+        assert result is None
 
     def test_get_all_active_projects_empty_dir_returns_empty_list(self, tmp_path):
         with patch.object(Config, "OVERLEAF_DIR", tmp_path):

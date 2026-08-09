@@ -192,7 +192,7 @@ class TestInternalReviewAgent:
     def test_run_triggers_fallback_on_upload_failure(
         self, enhancement_agent, db_in_memory, sample_project_name, tmp_path, monkeypatch
     ):
-        """When upload_to_stanford returns False, _run_internal_review is called once."""
+        """When upload_to_stanford returns None (upload failed), _run_internal_review is called once."""
         from config import Config
 
         db_in_memory.add_project(sample_project_name, "test@example.com")
@@ -204,7 +204,7 @@ class TestInternalReviewAgent:
         fake_pdf.write_bytes(b"%PDF-1.4 fake")
         monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
 
-        with patch.object(enhancement_agent, "upload_to_stanford", return_value=False), \
+        with patch.object(enhancement_agent, "upload_to_stanford", return_value=None), \
              patch.object(enhancement_agent, "_run_internal_review", return_value=True) as mock_fallback:
 
             enhancement_agent.run()
@@ -214,21 +214,23 @@ class TestInternalReviewAgent:
     # ------------------------------------------------------------------
     # 10. test_run_triggers_fallback_on_review_fetch_failure
     # ------------------------------------------------------------------
-    def test_run_triggers_fallback_on_review_fetch_failure(
+    def test_run_does_not_trigger_fallback_when_review_not_ready(
         self, enhancement_agent, db_in_memory, sample_project_name
     ):
-        """When token found but _fetch_review_from_stanford returns None, fallback is called."""
+        """When the review isn't ready yet (_fetch_review_from_stanford returns None), the project
+        keeps waiting rather than falling back to internal review — Stanford warns processing can
+        take hours, so a not-ready response on any given check is expected, not a failure. Only the
+        48h timeout (tested elsewhere) should give up on Stanford."""
         db_in_memory.add_project(sample_project_name, "test@example.com")
         recent_time = (datetime.now() - timedelta(hours=1)).isoformat()
         db_in_memory.update_project_state(
             sample_project_name,
             stanford_status="WAITING_FOR_REVIEW",
             last_upload_time=recent_time,
+            stanford_token="tok_abc123",
         )
 
         with patch.object(
-            enhancement_agent, "_get_stanford_token_from_email", return_value="tok_abc123"
-        ), patch.object(
             enhancement_agent, "_fetch_review_from_stanford", return_value=None
         ), patch.object(
             enhancement_agent, "_run_internal_review", return_value=True
@@ -236,7 +238,9 @@ class TestInternalReviewAgent:
 
             enhancement_agent.run()
 
-        mock_fallback.assert_called_once_with(sample_project_name)
+        mock_fallback.assert_not_called()
+        state = db_in_memory.get_project_state(sample_project_name)
+        assert state["stanford_status"] == "WAITING_FOR_REVIEW"
 
     # ------------------------------------------------------------------
     # 11. test_run_skips_project_with_insufficient_text_status

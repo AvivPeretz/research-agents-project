@@ -1,8 +1,6 @@
 import os
 import time
-import imaplib
-import email
-import re
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
@@ -35,8 +33,6 @@ class ResearchEnhancementAgent(BaseAgent):
 
         # Use Config for credentials
         self.uni_email = Config.OVERLEAF_EMAIL
-        self.dummy_email = Config.NOTIFICATION_SENDER_EMAIL
-        self.dummy_password = Config.NOTIFICATION_SENDER_PASSWORD
 
         self.logger.info("ResearchEnhancementAgent initialized for %d projects.", len(self.projects))
 
@@ -58,38 +54,48 @@ class ResearchEnhancementAgent(BaseAgent):
     def _get_stanford_state(self, project_name: str) -> dict:
         """Retrieves Stanford status from SQLite database."""
         if not self.db:
-            return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
+            return {"status": "READY_FOR_UPLOAD", "last_upload_time": None, "token": None}
 
         try:
             state = self.db.get_project_state_slim(project_name)
             if state:
                 return {
                     "status": state.get('stanford_status') or "READY_FOR_UPLOAD",
-                    "last_upload_time": state.get('last_upload_time')
+                    "last_upload_time": state.get('last_upload_time'),
+                    "token": state.get('stanford_token'),
                 }
         except Exception as e:
             self.logger.warning("Could not read DB state for %s: %s", project_name, str(e))
 
-        return {"status": "READY_FOR_UPLOAD", "last_upload_time": None}
+        return {"status": "READY_FOR_UPLOAD", "last_upload_time": None, "token": None}
 
-    def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None):
+    def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None, token: str = None):
         """Updates Stanford status in SQLite database."""
         if not self.db:
             return
-            
+
+        fields = {"stanford_status": status}
+        if upload_time:
+            fields["last_upload_time"] = upload_time
+        if token:
+            fields["stanford_token"] = token
+
         try:
-            if upload_time:
-                self.db.update_project_state(project_name, stanford_status=status, last_upload_time=upload_time)
-            else:
-                self.db.update_project_state(project_name, stanford_status=status)
+            self.db.update_project_state(project_name, **fields)
         except Exception as e:
             self.logger.error("Failed to update DB state for %s: %s", project_name, str(e))
 
-    def upload_to_stanford(self, project_name: str, pdf_path: str) -> bool:
-        """Phase 1: Uploads the PDF to paperreview.ai using Playwright."""
+    def upload_to_stanford(self, project_name: str, pdf_path: str) -> str:
+        """Phase 1: Uploads the PDF to paperreview.ai using Playwright.
+
+        Returns the review access token scraped directly from the confirmation
+        page's #tokenDisplay element, or None on failure. paperreview.ai warns
+        that email delivery of this token is unreliable for some addresses, so
+        the token is captured immediately rather than relying on an email later.
+        """
         if not pdf_path or not os.path.exists(pdf_path):
             self.logger.error("Invalid PDF path provided for upload: %s", pdf_path)
-            return False
+            return None
             
         self.logger.info("Initiating Phase 1: Uploading '%s' to paperreview.ai...", project_name)
         with sync_playwright() as p:
@@ -128,136 +134,64 @@ class ResearchEnhancementAgent(BaseAgent):
                     page.wait_for_load_state("networkidle", timeout=10000)
                 except Exception:
                     pass  # networkidle timeout is non-fatal — page loaded but may still have background XHR
-                return True
-                
+
+                token_display = page.locator("#tokenDisplay")
+                if token_display.count() == 0:
+                    self.logger.error(
+                        "Upload for '%s' did not show a confirmation token — submission likely failed.",
+                        project_name
+                    )
+                    return None
+
+                token = token_display.inner_text().strip()
+                if not token:
+                    self.logger.error("Token display was present but empty for '%s'.", project_name)
+                    return None
+
+                print(f"🔑 Captured review token from confirmation page (length: {len(token)})")
+                return token
+
             except Exception as e:
                 self.logger.error("Failed to upload to Stanford: %s", str(e))
-                return False
-            finally:
-                context.close()
-                browser.close()
-
-    def _get_stanford_token_from_email(self, project_name: str) -> str:
-        """Phase 2a: Connects to Gmail and extracts the token specifically for this project."""
-        print(f"   🔍 Checking Gmail for Stanford review token for '{project_name}'...")
-        mail = None
-        try:
-            mail = imaplib.IMAP4_SSL(Config.IMAP_SERVER, Config.IMAP_PORT)
-            mail.login(self.dummy_email, self.dummy_password)
-            mail.select("INBOX")
-
-            since_date = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
-            status, messages = mail.search(None, f'(SINCE {since_date})')
-            if status == "OK":
-                email_ids = messages[0].split()
-                for e_id in reversed(email_ids[-30:]):
-                    res, msg_data = mail.fetch(e_id, '(RFC822)')
-                    for response_part in msg_data:
-                        if isinstance(response_part, tuple):
-                            msg = email.message_from_bytes(response_part[1])
-
-                            subject = str(msg.get("Subject", "")).replace('\r', '').replace('\n', '')
-                            clean_proj_name = project_name.strip().lower()
-
-                            if clean_proj_name not in subject.lower():
-                                continue
-
-                            print(f"   📧 Found matching email subject: {subject}")
-
-                            body = ""
-                            if msg.is_multipart():
-                                for part in msg.walk():
-                                    content_type = part.get_content_type()
-                                    if content_type in ["text/plain", "text/html"]:
-                                        try:
-                                            body += part.get_payload(decode=True).decode(errors='ignore') + " "
-                                        except Exception:
-                                            pass
-                            else:
-                                body = msg.get_payload(decode=True).decode(errors='ignore')
-
-                            clean_body = re.sub(r'<[^>]+>', ' ', body)
-                            clean_body = re.sub(r'\s+', ' ', clean_body)
-
-                            match = re.search(r'Your Access Token:\s*([^\s]{20,})', clean_body, re.IGNORECASE)
-                            if match:
-                                token = match.group(1).strip()
-                                print(f"   ✅ Found Correct Stanford Token: {token} (Length: {len(token)})")
-                                return token
-                            else:
-                                print("   ⚠️ Email matched subject, but token not found in body! (Check email formatting)")
-
-            print(f"   ⏳ No token found yet for '{project_name}'.")
-            return None
-        except Exception as e:
-            self.logger.error("IMAP Error: %s", str(e))
-            return None
-        finally:
-            if mail is not None:
-                try:
-                    mail.logout()
-                except Exception:
-                    pass
-
-    def _fetch_review_from_stanford(self, token: str) -> str:
-        """Phase 2b: Uses Playwright to submit the token and scrape the review."""
-        if not token or str(token).strip() == "":
-            self.logger.error("Empty token provided to Stanford scraper.")
-            return None
-            
-        print("   🌐 Navigating to paperreview.ai/review to fetch feedback...")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=Config.PLAYWRIGHT_HEADLESS,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ]
-            )
-            context = browser.new_context()
-            page = context.new_page()
-            try:
-                page.goto("https://paperreview.ai/review")
-                page.wait_for_load_state("networkidle")
-                
-                print("   🔑 Entering the access token...")
-                token_input = page.locator('input:visible').first
-                token_input.click()
-                token_input.fill(token)
-                page.wait_for_timeout(1000)
-                
-                print("   🚀 Submitting token to view review...")
-                token_input.press("Enter")
-                page.wait_for_timeout(1000)
-                
-                buttons = page.locator('button:visible')
-                if buttons.count() > 0:
-                    buttons.first.click()
-                
-                print("   ⏳ Waiting for the 'Summary' or 'Strengths' sections to load...")
-                try:
-                    page.locator('text="Summary"').first.wait_for(state="visible", timeout=15000)
-                except:
-                    print("   ⚠️ Timed out waiting for 'Summary'. Checking for 'Invalid Token' error...")
-                    if page.locator('text="Invalid Token"').count() > 0 or page.locator('text="Error"').count() > 0:
-                        print("   ❌ Error: The website rejected the token.")
-                        return None
-                
-                review_text = page.locator('body').inner_text()
-                
-                if len(review_text) < 400:
-                    print("   ⚠️ Warning: The scraped text is very short. It might still be on the login screen.")
-                    return None
-                else:
-                    print(f"   ✅ Review scraped successfully! (Length: {len(review_text)} characters)")
-                    return review_text
-            except Exception as e:
-                self.logger.error("Failed to scrape review: %s", str(e))
                 return None
             finally:
                 context.close()
                 browser.close()
+
+    def _fetch_review_from_stanford(self, token: str) -> str:
+        """Phase 2: Polls paperreview.ai's JSON API for the review content.
+
+        Returns the review content string when ready (HTTP 200, success=true).
+        Returns None when the review isn't ready yet, the token is invalid, or
+        the request fails — all three are treated the same: try again next run.
+        """
+        if not token or str(token).strip() == "":
+            self.logger.error("Empty token provided to Stanford review fetch.")
+            return None
+
+        print(f"   🌐 Checking paperreview.ai for review status (token length: {len(token)})...")
+        try:
+            response = requests.get(f"https://paperreview.ai/api/review/{token}", timeout=15)
+        except requests.exceptions.RequestException as e:
+            self.logger.error("Stanford review API request failed: %s", str(e))
+            return None
+
+        if response.status_code != 200:
+            print(f"   ⏳ Review not ready yet (status {response.status_code}).")
+            return None
+
+        try:
+            data = response.json()
+        except ValueError as e:
+            self.logger.error("Stanford review API returned invalid JSON: %s", str(e))
+            return None
+
+        if not data.get("success") or not data.get("content"):
+            print("   ⏳ Review not ready yet (response missing content).")
+            return None
+
+        print(f"   ✅ Review ready! (Length: {len(data['content'])} characters)")
+        return data["content"]
 
     def _generate_actionable_tasks(self, project_name: str, review_text: str) -> str:
         """Phase 2c: Uses Groq to parse the review and generate tasks with deadlines."""
@@ -573,9 +507,9 @@ avoid vague tasks like "improve the writing."
             if not pdf_path:
                 self.logger.warning("No PDF found for %s. Cannot upload.", project)
             else:
-                success = self.upload_to_stanford(project, pdf_path)
-                if success:
-                    self._update_stanford_state(project, "WAITING_FOR_REVIEW", datetime.now().isoformat())
+                token = self.upload_to_stanford(project, pdf_path)
+                if token:
+                    self._update_stanford_state(project, "WAITING_FOR_REVIEW", datetime.now().isoformat(), token=token)
                     self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW in DB.")
                 else:
                     self.logger.warning("Stanford upload failed for '%s'. Activating internal fallback.", project)
@@ -607,28 +541,31 @@ avoid vague tasks like "improve the writing."
                 except Exception as e:
                     self.logger.warning("Could not parse upload time for %s: %s", project, str(e))
 
-            print("⏳ Project is waiting for review. Initiating Phase 2 (IMAP Check)...")
-            token = self._get_stanford_token_from_email(project)
+            token = state.get("token")
+            if not token:
+                self.logger.warning(
+                    "Project '%s' is WAITING_FOR_REVIEW but has no stored token. Will try again next run.",
+                    project
+                )
+                return
 
-            if token:
-                review_text = self._fetch_review_from_stanford(token)
-                if review_text:
-                    tasks = self._generate_actionable_tasks(project, review_text)
-                    if tasks is not None and tasks.strip():
-                        self._update_stanford_state(project, "REVIEW_COMPLETED")
-                        print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
-                        self.logger.info("Sending Stanford task list email for %s...", project)
-                        self.notifier.send_stanford_tasks(
-                            project_name=project,
-                            md_content=tasks
-                        )
-                else:
-                    self.logger.warning(
-                        "Stanford review fetch returned empty for '%s'. Activating internal fallback.", project
+            print("⏳ Project is waiting for review. Checking paperreview.ai (Phase 2)...")
+            review_text = self._fetch_review_from_stanford(token)
+            if review_text:
+                tasks = self._generate_actionable_tasks(project, review_text)
+                if tasks is not None and tasks.strip():
+                    self._update_stanford_state(project, "REVIEW_COMPLETED")
+                    print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
+                    self.logger.info("Sending Stanford task list email for %s...", project)
+                    self.notifier.send_stanford_tasks(
+                        project_name=project,
+                        md_content=tasks
                     )
-                    self._run_internal_review(project)
             else:
-                print("   ⏭️ Review email not yet received or token not found. Will try again next run.")
+                # Stanford themselves warn processing "can take hours or even longer" — a not-ready
+                # review here is the normal case, not a failure. Keep waiting; the 48h timeout above
+                # is the only trigger for giving up on Stanford.
+                print("   ⏭️ Review not ready yet. Will try again next run.")
 
         elif state["status"] in ("REVIEW_COMPLETED", "INTERNAL_REVIEW_COMPLETED"):
             self.logger.info(
