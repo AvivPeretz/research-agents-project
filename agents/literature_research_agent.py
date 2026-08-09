@@ -14,6 +14,7 @@ from agents.notification_agent import NotificationAgent
 # NEW: Import our dedicated fetcher
 from utils.literature_fetcher import LiteratureFetcher
 from utils.overleaf_connector import OverleafConnector
+from utils.token_budget import truncate_paper_abstracts
 
 class LiteratureResearchAgent(BaseAgent):
     """
@@ -124,7 +125,7 @@ class LiteratureResearchAgent(BaseAgent):
             return fallback_data
             
         self.logger.info("Processing fetched literature data via LLM with Pydantic validation...")
-        data_str = json.dumps(scholar_data, indent=2)
+        data_str = json.dumps(scholar_data, indent=2, ensure_ascii=False)
         
         prompt = f"""
         Act as an expert academic research assistant. 
@@ -248,6 +249,13 @@ class LiteratureResearchAgent(BaseAgent):
                     finished_at=datetime.now().isoformat()
                 )
             return
+
+        all_papers = truncate_paper_abstracts(
+            all_papers,
+            total_budget_chars=Config.TOTAL_ABSTRACT_BUDGET_CHARS,
+            min_chars=Config.MIN_ABSTRACT_CHARS,
+            max_chars=Config.MAX_ABSTRACT_CHARS,
+        )
 
         keywords = f"{topic_kw} | {method_kw}"
         research_data = self.process_results_with_llm(project, keywords, all_papers)
