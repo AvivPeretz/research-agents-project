@@ -246,3 +246,51 @@ This work is motivated by real-world deployment constraints.
         assert ")}" not in sample
         assert r"\ref" not in sample
         assert r"\textbf" not in sample
+
+    def test_heading_with_optional_short_title_argument_is_captured(self):
+        """\\section[Short]{Title} (IEEE/book-class running-header form) must not be dropped."""
+        connector = OverleafConnector()
+        doc = r"""
+\section[Short]{A Much Longer Section Title}
+This section covers the full details of the experiment setup.
+
+\section{Next Section}
+More content follows here for completeness.
+"""
+        sample = connector.extract_representative_sample(doc, max_chars=4000)
+        assert "A Much Longer Section Title" in sample
+
+    def test_heading_coverage_scales_with_many_headings(self):
+        """With many headings, the per-heading budget must shrink so later
+        headings (and the tail-fill) are not silently dropped by a fixed
+        heading_body_chars overshooting max_chars."""
+        connector = OverleafConnector()
+        sections = "".join(
+            f"\\section{{Section {i}}}\nContent for section number {i} goes here with some detail.\n\n"
+            for i in range(20)
+        )
+        doc = "\\begin{document}\n" + sections + "\\end{document}"
+        sample = connector.extract_representative_sample(doc, max_chars=4000)
+        for i in range(20):
+            assert f"Section {i}" in sample, f"Section {i} missing from sample"
+
+    def test_abstract_after_first_heading_is_not_double_counted(self):
+        """If the abstract appears after the first heading (e.g. a book-class
+        chapter with its own abstract), it must not be extracted both as a
+        dedicated section AND inside that heading's body excerpt."""
+        connector = OverleafConnector()
+        doc = r"""
+\chapter{Front Matter}
+
+\begin{abstract}
+This unique abstract sentence about federated learning appears only once.
+\end{abstract}
+
+More filler content in the chapter body after the abstract environment.
+
+\section{Introduction}
+Regular introduction content follows here.
+"""
+        sample = connector.extract_representative_sample(doc, max_chars=4000)
+        occurrences = sample.count("This unique abstract sentence about federated learning appears only once")
+        assert occurrences == 1

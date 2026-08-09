@@ -27,7 +27,7 @@ class OverleafConnector:
         """
         Cleans basic LaTeX formatting commands from the text to make it readable for the LLM.
         """
-        self.logger.info("Cleaning LaTeX formatting to extract plain text...")
+        self.logger.debug("Cleaning LaTeX formatting to extract plain text...")
         
         # 1. Remove comments
         clean_text = re.sub(r'%.*$', '', raw_tex, flags=re.MULTILINE)
@@ -59,6 +59,7 @@ class OverleafConnector:
     # first inner '}' and truncates/corrupts real academic headings.
     _HEADING_RE = re.compile(
         r'\\(?:chapter|section|subsection|subsubsection)\*?'
+        r'(?:\[[^\]]*\])?'
         r'\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}'
     )
 
@@ -79,18 +80,38 @@ class OverleafConnector:
 
         parts = []
 
+        # Only pull the abstract out as a dedicated section when it appears
+        # before the first heading. If it appears after (e.g. a book-class
+        # chapter with its own \begin{abstract}), it will already be picked
+        # up naturally inside that heading's body excerpt below, so treating
+        # it as a separate section here would double-count it and waste
+        # budget on duplicate content.
         abstract_match = self._ABSTRACT_RE.search(raw_tex)
-        if abstract_match:
+        abstract_clean = ""
+        if abstract_match and abstract_match.start() < headings[0].start():
             abstract_clean = self.clean_latex_text(abstract_match.group(1)).strip()
             if abstract_clean:
                 parts.append(abstract_clean)
+            else:
+                abstract_clean = ""
+
+        # Derive the per-heading excerpt size from the actual remaining
+        # budget and heading count, instead of always using the fixed
+        # heading_body_chars. Without this, num_headings * heading_body_chars
+        # can exceed max_chars long before the tail-fill pass runs, silently
+        # truncating away later headings (including the conclusion).
+        used = len(abstract_clean)
+        per_heading_budget = max(
+            80,
+            min(heading_body_chars, (max_chars - used) // max(len(headings), 1) - 40),
+        )
 
         for i, match in enumerate(headings):
             heading_text = self.clean_latex_text(match.group(1)).strip()
             body_start = match.end()
             body_end = headings[i + 1].start() if i + 1 < len(headings) else len(raw_tex)
             body_clean = self.clean_latex_text(raw_tex[body_start:body_end]).strip()
-            excerpt = body_clean[:heading_body_chars]
+            excerpt = body_clean[:per_heading_budget]
             parts.append(f"{heading_text}\n{excerpt}".strip())
 
         sample = "\n\n".join(p for p in parts if p)
@@ -99,7 +120,7 @@ class OverleafConnector:
         if remaining_budget > 0:
             last_match = headings[-1]
             last_body_clean = self.clean_latex_text(raw_tex[last_match.end():]).strip()
-            extra = last_body_clean[heading_body_chars:heading_body_chars + remaining_budget]
+            extra = last_body_clean[per_heading_budget:per_heading_budget + remaining_budget]
             if extra:
                 sample += extra
 
