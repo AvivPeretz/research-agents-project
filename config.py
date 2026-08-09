@@ -103,6 +103,14 @@ class Config:
     MAX_LITERATURE_PAPERS: int = 15
     # Max chars of project LaTeX text used for keyword extraction
     MAX_PROJECT_TEXT_CHARS: int = 4000
+    # Total char budget for the paper-abstract JSON payload sent to the LLM
+    # summarization call, split adaptively across however many papers are in
+    # that batch (see utils/token_budget.py). Sized to keep the whole payload
+    # comfortably under Groq's 8000 TPM ceiling even at the full 15-paper cap.
+    TOTAL_ABSTRACT_BUDGET_CHARS: int = 16000
+    # Floor and ceiling on the per-paper abstract cap computed from the budget above
+    MIN_ABSTRACT_CHARS: int = 300
+    MAX_ABSTRACT_CHARS: int = 1200
     # Min chars of paper text required to run the internal peer review
     MIN_REVIEW_LENGTH: int = 3000
     # ThreadPoolExecutor max_workers for progress + literature agents

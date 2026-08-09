@@ -94,3 +94,58 @@ class TestLiteratureResearchAgent:
             )
             # Should not crash
             agent.run()
+
+    def test_read_project_text_uses_structural_sampling(self, literature_agent, sample_project_name, tmp_path, monkeypatch):
+        """Asserts _read_project_text samples across the whole document, not just the prefix."""
+        from config import Config
+
+        project_dir = tmp_path / sample_project_name
+        project_dir.mkdir()
+        long_structured_doc = r"""
+\documentclass{article}
+\begin{document}
+\section{Introduction}
+""" + ("Filler introduction text. " * 200) + r"""
+\section{Conclusion}
+This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
+\end{document}
+"""
+        (project_dir / "main.tex").write_text(long_structured_doc)
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        result = literature_agent._read_project_text(sample_project_name)
+
+        assert "ZEBRA_MARKER_TOKEN" in result
+        assert len(result) <= Config.MAX_PROJECT_TEXT_CHARS
+
+    def test_process_project_truncates_abstracts_before_final_llm_call(self, mock_notifier, sample_project_name):
+        """Asserts the JSON payload sent to the final LLM call has abstracts capped, not the raw 5000+ chars."""
+        from tests.fixtures.mock_responses import VALID_LITERATURE_JSON
+
+        long_abstract_papers = [
+            {"title": f"Paper {i}", "abstract": "x" * 5000, "year": "2024", "citationCount": "1", "venue": "V", "link": "http://example.com"}
+            for i in range(10)
+        ]
+
+        captured_prompts = []
+
+        def fake_ask_llm(prompt):
+            captured_prompts.append(prompt)
+            return VALID_LITERATURE_JSON
+
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=fake_ask_llm), \
+             patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=long_abstract_papers), \
+             patch("utils.literature_fetcher.LiteratureFetcher.enrich_with_openalex", side_effect=lambda papers: papers), \
+             patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Sample research text"):
+
+            agent = LiteratureResearchAgent(active_projects=[sample_project_name], notifier=mock_notifier)
+            agent.run()
+
+        # The keyword-extraction call happens first; the summarization call is the one
+        # containing the paper data, identifiable by the "Here are the enriched results" marker.
+        summarization_prompts = [p for p in captured_prompts if "Here are the enriched results" in p]
+        assert summarization_prompts, "Expected a summarization prompt containing paper data"
+        payload_prompt = summarization_prompts[0]
+
+        assert "xxxxxxxxxx" * 500 not in payload_prompt  # the raw 5000-char abstract must not survive intact
+        assert "…" in payload_prompt  # truncation marker present
