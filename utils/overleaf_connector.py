@@ -52,8 +52,54 @@ class OverleafConnector:
         
         return clean_text.strip()
 
-    def read_all_tex_files(self, project_path: str) -> str:
-        """Reads and cleans ALL .tex files in the project directory, concatenated."""
+    _ABSTRACT_RE = re.compile(r'\\begin\{abstract\}(.*?)\\end\{abstract\}', re.DOTALL)
+    _HEADING_RE = re.compile(r'\\(?:chapter|section|subsection|subsubsection)\*?\{([^}]*)\}')
+
+    def extract_representative_sample(self, raw_tex: str, max_chars: int, heading_body_chars: int = 300) -> str:
+        """
+        Builds a structure-aware sample of a LaTeX document instead of a blind
+        prefix truncation: abstract in full, every heading with a short excerpt
+        of the text that follows it, and the tail of the last section extended
+        to fill any remaining budget. Falls back to prefix truncation when the
+        document has no detectable \\chapter/\\section/\\subsection markers.
+        """
+        if not raw_tex or not raw_tex.strip():
+            return ""
+
+        headings = list(self._HEADING_RE.finditer(raw_tex))
+        if not headings:
+            return self.clean_latex_text(raw_tex)[:max_chars]
+
+        parts = []
+
+        abstract_match = self._ABSTRACT_RE.search(raw_tex)
+        if abstract_match:
+            abstract_clean = self.clean_latex_text(abstract_match.group(1)).strip()
+            if abstract_clean:
+                parts.append(abstract_clean)
+
+        for i, match in enumerate(headings):
+            heading_text = match.group(1)
+            body_start = match.end()
+            body_end = headings[i + 1].start() if i + 1 < len(headings) else len(raw_tex)
+            body_clean = self.clean_latex_text(raw_tex[body_start:body_end]).strip()
+            excerpt = body_clean[:heading_body_chars]
+            parts.append(f"{heading_text}\n{excerpt}".strip())
+
+        sample = "\n\n".join(p for p in parts if p)
+
+        remaining_budget = max_chars - len(sample)
+        if remaining_budget > 0:
+            last_match = headings[-1]
+            last_body_clean = self.clean_latex_text(raw_tex[last_match.end():]).strip()
+            extra = last_body_clean[heading_body_chars:heading_body_chars + remaining_budget]
+            if extra:
+                sample += extra
+
+        return sample[:max_chars]
+
+    def read_all_tex_files_raw(self, project_path: str) -> str:
+        """Reads ALL .tex files in the project directory, concatenated, without LaTeX cleaning."""
         text_content = ""
         if not os.path.exists(project_path):
             return ""
@@ -66,6 +112,11 @@ class OverleafConnector:
                             text_content += f.read() + "\n"
                     except OSError as e:
                         self.logger.warning("Failed to read %s: %s", file_path, str(e))
+        return text_content
+
+    def read_all_tex_files(self, project_path: str) -> str:
+        """Reads and cleans ALL .tex files in the project directory, concatenated."""
+        text_content = self.read_all_tex_files_raw(project_path)
         return self.clean_latex_text(text_content) if text_content else ""
 
     def read_and_clean_tex_file(self, project_path: str, main_file: str = "main.tex") -> str:

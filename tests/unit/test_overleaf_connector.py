@@ -135,3 +135,97 @@ class TestReadAndCleanTexFile:
         connector = OverleafConnector()
         result = connector.read_and_clean_tex_file(str(tmp_path), "main.tex")
         assert result == ""
+
+
+class TestReadAllTexFilesRaw:
+    """Tests for the raw (uncleaned) multi-file reader used by structural sampling."""
+
+    def test_read_all_tex_files_raw_preserves_latex_commands(self, tmp_path):
+        """Raw reader must NOT strip \\section or other LaTeX commands."""
+        (tmp_path / "main.tex").write_text(r"\section{Introduction} Some text here.")
+        connector = OverleafConnector()
+        result = connector.read_all_tex_files_raw(str(tmp_path))
+        assert r"\section{Introduction}" in result
+
+    def test_read_all_tex_files_raw_missing_dir_returns_empty(self, tmp_path):
+        connector = OverleafConnector()
+        result = connector.read_all_tex_files_raw(str(tmp_path / "does_not_exist"))
+        assert result == ""
+
+    def test_read_all_tex_files_still_returns_cleaned_text(self, temp_project_dir):
+        """Existing public method must keep returning cleaned text (no \\section markers)."""
+        connector = OverleafConnector()
+        result = connector.read_all_tex_files(str(temp_project_dir))
+        assert result != ""
+        assert r"\documentclass" not in result
+        assert r"\usepackage" not in result
+
+
+class TestExtractRepresentativeSample:
+    """Tests for structure-aware manuscript sampling."""
+
+    STRUCTURED_DOC = r"""
+\documentclass{article}
+\begin{document}
+
+\begin{abstract}
+This paper studies post-quantum cryptography traffic fingerprinting.
+\end{abstract}
+
+\section{Introduction}
+Post-quantum cryptography introduces new traffic patterns worth studying.
+This section motivates the problem and reviews prior work in the area.
+
+\section{Methodology}
+We use an Isolation Forest and a One-Class SVM to detect anomalies.
+The pipeline extracts flow-level features from captured network traffic.
+
+\section{Results}
+Our approach achieves strong detection accuracy across all tested scenarios.
+We compare against three baseline methods and report precision and recall.
+
+\section{Conclusion}
+This work demonstrates that automated traffic recording combined with
+feature extraction and classification can reliably detect PQC traffic
+patterns in real-world network deployments.
+
+\end{document}
+"""
+
+    def test_includes_headings_from_across_the_document(self):
+        """Sample must span the whole doc's structure, not just the opening section."""
+        connector = OverleafConnector()
+        sample = connector.extract_representative_sample(self.STRUCTURED_DOC, max_chars=4000)
+        assert "Introduction" in sample
+        assert "Methodology" in sample
+        assert "Results" in sample
+        assert "Conclusion" in sample
+
+    def test_includes_abstract_when_present(self):
+        connector = OverleafConnector()
+        sample = connector.extract_representative_sample(self.STRUCTURED_DOC, max_chars=4000)
+        assert "post-quantum cryptography traffic fingerprinting" in sample
+
+    def test_never_exceeds_max_chars(self):
+        connector = OverleafConnector()
+        sample = connector.extract_representative_sample(self.STRUCTURED_DOC, max_chars=200)
+        assert len(sample) <= 200
+
+    def test_unstructured_document_falls_back_to_prefix_truncation(self):
+        """A document with no \\section/\\chapter commands must fall back to today's behavior."""
+        connector = OverleafConnector()
+        flat_doc = "Just a long block of prose with no LaTeX sectioning commands at all. " * 50
+        sample = connector.extract_representative_sample(flat_doc, max_chars=100)
+        expected = connector.clean_latex_text(flat_doc)[:100]
+        assert sample == expected
+
+    def test_empty_input_returns_empty_string(self):
+        connector = OverleafConnector()
+        assert connector.extract_representative_sample("", max_chars=4000) == ""
+
+    def test_output_has_no_leftover_latex_commands(self):
+        """Assembled sample must be cleaned, not raw LaTeX."""
+        connector = OverleafConnector()
+        sample = connector.extract_representative_sample(self.STRUCTURED_DOC, max_chars=4000)
+        assert r"\section" not in sample
+        assert r"\begin" not in sample
