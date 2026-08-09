@@ -34,16 +34,20 @@ class LiteratureResearchAgent(BaseAgent):
         self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
 
     def _read_project_text(self, project_name: str) -> str:
-        """Reads all .tex files for the project using the shared OverleafConnector."""
+        """Reads all .tex files for the project and returns a structure-aware sample."""
         project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
-        text_content = self.connector.read_all_tex_files(project_dir)
-        if not text_content:
+        raw_text = self.connector.read_all_tex_files_raw(project_dir)
+        if not raw_text:
             self.logger.warning("No valid LaTeX text extracted for project: %s", project_name)
             return ""
         max_chars = getattr(Config, 'MAX_PROJECT_TEXT_CHARS', 4000)
-        if len(text_content) > max_chars:
-            self.logger.info("Truncating project text to %d chars for LLM (original: %d chars).", max_chars, len(text_content))
-        return text_content[:max_chars]
+        sample = self.connector.extract_representative_sample(raw_text, max_chars)
+        if len(raw_text) > max_chars:
+            self.logger.info(
+                "Sampled project text to %d chars for LLM (original: %d chars).",
+                len(sample), len(raw_text)
+            )
+        return sample
 
     def extract_keywords_from_text(self, project_name: str, text: str) -> tuple[str, str]:
         """Returns (topic_keywords, method_keywords) derived from manuscript text."""

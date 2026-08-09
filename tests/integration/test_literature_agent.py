@@ -94,3 +94,26 @@ class TestLiteratureResearchAgent:
             )
             # Should not crash
             agent.run()
+
+    def test_read_project_text_uses_structural_sampling(self, literature_agent, sample_project_name, tmp_path, monkeypatch):
+        """Asserts _read_project_text samples across the whole document, not just the prefix."""
+        from config import Config
+
+        project_dir = tmp_path / sample_project_name
+        project_dir.mkdir()
+        long_structured_doc = r"""
+\documentclass{article}
+\begin{document}
+\section{Introduction}
+""" + ("Filler introduction text. " * 200) + r"""
+\section{Conclusion}
+This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
+\end{document}
+"""
+        (project_dir / "main.tex").write_text(long_structured_doc)
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        result = literature_agent._read_project_text(sample_project_name)
+
+        assert "ZEBRA_MARKER_TOKEN" in result
+        assert len(result) <= Config.MAX_PROJECT_TEXT_CHARS
