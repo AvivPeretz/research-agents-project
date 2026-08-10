@@ -39,6 +39,13 @@ class LiteratureFetcher:
         self._min_seconds_between_calls = 300.0 / Config.SEMANTIC_SCHOLAR_RATE_LIMIT
         self._rate_limit_lock = threading.Lock()
         self._openalex_warned = False
+        # Shared across every project processed by this fetcher instance in a run
+        # (LiteratureResearchAgent creates one LiteratureFetcher and reuses it across
+        # its ThreadPoolExecutor workers) -- once a provider is confirmed rate-limited
+        # for one project's queries, every other project's queries this run skip it
+        # immediately instead of independently re-discovering and re-retrying the
+        # same 429.
+        self._provider_cooldowns = {}
         self._stats = {
             "semantic_scholar_hits": 0,
             "semantic_scholar_misses": 0,
@@ -46,9 +53,27 @@ class LiteratureFetcher:
             "total_calls": 0,
         }
 
+    def _cooldown_remaining(self, provider: str) -> float:
+        with self._rate_limit_lock:
+            until = self._provider_cooldowns.get(provider, 0.0)
+        return max(0.0, until - time.time())
+
+    def _start_cooldown(self, provider: str, seconds: float = None) -> float:
+        seconds = Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS if seconds is None else seconds
+        with self._rate_limit_lock:
+            self._provider_cooldowns[provider] = time.time() + seconds
+        return seconds
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=False)
     def _fetch_from_semantic_scholar(self, keywords: str, limit: int = 10) -> list:
         """PRIMARY: Uses Semantic Scholar API. Retries up to 3 times on failure."""
+
+        cooldown = self._cooldown_remaining("semantic_scholar")
+        if cooldown > 0:
+            self.logger.warning(
+                "Semantic Scholar in rate-limit cooldown for %.0fs more — skipping.", cooldown
+            )
+            return []
 
         with self._rate_limit_lock:
             now = time.time()
@@ -71,7 +96,14 @@ class LiteratureFetcher:
             headers["x-api-key"] = Config.SEMANTIC_SCHOLAR_API_KEY
 
         response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status() # Will trigger a retry if HTTP error occurs
+        if response.status_code == 429:
+            cooldown = self._start_cooldown("semantic_scholar")
+            self.logger.error(
+                "Semantic Scholar rate limited (429) — entering %.0fs cooldown, "
+                "skipping remaining retries.", cooldown
+            )
+            return []
+        response.raise_for_status() # Will trigger a retry if a non-429 HTTP error occurs
         data = response.json()
         
         results = []
@@ -232,6 +264,15 @@ class LiteratureFetcher:
             if not title:
                 paper["openalex"] = {}
                 continue
+
+            cooldown = self._cooldown_remaining("openalex")
+            if cooldown > 0:
+                # Already confirmed rate limited this run — every remaining paper
+                # would fail the same way, so stop making calls instead of burning
+                # one wasted request per paper.
+                paper["openalex"] = {}
+                continue
+
             try:
                 encoded_title = urllib.parse.quote_plus(title)
                 url = (
@@ -242,6 +283,14 @@ class LiteratureFetcher:
                     f"&per_page=1"
                 )
                 response = requests.get(url, timeout=20)
+                if response.status_code == 429:
+                    cooldown = self._start_cooldown("openalex")
+                    self.logger.error(
+                        "OpenAlex rate limited (429) — entering %.0fs cooldown, "
+                        "skipping enrichment for remaining papers this run.", cooldown
+                    )
+                    paper["openalex"] = {}
+                    continue
                 if response.status_code != 200:
                     self.logger.warning("OpenAlex returned status %d for '%s'", response.status_code, title)
                     paper["openalex"] = {}
@@ -347,10 +396,23 @@ class LiteratureFetcher:
         if not Config.SERPAPI_API_KEY:
             self.logger.warning("SERPAPI_API_KEY is not set; skipping SerpAPI search.")
             return []
+
+        cooldown = self._cooldown_remaining("serpapi")
+        if cooldown > 0:
+            self.logger.warning("SerpAPI in rate-limit cooldown for %.0fs more — skipping.", cooldown)
+            return []
+
         try:
             url = "https://serpapi.com/search"
             params = {"engine": "google_scholar", "q": keywords, "api_key": Config.SERPAPI_API_KEY, "num": 10}
             response = requests.get(url, params=params, timeout=15)
+            if response.status_code == 429:
+                cooldown = self._start_cooldown("serpapi")
+                self.logger.error(
+                    "SerpAPI rate limited (429) — entering %.0fs cooldown for keywords '%s'.",
+                    cooldown, keywords
+                )
+                return []
             if response.status_code != 200:
                 self.logger.warning("SerpAPI returned status %d for keywords '%s'", response.status_code, keywords)
                 return []
@@ -382,10 +444,21 @@ class LiteratureFetcher:
     # scholarly last-resort fallback
     # ==========================================
 
+    # scholarly wraps unauthenticated Google Scholar scraping, so it never gives a
+    # clean HTTP status — a rate limit/block shows up as an exception whose message
+    # mentions one of these. Heuristic, but it's the only signal the library exposes.
+    _SCHOLARLY_RATE_LIMIT_MARKERS = ("429", "too many requests", "captcha", "blocked", "cannot fetch")
+
     def _fetch_from_scholarly(self, keywords: str) -> list:
         if not SCHOLARLY_AVAILABLE:
             self.logger.warning("scholarly library is not installed; skipping scholarly search.")
             return []
+
+        cooldown = self._cooldown_remaining("scholarly")
+        if cooldown > 0:
+            self.logger.warning("scholarly in rate-limit cooldown for %.0fs more — skipping.", cooldown)
+            return []
+
         try:
             search_query = _scholarly_lib.search_pubs(keywords)
             results = []
@@ -408,7 +481,15 @@ class LiteratureFetcher:
             self.logger.info("scholarly returned %d papers for '%s'.", len(results), keywords)
             return results
         except Exception as e:
-            self.logger.error("scholarly search failed for '%s': %s", keywords, str(e))
+            err_str = str(e).lower()
+            if any(marker in err_str for marker in self._SCHOLARLY_RATE_LIMIT_MARKERS):
+                cooldown = self._start_cooldown("scholarly")
+                self.logger.error(
+                    "scholarly appears rate limited/blocked — entering %.0fs cooldown: %s",
+                    cooldown, str(e)
+                )
+            else:
+                self.logger.error("scholarly search failed for '%s': %s", keywords, str(e))
             return []
 
     def fetch_from_scholarly(self, keywords: str) -> list:

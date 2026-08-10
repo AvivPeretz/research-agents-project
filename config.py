@@ -29,7 +29,7 @@ class Config:
     # the application has migrated data into the SQLite DB.
     RESEARCHERS_MAP_PATH = BASE_DIR / "researchers_map.json"
     SCHOLAR_STATE_PATH = BASE_DIR / "scholar_state.json"
-    OVERLEAF_STATE_PATH = BASE_DIR / "scholar_state.json"
+    OVERLEAF_STATE_PATH = BASE_DIR / "overleaf_state.json"
     OVERLEAF_USER_DATA_DIR: str = str(BASE_DIR / "playwright_state" / "overleaf_profile")
     
     # ==========================================
@@ -37,6 +37,11 @@ class Config:
     # ==========================================
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     LLM_MODEL_NAME = "openai/gpt-oss-120b"
+    # Cheaper/faster Groq model used only for lightweight extraction calls (keyword
+    # generation, paper relevance filtering) — synthesis calls that produce the actual
+    # content a researcher reads (reviews, feedback, reports) keep LLM_MODEL_NAME.
+    # Verify this model id is still current in Groq's catalog before relying on it.
+    LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", "llama-3.1-8b-instant")
     
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL_NAME = "gemini-1.5-flash"
@@ -46,6 +51,9 @@ class Config:
     
     LLM_MAX_RETRIES = 3
     LLM_TIMEOUT_SECONDS = 30
+    # How long a provider is skipped after returning a rate-limit error, shared across
+    # all agents in the process so one 429 protects every subsequent LLM call this run.
+    LLM_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("LLM_RATE_LIMIT_COOLDOWN_SECONDS", "90"))
     EMAIL_MAX_RETRIES = int(os.getenv("EMAIL_MAX_RETRIES", "3"))
     
     # ==========================================
@@ -103,6 +111,16 @@ class Config:
     MAX_PROJECT_TEXT_CHARS: int = 4000
     # Min chars of paper text required to run the internal peer review
     MIN_REVIEW_LENGTH: int = 3000
+    # Consecutive Stanford upload failures tolerated before giving up and falling back
+    # to the internal LLM review — avoids burning an LLM call on a transient rate-limit
+    # or brief outage that would have succeeded on the next scheduled run.
+    STANFORD_MAX_UPLOAD_RETRIES: int = int(os.getenv("STANFORD_MAX_UPLOAD_RETRIES", "2"))
+    # Consecutive Stanford upload failures across ANY projects in the same run before
+    # assuming Stanford itself is down and skipping further browser attempts this run.
+    STANFORD_CONSECUTIVE_FAILURE_THRESHOLD: int = int(os.getenv("STANFORD_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
+    # A STARTED agent_runs row with no SUCCESS/FAILURE after this many hours is
+    # assumed to mean the process was killed outright, not just slow.
+    STALE_RUN_THRESHOLD_HOURS: float = float(os.getenv("STALE_RUN_THRESHOLD_HOURS", "2.0"))
     # ThreadPoolExecutor max_workers for progress + literature agents
     PROGRESS_MAX_WORKERS: int = int(os.getenv("PROGRESS_MAX_WORKERS", "4"))
     LITERATURE_MAX_WORKERS: int = int(os.getenv("LITERATURE_MAX_WORKERS", "4"))

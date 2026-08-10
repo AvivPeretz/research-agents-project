@@ -81,7 +81,7 @@ class TestInternalReviewAgent:
             "## Action Plan\n1. Fix the baseline comparison by 2026-05-15.\n"
         )
 
-        with patch.object(enhancement_agent.connector, "read_all_tex_files", return_value=long_text), \
+        with patch.object(enhancement_agent.connector, "read_all_tex_files_split", return_value=(long_text, "")), \
              patch("agents.base_agent.BaseAgent.ask_llm", return_value=mock_review):
 
             result = enhancement_agent._run_internal_review(sample_project_name)
@@ -189,15 +189,16 @@ class TestInternalReviewAgent:
     # ------------------------------------------------------------------
     # 9. test_run_triggers_fallback_on_upload_failure
     # ------------------------------------------------------------------
-    def test_run_triggers_fallback_on_upload_failure(
+    def test_run_does_not_fallback_on_first_upload_failure(
         self, enhancement_agent, db_in_memory, sample_project_name, tmp_path, monkeypatch
     ):
-        """When upload_to_stanford returns None (upload failed), _run_internal_review is called once."""
+        """A single Stanford upload failure (e.g. a transient rate limit) must NOT
+        immediately burn the internal-review LLM fallback — it should be retried on
+        the next scheduled run first. Project state must stay READY_FOR_UPLOAD."""
         from config import Config
 
         db_in_memory.add_project(sample_project_name, "test@example.com")
 
-        # Create a fake PDF so the path check passes
         pdf_dir = tmp_path / sample_project_name
         pdf_dir.mkdir()
         fake_pdf = pdf_dir / "paper.pdf"
@@ -209,7 +210,85 @@ class TestInternalReviewAgent:
 
             enhancement_agent.run()
 
+        mock_fallback.assert_not_called()
+        state = db_in_memory.get_project_state_slim(sample_project_name)
+        assert state["stanford_status"] == "READY_FOR_UPLOAD"
+        assert state["stanford_upload_failures"] == 1
+
+    def test_run_triggers_fallback_after_repeated_upload_failures(
+        self, enhancement_agent, db_in_memory, sample_project_name, tmp_path, monkeypatch
+    ):
+        """Once Stanford upload has failed STANFORD_MAX_UPLOAD_RETRIES times in a row
+        (across separate scheduled runs), the internal review fallback activates."""
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+
+        pdf_dir = tmp_path / sample_project_name
+        pdf_dir.mkdir()
+        fake_pdf = pdf_dir / "paper.pdf"
+        fake_pdf.write_bytes(b"%PDF-1.4 fake")
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        with patch.object(enhancement_agent, "upload_to_stanford", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review", return_value=True) as mock_fallback:
+
+            for _ in range(Config.STANFORD_MAX_UPLOAD_RETRIES):
+                mock_fallback.assert_not_called()
+                enhancement_agent.run()
+
         mock_fallback.assert_called_once_with(sample_project_name)
+        state = db_in_memory.get_project_state_slim(sample_project_name)
+        assert state["stanford_upload_failures"] == 0
+
+    def test_upload_failure_counter_resets_on_success(
+        self, enhancement_agent, db_in_memory, sample_project_name, tmp_path, monkeypatch
+    ):
+        """A successful upload after prior failures must reset the failure counter,
+        so an unrelated future blip doesn't inherit an already-high count."""
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+        db_in_memory.update_project_state(sample_project_name, stanford_upload_failures=1)
+
+        pdf_dir = tmp_path / sample_project_name
+        pdf_dir.mkdir()
+        fake_pdf = pdf_dir / "paper.pdf"
+        fake_pdf.write_bytes(b"%PDF-1.4 fake")
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        with patch.object(enhancement_agent, "upload_to_stanford", return_value="tok_123"):
+            enhancement_agent.run()
+
+        state = db_in_memory.get_project_state_slim(sample_project_name)
+        assert state["stanford_status"] == "WAITING_FOR_REVIEW"
+        assert state["stanford_upload_failures"] == 0
+
+    def test_lost_token_after_db_write_failure_alerts_admin(
+        self, enhancement_agent, db_in_memory, sample_project_name, tmp_path, monkeypatch
+    ):
+        """A successful Stanford upload followed by a failed DB write must not be
+        silent: the review token is unrecoverable at that point (state stays
+        READY_FOR_UPLOAD, so the project gets re-uploaded to Stanford next run), and
+        that risk must reach a human, not just a log line nobody reads."""
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+
+        pdf_dir = tmp_path / sample_project_name
+        pdf_dir.mkdir()
+        fake_pdf = pdf_dir / "paper.pdf"
+        fake_pdf.write_bytes(b"%PDF-1.4 fake")
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        with patch.object(enhancement_agent, "upload_to_stanford", return_value="tok_123"), \
+             patch.object(enhancement_agent.db, "update_project_state", return_value=False):
+
+            enhancement_agent.run()
+
+        enhancement_agent.notifier.send_admin_alert.assert_called_once()
+        call_str = str(enhancement_agent.notifier.send_admin_alert.call_args)
+        assert "Stanford" in call_str and sample_project_name in call_str
 
     # ------------------------------------------------------------------
     # 10. test_run_triggers_fallback_on_review_fetch_failure
@@ -284,3 +363,34 @@ class TestInternalReviewAgent:
         assert "Deadline" in prompt
         assert "Test Project" in prompt
         assert "Related Paper" in prompt
+
+    # ------------------------------------------------------------------
+    # 13. test_appendix_content_excluded_from_review_prompt
+    # ------------------------------------------------------------------
+    def test_appendix_content_excluded_from_review_prompt(
+        self, enhancement_agent, db_in_memory, sample_project_name
+    ):
+        """An appendix-heavy paper must not have its real conclusion silently pushed
+        out of the truncated prompt by trailing appendix content — the appendix must
+        be excluded entirely, not just deprioritized by position."""
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+
+        body = "This is the real conclusion of the paper, reached after much research. " * 50
+        # Appendix is deliberately much larger than the body, so if it weren't
+        # excluded it would dominate the tail of any positional truncation.
+        appendix = "UNIQUE_APPENDIX_MARKER_TEXT filler content for supplementary tables. " * 400
+        captured_prompts = []
+
+        def _capture_ask_llm(prompt):
+            captured_prompts.append(prompt)
+            return "## Summary\nReview.\n\n## Action Plan\n1. Fix by 2026-05-15.\n"
+
+        with patch.object(
+            enhancement_agent.connector, "read_all_tex_files_split", return_value=(body, appendix)
+        ), patch("agents.base_agent.BaseAgent.ask_llm", side_effect=_capture_ask_llm):
+            result = enhancement_agent._run_internal_review(sample_project_name)
+
+        assert result is True
+        assert len(captured_prompts) == 1
+        assert "UNIQUE_APPENDIX_MARKER_TEXT" not in captured_prompts[0]
+        assert "real conclusion of the paper" in captured_prompts[0]

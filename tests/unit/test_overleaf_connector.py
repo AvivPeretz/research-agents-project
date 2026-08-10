@@ -135,3 +135,71 @@ class TestReadAndCleanTexFile:
         connector = OverleafConnector()
         result = connector.read_and_clean_tex_file(str(tmp_path), "main.tex")
         assert result == ""
+
+
+class TestReadAllTexFilesSplit:
+    """Tests for read_all_tex_files_split(): separating appendix content from the
+    main body BEFORE LaTeX cleaning, since clean_latex_text() strips \\appendix and
+    \\section{} markers down to bare text with no trace they were ever structural."""
+
+    def test_splits_on_appendix_marker(self, tmp_path):
+        (tmp_path / "main.tex").write_text(
+            r"""
+            \documentclass{article}
+            \begin{document}
+            \section{Introduction}
+            This paper studies important things.
+            \section{Conclusion}
+            We conclude that important things are important.
+            \appendix
+            \section{Proof of Theorem 1}
+            Here is a very long proof that goes on for pages and pages of dense math.
+            \end{document}
+            """
+        )
+        connector = OverleafConnector()
+        body, appendix = connector.read_all_tex_files_split(str(tmp_path))
+
+        assert "Conclusion" in body
+        assert "important things are important" in body
+        assert "Proof of Theorem" not in body
+        assert "dense math" not in body
+
+        assert "Proof of Theorem" in appendix
+        assert "dense math" in appendix
+
+    def test_no_appendix_marker_returns_full_body_and_empty_appendix(self, tmp_path):
+        (tmp_path / "main.tex").write_text(
+            r"\section{Introduction} Just a normal short paper with no appendix at all."
+        )
+        connector = OverleafConnector()
+        body, appendix = connector.read_all_tex_files_split(str(tmp_path))
+
+        assert "normal short paper" in body
+        assert appendix == ""
+        # Must be identical to the non-split method when there's nothing to split.
+        assert body == connector.read_all_tex_files(str(tmp_path))
+
+    def test_empty_project_returns_two_empty_strings(self, tmp_path):
+        connector = OverleafConnector()
+        body, appendix = connector.read_all_tex_files_split(str(tmp_path / "does_not_exist"))
+        assert body == ""
+        assert appendix == ""
+
+    def test_splits_on_appendices_environment(self, tmp_path):
+        """Some papers use the `appendix` package's \\begin{appendices} instead of the
+        bare \\appendix command."""
+        (tmp_path / "main.tex").write_text(
+            r"""
+            \section{Results} The results were positive.
+            \begin{appendices}
+            \section{Extra Data} Supplementary tables go here.
+            \end{appendices}
+            """
+        )
+        connector = OverleafConnector()
+        body, appendix = connector.read_all_tex_files_split(str(tmp_path))
+
+        assert "results were positive" in body
+        assert "Supplementary tables" not in body
+        assert "Supplementary tables" in appendix

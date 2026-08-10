@@ -152,14 +152,17 @@ class TestDataIngestionAgent:
         assert result == []
 
     def test_missing_profile_triggers_manual_login(self, agent):
-        """When user_data_dir is absent, _perform_manual_login() is called once."""
+        """When the session file is absent, the pre-run health check fails and the
+        sync aborts cleanly with an admin alert — no interactive login is launched
+        automatically, since this is an unattended scheduled run."""
         # profile_dir does NOT exist
         with patch.object(agent, "_perform_manual_login") as mock_login:
             result = agent.sync_all_projects()
 
-        mock_login.assert_called_once()
-        # Profile is still absent after mock login → should abort
+        mock_login.assert_not_called()
         assert result == []
+        agent.notifier.send_admin_alert.assert_called_once()
+        assert "Overleaf" in str(agent.notifier.send_admin_alert.call_args)
 
     def test_profile_still_absent_after_login_aborts(self, agent):
         """If profile remains missing after _perform_manual_login, return []."""
@@ -402,13 +405,15 @@ class TestDataIngestionAgent:
         mock_pw, mock_context, mock_page = _make_playwright_mocks()
         _page_rows_locator(mock_page, [row1, row2])
 
-        # Project 1: ZIP download raises immediately; project 2: ZIP + PDF succeed
+        # Project 1: ZIP download raises on every attempt (including the built-in
+        # download retries, so all of them must fail for the project to be skipped);
+        # project 2: ZIP + PDF succeed on the first try.
         failing_zip_ctx = MagicMock()
         failing_zip_ctx.__enter__.side_effect = Exception("Simulated ZIP download failure for project 1")
         failing_zip_ctx.__exit__.return_value = False
 
         mock_page.expect_download.side_effect = [
-            failing_zip_ctx,                        # project 1 ZIP — raises
+            failing_zip_ctx, failing_zip_ctx, failing_zip_ctx,  # project 1 ZIP — raises every retry
             _make_download_ctx(_zip_creator),       # project 2 ZIP — succeeds
             _make_download_ctx(_pdf_creator),       # project 2 PDF — succeeds
         ]
@@ -419,3 +424,31 @@ class TestDataIngestionAgent:
 
         assert "Successful Project" in result
         assert "Failing Project" not in result
+
+    def test_zip_download_recovers_from_transient_failure(self, agent):
+        """A ZIP download that fails once (e.g. a network blip) and succeeds on retry
+        must not skip the project -- previously any single failure meant waiting for
+        the next scheduled run, days later, even for a one-off glitch."""
+        self._populate_profile(agent._profile_dir)
+        agent._mock_db.get_last_modified.return_value = None
+
+        row = _make_project_row("Flaky Project", "/project/flaky", "Flaky Project 1 day ago")
+        mock_pw, mock_context, mock_page = _make_playwright_mocks()
+        _page_rows_locator(mock_page, [row])
+
+        failing_zip_ctx = MagicMock()
+        failing_zip_ctx.__enter__.side_effect = Exception("Transient network error")
+        failing_zip_ctx.__exit__.return_value = False
+
+        mock_page.expect_download.side_effect = [
+            failing_zip_ctx,                          # first attempt — transient failure
+            _make_download_ctx(_zip_creator),         # retry — succeeds
+            _make_download_ctx(_pdf_creator),         # PDF — succeeds
+        ]
+
+        with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
+             patch("ingestion.data_ingestion_agent.time.sleep") as mock_sleep:
+            result = agent.sync_all_projects()
+
+        assert "Flaky Project" in result
+        mock_sleep.assert_called()  # backoff before the retry actually happened

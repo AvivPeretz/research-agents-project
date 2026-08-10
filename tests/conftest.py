@@ -11,6 +11,18 @@ import pytest
 from utils.database_manager import DatabaseManager
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_provider_cooldowns():
+    """BaseAgent._provider_cooldowns is a class-level dict shared across every agent
+    instance/subclass in the process (by design — see base_agent.py) so a real 429
+    protects the whole pipeline run. In tests that same sharing would leak state
+    between unrelated test cases, so reset it before and after every test."""
+    from agents.base_agent import BaseAgent
+    BaseAgent._provider_cooldowns.clear()
+    yield
+    BaseAgent._provider_cooldowns.clear()
+
+
 @pytest.fixture
 def db_in_memory(tmp_path, monkeypatch):
     """

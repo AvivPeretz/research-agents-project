@@ -42,10 +42,13 @@ class DataIngestionAgent:
         page.locator(selector).fill(text)
         self._human_delay(300, 700)
 
-    def _build_stealth_context(self, playwright, headless: bool = None, accept_downloads: bool = False):
+    def _build_stealth_context(self, playwright, headless: bool = None, accept_downloads: bool = False,
+                                storage_state: str = None):
         """
         Creates a hardened browser context with stealth patches applied.
         Uses Config.PLAYWRIGHT_HEADLESS unless explicitly overridden.
+        If storage_state is provided, the context is created already authenticated
+        with that saved session instead of a fresh/anonymous one.
         Returns (browser, context, page) as a tuple.
         """
         # Use Config value if not explicitly overridden by caller
@@ -60,7 +63,7 @@ class DataIngestionAgent:
                 "--disable-dev-shm-usage",
             ]
         )
-        context = browser.new_context(
+        context_kwargs = dict(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -71,8 +74,43 @@ class DataIngestionAgent:
             timezone_id="America/New_York",
             accept_downloads=accept_downloads,
         )
+        if storage_state:
+            context_kwargs["storage_state"] = storage_state
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
         return browser, context, page
+
+    def check_session_health(self) -> bool:
+        """
+        Fast, read-only pre-flight check for whether the saved Overleaf session is
+        still valid. Unlike _perform_manual_login(), this never opens a visible
+        browser and never blocks waiting for a human — it is meant to run before an
+        unattended scheduled sync so an expired session is caught and reported
+        immediately instead of discovered mid-run. Returns True if authenticated,
+        False otherwise. Never raises.
+        """
+        if not os.path.exists(self.state_file):
+            self.logger.warning("Session health check: no Overleaf session file found.")
+            return False
+
+        try:
+            with sync_playwright() as p:
+                browser, context, page = self._build_stealth_context(
+                    p, headless=True, storage_state=self.state_file
+                )
+                try:
+                    page.goto("https://www.overleaf.com/project", timeout=15000)
+                    page.wait_for_selector('a[href^="/project/"]', state='attached', timeout=8000)
+                    return True
+                except PlaywrightTimeoutError:
+                    self.logger.warning("Session health check: saved Overleaf session is no longer valid.")
+                    return False
+                finally:
+                    context.close()
+                    browser.close()
+        except Exception as e:
+            self.logger.warning("Session health check failed unexpectedly: %s", str(e))
+            return False
 
     def _perform_manual_login(self):
         """
@@ -136,12 +174,36 @@ class DataIngestionAgent:
             print("❌ Database connection missing! Aborting sync.")
             return []
 
-        if not os.path.exists(self.state_file):
-            self._perform_manual_login()
+        if _retry_depth == 0:
+            # Proactive pre-flight check: this is the unattended entrypoint (cron/scheduled
+            # run), so we never launch an interactive login here — no human is present to
+            # solve a reCAPTCHA. If the session is missing or expired, report it once and
+            # skip the sync cleanly instead of hanging for minutes waiting for nobody.
+            if not self.check_session_health():
+                message = (
+                    "The pre-run Overleaf session health check failed: the saved session "
+                    "is missing or no longer authenticates. No browser was opened "
+                    "automatically since this is an unattended scheduled run. Run "
+                    "`python3 reauth_overleaf.py` on a machine with a display to "
+                    "re-authenticate before the next scheduled run."
+                )
+                print(f"❌ {message}")
+                self.logger.error(message)
+                if self.notifier:
+                    self.notifier.send_admin_alert(
+                        subject="Overleaf Session Invalid — Manual Login Required",
+                        message=message
+                    )
+                return []
+        else:
+            # Mid-run retry after the session was invalidated during the scrape itself
+            # (detected too late for the pre-flight check to have caught it).
+            if not os.path.exists(self.state_file):
+                self._perform_manual_login()
 
-        if not os.path.exists(self.state_file):
-            print("❌ Still no session file. Aborting sync.")
-            return []
+            if not os.path.exists(self.state_file):
+                print("❌ Still no session file. Aborting sync.")
+                return []
 
         updated_projects = []
         _need_retry = False
@@ -244,12 +306,30 @@ class DataIngestionAgent:
                         self._human_delay(800, 1800)
 
                         # --- 1. DOWNLOAD ZIP SOURCE ---
+                        # A single transient network blip here used to permanently skip the
+                        # project until the next scheduled run (days later, per the current
+                        # cadence) even though a simple retry would likely have succeeded.
                         zip_download_url = f"https://www.overleaf.com{href}/download/zip"
                         print("   📦 Downloading ZIP source...")
-                        with page.expect_download() as zip_download_info:
-                            page.evaluate(f"window.location.href = '{zip_download_url}'")
+                        MAX_DOWNLOAD_RETRIES = 3
+                        zip_download = None
+                        for dl_attempt in range(MAX_DOWNLOAD_RETRIES):
+                            try:
+                                with page.expect_download() as zip_download_info:
+                                    page.evaluate(f"window.location.href = '{zip_download_url}'")
+                                zip_download = zip_download_info.value
+                                break
+                            except Exception as dl_err:
+                                if dl_attempt < MAX_DOWNLOAD_RETRIES - 1:
+                                    sleep_time = 2 ** (dl_attempt + 1) + random.uniform(0, 1)
+                                    self.logger.warning(
+                                        "ZIP download failed for '%s' (attempt %d/%d): %s. Retrying in %.1fs...",
+                                        project_name, dl_attempt + 1, MAX_DOWNLOAD_RETRIES, str(dl_err), sleep_time
+                                    )
+                                    time.sleep(sleep_time)
+                                else:
+                                    raise
 
-                        zip_download = zip_download_info.value
                         zip_path = os.path.join(self.download_dir, f"{safe_project_name}.zip")
                         zip_download.save_as(zip_path)
 

@@ -2,7 +2,9 @@
 
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -174,3 +176,54 @@ class TestGarbageCollector:
         assert not (lit_review_dir / "old_0.md").exists()
         assert not (lit_review_dir / "old_1.md").exists()
         assert not (lit_review_dir / "old_2.md").exists()
+
+
+class TestStaleAgentRunAlerting:
+    """Tests for GarbageCollector._check_stale_agent_runs() -- catches a process
+    killed outright (crash/OOM/machine sleep), which no exception-based alert built
+    elsewhere in the system can see."""
+
+    def test_stale_run_triggers_admin_alert(self, db_in_memory, tmp_path):
+        old_time = (datetime.now() - timedelta(hours=5)).isoformat()
+        db_in_memory.log_agent_run(
+            agent_name="ResearchEnhancementAgent", project_name="StuckProject",
+            status="STARTED", started_at=old_time
+        )
+        notifier = MagicMock()
+        gc = GarbageCollector(base_dir=str(tmp_path), db=db_in_memory, notifier=notifier)
+
+        gc.run()
+
+        notifier.send_admin_alert.assert_called_once()
+        call_str = str(notifier.send_admin_alert.call_args)
+        assert "StuckProject" in call_str
+
+    def test_no_stale_runs_does_not_alert(self, db_in_memory, tmp_path):
+        db_in_memory.log_agent_run(
+            agent_name="ResearchEnhancementAgent", project_name="HealthyProject",
+            status="SUCCESS", finished_at=datetime.now().isoformat()
+        )
+        notifier = MagicMock()
+        gc = GarbageCollector(base_dir=str(tmp_path), db=db_in_memory, notifier=notifier)
+
+        gc.run()
+
+        notifier.send_admin_alert.assert_not_called()
+
+    def test_no_db_does_not_crash(self, tmp_path):
+        """GarbageCollector must still work fine when db is None (e.g. dry-run
+        tooling or standalone invocation)."""
+        gc = GarbageCollector(base_dir=str(tmp_path), db=None, notifier=MagicMock())
+        gc.run()  # must not raise
+
+    def test_alert_failure_does_not_crash_gc_run(self, db_in_memory, tmp_path):
+        old_time = (datetime.now() - timedelta(hours=5)).isoformat()
+        db_in_memory.log_agent_run(
+            agent_name="ResearchEnhancementAgent", project_name="StuckProject",
+            status="STARTED", started_at=old_time
+        )
+        notifier = MagicMock()
+        notifier.send_admin_alert.side_effect = Exception("SMTP down")
+        gc = GarbageCollector(base_dir=str(tmp_path), db=db_in_memory, notifier=notifier)
+
+        gc.run()  # must not raise

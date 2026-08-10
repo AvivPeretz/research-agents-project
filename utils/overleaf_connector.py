@@ -54,6 +54,11 @@ class OverleafConnector:
 
     def read_all_tex_files(self, project_path: str) -> str:
         """Reads and cleans ALL .tex files in the project directory, concatenated."""
+        text_content = self._read_all_tex_files_raw(project_path)
+        return self.clean_latex_text(text_content) if text_content else ""
+
+    def _read_all_tex_files_raw(self, project_path: str) -> str:
+        """Reads (but does not clean) ALL .tex files in the project directory, concatenated."""
         text_content = ""
         if not os.path.exists(project_path):
             return ""
@@ -66,7 +71,34 @@ class OverleafConnector:
                             text_content += f.read() + "\n"
                     except OSError as e:
                         self.logger.warning("Failed to read %s: %s", file_path, str(e))
-        return self.clean_latex_text(text_content) if text_content else ""
+        return text_content
+
+    # Markers that conventionally start an appendix in LaTeX. clean_latex_text() strips
+    # all command syntax, so this split MUST happen on the raw (uncleaned) source —
+    # by the time text is cleaned there is no reliable trace left that a section was
+    # ever an appendix, and truncation logic downstream would silently treat trailing
+    # appendix content as if it were the paper's actual conclusion.
+    _APPENDIX_MARKER_RE = re.compile(
+        r'\\appendix\b|\\begin\{appendi(?:x|ces)\}|\\section\*?\{\s*Appendi(?:x|ces)',
+        re.IGNORECASE
+    )
+
+    def read_all_tex_files_split(self, project_path: str) -> tuple:
+        """Like read_all_tex_files(), but returns (body, appendix) separately, both
+        already cleaned. Appendix content is whatever follows the first recognized
+        appendix marker in the raw source; if no marker is found, appendix is "" and
+        body is the full cleaned text (identical to read_all_tex_files())."""
+        raw_text = self._read_all_tex_files_raw(project_path)
+        if not raw_text:
+            return "", ""
+
+        match = self._APPENDIX_MARKER_RE.search(raw_text)
+        if not match:
+            return self.clean_latex_text(raw_text), ""
+
+        raw_body = raw_text[:match.start()]
+        raw_appendix = raw_text[match.start():]
+        return self.clean_latex_text(raw_body), self.clean_latex_text(raw_appendix)
 
     def read_and_clean_tex_file(self, project_path: str, main_file: str = "main.tex") -> str:
         """

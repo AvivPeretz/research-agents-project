@@ -251,4 +251,23 @@ class ProgressTrackingAgent(BaseAgent):
                     future.result()
                 except Exception as e:
                     self.logger.error("Unhandled error processing project '%s': %s", project, str(e))
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="FAILURE",
+                            error_message=str(e),
+                            finished_at=datetime.now().isoformat()
+                        )
+                    if self.notifier:
+                        try:
+                            self.notifier.send_admin_alert(
+                                subject=f"ProgressTrackingAgent — Project Failed: {project}",
+                                message=(
+                                    f"Unhandled error while processing '{project}':\n\n{e}\n\n"
+                                    f"See ProgressTrackingAgent.log for the full traceback."
+                                )
+                            )
+                        except Exception:
+                            pass  # do not let alert failure mask the original error
         self.logger.info("Progress tracking cycle completed.")

@@ -2,7 +2,7 @@ import os
 import json
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Import the centralized configuration
 from config import Config
@@ -97,7 +97,8 @@ class DatabaseManager:
                 self._ensure_column_exists(cursor, "project_state", "student_name", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "created_at", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "stanford_token", "TEXT")
-                
+                self._ensure_column_exists(cursor, "project_state", "stanford_upload_failures", "INTEGER DEFAULT 0")
+
                 conn.commit()
             self.logger.info("Database tables verified/created successfully.")
         except sqlite3.Error as e:
@@ -209,7 +210,8 @@ class DatabaseManager:
     def get_project_state_slim(self, project_name: str) -> dict:
         """Returns project state without last_seen_text — use when the blob is not needed."""
         query = """SELECT project_name, stanford_status, last_upload_time, stanford_token, researcher_email,
-                   student_status, update_frequency, supervisor_email, student_name, created_at
+                   student_status, update_frequency, supervisor_email, student_name, created_at,
+                   stanford_upload_failures
                    FROM project_state WHERE project_name = ?"""
         try:
             with self._get_connection() as conn:
@@ -221,15 +223,19 @@ class DatabaseManager:
             self.logger.error("Failed to fetch slim project state %s: %s", project_name, str(e))
             return None
 
-    def update_project_state(self, project_name: str, **kwargs):
+    def update_project_state(self, project_name: str, **kwargs) -> bool:
+        """Returns True if the write succeeded (or there was nothing to write), False
+        on any failure. Callers that persist something irreplaceable in the same
+        breath (e.g. a Stanford review token that only exists once) should check this
+        rather than assume the write landed just because no exception was raised."""
         if not kwargs:
-            return
+            return True
 
         # Whitelist of valid column names to prevent SQL injection
         VALID_COLUMNS = {
             "stanford_status", "last_upload_time", "last_seen_text", "stanford_token",
             "researcher_email", "student_status", "update_frequency",
-            "supervisor_email", "student_name", "created_at"
+            "supervisor_email", "student_name", "created_at", "stanford_upload_failures"
         }
 
         invalid_keys = set(kwargs.keys()) - VALID_COLUMNS
@@ -237,7 +243,7 @@ class DatabaseManager:
             self.logger.error(
                 "Attempted to update invalid columns: %s. Aborting update.", invalid_keys
             )
-            return
+            return False
 
         columns = ", ".join([f"{k} = ?" for k in kwargs.keys()])
         values = list(kwargs.values())
@@ -249,8 +255,10 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute(query, values)
                 conn.commit()
+            return True
         except sqlite3.Error as e:
             self.logger.error("Failed to update project state: %s", str(e))
+            return False
 
     # ==========================================
     # AGENT RUNS METHODS (For Auditing & Dashboard)
@@ -267,6 +275,49 @@ class DatabaseManager:
                 conn.commit()
         except sqlite3.Error as e:
             self.logger.error("Failed to log agent run: %s", str(e))
+
+    def get_stale_started_runs(self, older_than_hours: float = 2.0) -> list:
+        """Returns (agent_name, project_name, started_at) for every agent/project pair
+        whose MOST RECENT agent_runs row is still 'STARTED' and older than
+        older_than_hours. A normal run always follows STARTED with SUCCESS or FAILURE
+        (see log_agent_run callers) -- a STARTED row with no successor and no
+        exception ever having been caught for it means the process was killed
+        outright (OOM, crash, machine sleep) rather than failing in a way the code's
+        own try/except could detect and report. That failure mode is invisible to
+        every alert built on catching Python exceptions, so it needs its own check.
+        """
+        query = """
+            SELECT ar.agent_name, ar.project_name, ar.started_at
+            FROM agent_runs ar
+            INNER JOIN (
+                SELECT agent_name, project_name, MAX(id) AS max_id
+                FROM agent_runs
+                GROUP BY agent_name, project_name
+            ) latest ON ar.id = latest.max_id
+            WHERE ar.status = 'STARTED'
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                rows = [dict(r) for r in cursor.fetchall()]
+        except sqlite3.Error as e:
+            self.logger.error("Failed to query stale agent runs: %s", str(e))
+            return []
+
+        threshold = datetime.now() - timedelta(hours=older_than_hours)
+        stale = []
+        for row in rows:
+            started_at = row.get("started_at")
+            if not started_at:
+                continue
+            try:
+                started_dt = datetime.fromisoformat(started_at)
+            except ValueError:
+                continue
+            if started_dt < threshold:
+                stale.append(row)
+        return stale
 
     def get_projects_by_supervisor(self) -> list:
         """

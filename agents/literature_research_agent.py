@@ -45,6 +45,27 @@ class LiteratureResearchAgent(BaseAgent):
             self.logger.info("Truncating project text to %d chars for LLM (original: %d chars).", max_chars, len(text_content))
         return text_content[:max_chars]
 
+    # Preambles the cheap/fast extraction model sometimes prepends despite being told
+    # not to (e.g. "Based on the provided excerpt from the academic manuscript...").
+    # A real keyword line is short; a sentence is not — both checks catch this.
+    _KEYWORD_PREAMBLE_PREFIXES = (
+        "based on", "here are", "here is", "the topic", "the method",
+        "topic query", "method query", "sure", "certainly", "these are",
+    )
+    _MAX_KEYWORD_LINE_CHARS = 100
+
+    @classmethod
+    def _parse_keyword_lines(cls, response: str) -> list:
+        """Extracts usable keyword lines from an LLM response, dropping any line that
+        looks like prose (a preamble/explanation) rather than a short keyword list."""
+        lines = [l.strip().replace('"', '').replace("'", "") for l in response.splitlines() if l.strip()]
+        usable = [
+            l for l in lines
+            if len(l) <= cls._MAX_KEYWORD_LINE_CHARS
+            and not l.lower().startswith(cls._KEYWORD_PREAMBLE_PREFIXES)
+        ]
+        return usable
+
     def extract_keywords_from_text(self, project_name: str, text: str) -> tuple[str, str]:
         """Returns (topic_keywords, method_keywords) derived from manuscript text."""
         if not text or text.strip() == "":
@@ -53,7 +74,8 @@ class LiteratureResearchAgent(BaseAgent):
 
         self.logger.info("Extracting keywords based on manuscript text for: %s", project_name)
 
-        prompt = f"""
+        def _build_prompt(strict: bool = False) -> str:
+            prompt = f"""
         Analyze the following excerpt from an academic manuscript titled '{project_name}':
 
         {text}
@@ -62,16 +84,43 @@ class LiteratureResearchAgent(BaseAgent):
         1. TOPIC query (3-5 keywords): the core research domain and problem being solved.
         2. METHOD query (3-5 keywords): the specific technique or algorithmic approach used.
 
-        Return EXACTLY two lines, no labels, no quotes:
+        Return EXACTLY two lines, no labels, no quotes, no preamble or explanation:
         <topic keywords>
         <method keywords>
         """
+            if strict:
+                prompt += (
+                    "\nIMPORTANT: Reply with ONLY the two keyword lines. Do not include "
+                    "any introductory phrase like 'Based on the manuscript' or 'Here are'. "
+                    "Do not explain your reasoning."
+                )
+            return prompt
+
         try:
-            response = self.ask_llm(prompt).strip()
-            lines = [l.strip().replace('"', '').replace("'", "") for l in response.splitlines() if l.strip()]
+            response = self.ask_llm(_build_prompt(), model_override=Config.LLM_EXTRACTION_MODEL_NAME).strip()
+            lines = self._parse_keyword_lines(response)
+
+            if len(lines) < 2:
+                self.logger.warning(
+                    "Keyword extraction for '%s' returned an unexpected format "
+                    "(likely a preamble instead of keywords). Retrying with a stricter prompt.",
+                    project_name
+                )
+                response = self.ask_llm(
+                    _build_prompt(strict=True), model_override=Config.LLM_EXTRACTION_MODEL_NAME
+                ).strip()
+                lines = self._parse_keyword_lines(response)
+
             if len(lines) >= 2:
                 return lines[0], lines[1]
-            return lines[0], lines[0] + " methodology"
+            if lines:
+                return lines[0], lines[0] + " methodology"
+
+            self.logger.warning(
+                "Keyword extraction for '%s' produced no usable lines after retry. "
+                "Falling back to project name.", project_name
+            )
+            return project_name, project_name + " method"
         except RuntimeError as e:
             self.logger.error("LLM failed to generate keywords: %s", str(e))
             return project_name, project_name + " method"
@@ -97,7 +146,7 @@ class LiteratureResearchAgent(BaseAgent):
         If unsure, include the paper. Exclude only papers that are obviously off-topic.
         """
         try:
-            response = self.ask_llm(prompt).strip()
+            response = self.ask_llm(prompt, model_override=Config.LLM_EXTRACTION_MODEL_NAME).strip()
             keep_indices = {int(x.strip()) - 1 for x in response.split(",") if x.strip().isdigit()}
             filtered = [p for i, p in enumerate(papers) if i in keep_indices]
             dropped = len(papers) - len(filtered)
@@ -302,4 +351,23 @@ class LiteratureResearchAgent(BaseAgent):
                     future.result()
                 except Exception as e:
                     self.logger.error("Unhandled error processing project '%s': %s", project, str(e))
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="FAILURE",
+                            error_message=str(e),
+                            finished_at=datetime.now().isoformat()
+                        )
+                    if self.notifier:
+                        try:
+                            self.notifier.send_admin_alert(
+                                subject=f"LiteratureResearchAgent — Project Failed: {project}",
+                                message=(
+                                    f"Unhandled error while processing '{project}':\n\n{e}\n\n"
+                                    f"See LiteratureResearchAgent.log for the full traceback."
+                                )
+                            )
+                        except Exception:
+                            pass  # do not let alert failure mask the original error
         self.logger.info("Literature research cycle completed successfully.")

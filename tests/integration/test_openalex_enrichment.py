@@ -117,6 +117,28 @@ class TestOpenAlexEnrichment:
 
         assert result[0]["openalex"] == {}
 
+    def test_enrich_with_openalex_429_enters_cooldown_and_stops_calling(
+        self, fetcher, sample_papers
+    ):
+        """A 429 must stop enrichment for the rest of the batch instead of retrying
+        every remaining paper against a provider already known to be rate limited."""
+        rate_limited_response = MagicMock()
+        rate_limited_response.status_code = 429
+        two_papers = sample_papers + [{**sample_papers[0], "title": "Second Paper"}]
+
+        with patch.object(Config, "OPENALEX_API_KEY", "test_key"):
+            with patch(
+                "utils.literature_fetcher.requests.get", return_value=rate_limited_response
+            ) as mock_get:
+                with patch("utils.literature_fetcher.time.sleep"):
+                    result = fetcher.enrich_with_openalex(two_papers)
+
+        assert result[0]["openalex"] == {}
+        assert result[1]["openalex"] == {}
+        assert fetcher._cooldown_remaining("openalex") > 0
+        # Second paper's iteration should see the cooldown and skip its own call.
+        assert mock_get.call_count == 1
+
     def test_enrich_with_openalex_is_oa_true_sets_oa_url(
         self, fetcher, sample_papers
     ):

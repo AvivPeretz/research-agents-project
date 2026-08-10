@@ -1,57 +1,24 @@
 """
-Run this script ONCE on your local machine (not on the server)
-to create the initial Overleaf Chrome profile.
-Also run it when the session expires to refresh it.
+Run this ON A MACHINE WITH A DISPLAY to create or refresh the Overleaf session that
+the scheduled pipeline actually uses.
+
+This used to save a separate Chrome profile (Config.OVERLEAF_USER_DATA_DIR) that
+nothing in the pipeline ever read back -- DataIngestionAgent authenticates from
+Config.OVERLEAF_STATE_PATH instead. That meant running this script did not actually
+fix an expired session. It now delegates to the same login flow the pipeline itself
+uses, so it writes to the file that matters.
 
 Usage: python3 setup_overleaf_session.py
-After completion, copy the profile to the server:
-    scp -r playwright_state/overleaf_profile/ user@server:/path/to/volume/
+(Equivalent to running reauth_overleaf.py -- kept under this name too since it's the
+one operators are likely to already know.)
 """
 
-from playwright.sync_api import sync_playwright
-import time
-from config import Config
-import os
+from ingestion.data_ingestion_agent import DataIngestionAgent
 
 
 def setup_session():
-    os.makedirs(Config.OVERLEAF_USER_DATA_DIR, exist_ok=True)
-
-    print("🚀 Opening browser for Overleaf login...")
-    print("📋 Credentials will be pre-filled automatically.")
-    print("⚠️  If reCAPTCHA appears, solve it manually in the browser window.")
-    print("⏳ You have 300 seconds (5 minutes).\n")
-
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            Config.OVERLEAF_USER_DATA_DIR,
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-            viewport={"width": 1440, "height": 900},
-        )
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto("https://www.overleaf.com/login")
-        time.sleep(2)
-
-        if Config.OVERLEAF_EMAIL:
-            page.locator("#email").fill(Config.OVERLEAF_EMAIL)
-            time.sleep(0.8)
-        if Config.OVERLEAF_PASSWORD:
-            page.locator("#password").fill(Config.OVERLEAF_PASSWORD)
-            time.sleep(0.8)
-
-        page.click('button[type="submit"]')
-
-        try:
-            page.wait_for_url("**/project", timeout=300000)
-            print("✅ Login successful! Chrome profile saved to:")
-            print(f"   {Config.OVERLEAF_USER_DATA_DIR}")
-            print("\n📤 To deploy to server, run:")
-            print(f"   scp -r {Config.OVERLEAF_USER_DATA_DIR}/ user@server:/path/to/volume/overleaf_profile/")
-        except Exception:
-            print("❌ Login timed out or failed.")
-        finally:
-            context.close()
+    agent = DataIngestionAgent(db=None, notifier=None)
+    agent._perform_manual_login()
 
 
 if __name__ == "__main__":

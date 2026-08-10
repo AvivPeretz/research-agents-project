@@ -49,6 +49,103 @@ class TestLiteratureResearchAgent:
             assert '"' not in result[0]
             assert "deep learning" in result[0].lower() or "neural" in result[0].lower()
 
+    def test_extract_keywords_retries_and_recovers_from_preamble_response(
+        self, literature_agent, sample_project_name
+    ):
+        """Reproduces the real production failure: the cheap extraction model replied
+        with a single explanatory sentence instead of two keyword lines (e.g. 'Based
+        on the provided excerpt from the academic manuscript, the topic is...'),
+        which used to get sent to Semantic Scholar verbatim as the search query.
+        A retry with a stricter prompt must recover real keywords instead."""
+        preamble_response = (
+            "Based on the provided excerpt from the academic manuscript, the topic "
+            "query relates to wireless sensor networks and the method query relates "
+            "to energy harvesting techniques."
+        )
+        good_response = "wireless sensor networks energy\nenergy harvesting circuit design"
+
+        with patch.object(
+            literature_agent, "ask_llm", side_effect=[preamble_response, good_response]
+        ) as mock_ask:
+            topic, method = literature_agent.extract_keywords_from_text(
+                sample_project_name, "Sample research text about wireless sensors"
+            )
+
+        assert mock_ask.call_count == 2
+        assert topic == "wireless sensor networks energy"
+        assert method == "energy harvesting circuit design"
+        assert "Based on" not in topic
+        assert "manuscript" not in topic
+
+    def test_extract_keywords_filters_preamble_line_among_valid_lines(
+        self, literature_agent, sample_project_name
+    ):
+        """A response that mixes an unwanted preamble line with two real keyword
+        lines must use the real lines, not the preamble."""
+        response = (
+            "Here are the two search queries you requested:\n"
+            "deep learning image classification\n"
+            "convolutional neural network training"
+        )
+
+        with patch.object(literature_agent, "ask_llm", return_value=response):
+            topic, method = literature_agent.extract_keywords_from_text(
+                sample_project_name, "Sample research text"
+            )
+
+        assert topic == "deep learning image classification"
+        assert method == "convolutional neural network training"
+
+    def test_extract_keywords_no_unnecessary_retry_on_clean_response(
+        self, literature_agent, sample_project_name
+    ):
+        """A well-formatted first response must not trigger a second LLM call."""
+        with patch.object(
+            literature_agent, "ask_llm", return_value="topic keywords here\nmethod keywords here"
+        ) as mock_ask:
+            literature_agent.extract_keywords_from_text(sample_project_name, "Sample text")
+
+        assert mock_ask.call_count == 1
+
+    def test_extract_keywords_falls_back_to_project_name_after_failed_retry(
+        self, literature_agent, sample_project_name
+    ):
+        """If even the stricter retry fails to produce usable keywords, fall back to
+        the project name rather than ever sending prose as a search query."""
+        bad_response = "I'm sorry, I cannot generate keywords without more context about this manuscript and its specific research contributions to the field."
+
+        with patch.object(literature_agent, "ask_llm", return_value=bad_response) as mock_ask:
+            topic, method = literature_agent.extract_keywords_from_text(
+                sample_project_name, "Sample text"
+            )
+
+        assert mock_ask.call_count == 2
+        assert topic == sample_project_name
+        assert "cannot generate" not in topic
+
+    def test_extract_keywords_uses_cheap_extraction_model(self, literature_agent, sample_project_name):
+        """Keyword extraction is lightweight — it must use the cheaper extraction-tier
+        model, not the same model reserved for synthesis (reviews/feedback/reports)."""
+        from config import Config
+
+        with patch.object(literature_agent, "ask_llm", return_value="k1 k2") as mock_ask:
+            literature_agent.extract_keywords_from_text(sample_project_name, "Sample research text about AI")
+
+        _, kwargs = mock_ask.call_args
+        assert kwargs.get("model_override") == Config.LLM_EXTRACTION_MODEL_NAME
+
+    def test_filter_relevant_papers_uses_cheap_extraction_model(self, literature_agent, sample_project_name):
+        """Relevance filtering is a simple classification task — same reasoning as
+        keyword extraction: it should use the cheap extraction-tier model."""
+        from config import Config
+
+        papers = [{"title": "Paper A", "snippet": "about AI"}]
+        with patch.object(literature_agent, "ask_llm", return_value="1") as mock_ask:
+            literature_agent._filter_relevant_papers(sample_project_name, "project text", papers)
+
+        _, kwargs = mock_ask.call_args
+        assert kwargs.get("model_override") == Config.LLM_EXTRACTION_MODEL_NAME
+
     def test_process_results_with_llm_returns_valid_dict(self, literature_agent, sample_project_name):
         """Asserts that process_results_with_llm returns dict with 'summary' and 'papers' keys."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):

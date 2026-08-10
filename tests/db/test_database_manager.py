@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -244,3 +245,88 @@ class TestJsonMigration:
         if result:
             # Email should either be fallback or original None
             assert result["researcher_email"] is not None or result["researcher_email"] == Config.OVERLEAF_EMAIL
+
+
+class TestStaleAgentRuns:
+    """Tests for get_stale_started_runs() -- detects a process killed outright
+    (crash/OOM/machine sleep) rather than one that failed in a way the code's own
+    try/except could catch and log as FAILURE."""
+
+    def test_old_started_row_with_no_successor_is_stale(self, db_in_memory):
+        old_time = (datetime.now() - timedelta(hours=5)).isoformat()
+        db_in_memory.log_agent_run(
+            agent_name="LiteratureResearchAgent", project_name="StuckProject",
+            status="STARTED", started_at=old_time
+        )
+
+        stale = db_in_memory.get_stale_started_runs(older_than_hours=2.0)
+
+        assert len(stale) == 1
+        assert stale[0]["agent_name"] == "LiteratureResearchAgent"
+        assert stale[0]["project_name"] == "StuckProject"
+
+    def test_recent_started_row_is_not_stale(self, db_in_memory):
+        recent_time = datetime.now().isoformat()
+        db_in_memory.log_agent_run(
+            agent_name="LiteratureResearchAgent", project_name="InProgressProject",
+            status="STARTED", started_at=recent_time
+        )
+
+        stale = db_in_memory.get_stale_started_runs(older_than_hours=2.0)
+
+        assert stale == []
+
+    def test_started_row_followed_by_success_is_not_stale(self, db_in_memory):
+        old_time = (datetime.now() - timedelta(hours=5)).isoformat()
+        db_in_memory.log_agent_run(
+            agent_name="ProgressTrackingAgent", project_name="CompletedProject",
+            status="STARTED", started_at=old_time
+        )
+        db_in_memory.log_agent_run(
+            agent_name="ProgressTrackingAgent", project_name="CompletedProject",
+            status="SUCCESS", finished_at=datetime.now().isoformat()
+        )
+
+        stale = db_in_memory.get_stale_started_runs(older_than_hours=2.0)
+
+        assert stale == []
+
+    def test_started_row_followed_by_failure_is_not_stale(self, db_in_memory):
+        """A caught exception already produces a FAILURE row and (separately) an
+        admin alert -- this check exists only for what exception handling can't
+        see, so an old STARTED with a later FAILURE must not double-alert."""
+        old_time = (datetime.now() - timedelta(hours=5)).isoformat()
+        db_in_memory.log_agent_run(
+            agent_name="ResearchEnhancementAgent", project_name="FailedProject",
+            status="STARTED", started_at=old_time
+        )
+        db_in_memory.log_agent_run(
+            agent_name="ResearchEnhancementAgent", project_name="FailedProject",
+            status="FAILURE", finished_at=datetime.now().isoformat()
+        )
+
+        stale = db_in_memory.get_stale_started_runs(older_than_hours=2.0)
+
+        assert stale == []
+
+    def test_new_started_row_after_old_completed_run_is_stale(self, db_in_memory):
+        """Only the MOST RECENT row per (agent, project) matters -- an old completed
+        run followed by a fresh, still-stuck STARTED must still be flagged."""
+        db_in_memory.log_agent_run(
+            agent_name="LiteratureResearchAgent", project_name="RepeatProject",
+            status="SUCCESS",
+            started_at=(datetime.now() - timedelta(days=1)).isoformat(),
+            finished_at=(datetime.now() - timedelta(days=1)).isoformat(),
+        )
+        db_in_memory.log_agent_run(
+            agent_name="LiteratureResearchAgent", project_name="RepeatProject",
+            status="STARTED", started_at=(datetime.now() - timedelta(hours=5)).isoformat()
+        )
+
+        stale = db_in_memory.get_stale_started_runs(older_than_hours=2.0)
+
+        assert len(stale) == 1
+        assert stale[0]["project_name"] == "RepeatProject"
+
+    def test_no_agent_runs_returns_empty_list(self, db_in_memory):
+        assert db_in_memory.get_stale_started_runs() == []

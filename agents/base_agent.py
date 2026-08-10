@@ -1,6 +1,7 @@
 import os
 import time
 import random
+import threading
 import logging
 import logging.handlers
 from abc import ABC, abstractmethod
@@ -17,6 +18,14 @@ class BaseAgent(ABC):
     Provides common functionality like logging and LLM integration.
     Features a Multi-LLM Waterfall strategy (Groq -> Gemini -> OpenAI) with built-in retries.
     """
+
+    # Class-level (shared across every agent instance/subclass in this process) so that
+    # once one agent discovers a provider is rate-limited, every other agent in the same
+    # pipeline run skips it too instead of independently re-discovering the same 429.
+    # {provider_name: unix_timestamp_when_cooldown_ends}
+    _provider_cooldowns: dict = {}
+    _cooldown_lock = threading.Lock()
+
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
         self.logger = self._setup_logger()
@@ -93,15 +102,20 @@ class BaseAgent(ABC):
         if self.openai_available:
             self._providers_waterfall.append("openai")
 
-    def _ask_provider(self, provider_name: str, prompt: str) -> str:
+    def _ask_provider(self, provider_name: str, prompt: str, model_override: str = None) -> str:
         """
         Adapter method to format and send the request according to the specific provider's SDK.
+        model_override, when given, is only honored for Groq (the primary provider) — it
+        exists so lightweight extraction calls (keyword generation, relevance filtering)
+        can use a cheaper/faster model while synthesis calls keep the configured default.
+        Gemini/OpenAI are fallbacks, not the primary cost driver, so they always use their
+        one configured model regardless of tier.
         """
         if provider_name == "groq":
             chat_completion = self.groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=Config.LLM_MODEL_NAME,
-                timeout=Config.LLM_TIMEOUT_SECONDS  
+                model=model_override or Config.LLM_MODEL_NAME,
+                timeout=Config.LLM_TIMEOUT_SECONDS
             )
             return chat_completion.choices[0].message.content
             
@@ -127,35 +141,88 @@ class BaseAgent(ABC):
         else:
             raise ValueError(f"Unknown LLM provider requested: {provider_name}")
 
-    def ask_llm(self, prompt: str) -> str:
+    @staticmethod
+    def _is_rate_limit_error(err_str: str) -> bool:
+        """Recognizes rate-limit signals across Groq/Gemini/OpenAI's differently-shaped
+        error strings (HTTP 429, provider-specific quota wording)."""
+        lowered = err_str.lower()
+        return any(marker in lowered for marker in (
+            "429", "rate limit", "rate_limit", "quota", "resource_exhausted", "too many requests"
+        ))
+
+    @classmethod
+    def _provider_cooldown_remaining(cls, provider: str) -> float:
+        """Seconds left before *provider* is worth trying again (0 if available now)."""
+        with cls._cooldown_lock:
+            until = cls._provider_cooldowns.get(provider, 0.0)
+        return max(0.0, until - time.time())
+
+    @classmethod
+    def _start_provider_cooldown(cls, provider: str, seconds: float = None) -> float:
+        """Marks *provider* as rate-limited for `seconds` (default: Config value).
+        Shared across all agents in this process, so a 429 discovered by one agent
+        immediately protects every other agent's waterfall for the rest of the run."""
+        seconds = Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS if seconds is None else seconds
+        with cls._cooldown_lock:
+            cls._provider_cooldowns[provider] = time.time() + seconds
+        return seconds
+
+    def ask_llm(self, prompt: str, model_override: str = None) -> str:
         """
         Sends a prompt using a Multi-LLM Waterfall strategy.
         Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> OpenAI) if available.
+        A provider that returns a rate-limit error is put into a shared cooldown and
+        skipped (by this agent and every other agent in the process) until it expires,
+        instead of being retried with generic backoff or re-discovered independently by
+        every subsequent LLM call.
+
+        model_override lets a caller use a cheaper/faster Groq model for lightweight
+        extraction work (see Config.LLM_EXTRACTION_MODEL_NAME) while synthesis calls
+        keep the default. Ignored for the Gemini/OpenAI fallbacks.
         """
         max_retries = Config.LLM_MAX_RETRIES
+        skipped_on_cooldown = []
 
         for provider in self._providers_waterfall:
+            cooldown_remaining = self._provider_cooldown_remaining(provider)
+            if cooldown_remaining > 0:
+                self.logger.warning(
+                    "[%s] Skipping — rate-limit cooldown active for %.0fs more.",
+                    provider.upper(), cooldown_remaining
+                )
+                skipped_on_cooldown.append(provider)
+                continue
+
             self.logger.info("Routing request to LLM provider: [%s]", provider.upper())
-            
+
             for attempt in range(max_retries):
                 try:
                     if attempt > 0:
                         self.logger.info("Retrying [%s] (Attempt %d/%d)...", provider.upper(), attempt + 1, max_retries)
-                    
-                    content = self._ask_provider(provider, prompt)
-                    
+
+                    content = self._ask_provider(provider, prompt, model_override=model_override)
+
                     # --- Defensive Checks ---
                     if content is None or not content.strip():
                         raise ValueError(f"{provider.upper()} returned an empty or None response.")
                     if content.strip().startswith("Error:"):
                         raise ValueError(f"{provider.upper()} hallucinated an error string: {content}")
-                    
+
                     return content
-                    
+
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
-                    # Permanent errors — retrying won't help, move to next provider immediately
                     err_str = str(e)
+
+                    if self._is_rate_limit_error(err_str):
+                        cooldown = self._start_provider_cooldown(provider)
+                        self.logger.error(
+                            "[%s] Rate limit detected — entering %.0fs cooldown, skipping remaining retries for this provider.",
+                            provider.upper(), cooldown
+                        )
+                        break
+
+                    # Permanent errors — retrying won't help, move to next provider immediately
                     is_auth_error = "401" in err_str or "403" in err_str or "invalid_api_key" in err_str or "Incorrect API key" in err_str
                     is_size_error = "413" in err_str or "context_length_exceeded" in err_str or ("tokens" in err_str and "reduce" in err_str)
                     if is_auth_error or is_size_error:
@@ -167,12 +234,17 @@ class BaseAgent(ABC):
                     else:
                         self.logger.error("Max retries reached for provider [%s]. Exhausted.", provider.upper())
                         break
-                        
+
             if provider != self._providers_waterfall[-1]:
                 self.logger.warning("Initiating LLM Fallback: Switching from [%s] to next provider...", provider.upper())
             else:
                 self.logger.error("All available LLM providers have been exhausted.")
 
+        if skipped_on_cooldown and len(skipped_on_cooldown) == len(self._providers_waterfall):
+            raise RuntimeError(
+                f"CRITICAL: All LLM providers are in rate-limit cooldown. "
+                f"Tried none live: {', '.join(skipped_on_cooldown)}. Will retry once cooldowns expire."
+            )
         raise RuntimeError(f"CRITICAL: All LLM providers exhausted. Tried: {', '.join(self._providers_waterfall)}. Check API keys and rate limits.")
 
     def ask_llm_json(self, prompt: str) -> dict:

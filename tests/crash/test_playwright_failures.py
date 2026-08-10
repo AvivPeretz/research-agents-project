@@ -331,7 +331,9 @@ class TestPlaywrightFailures:
         assert result is None
 
     def test_google_scholar_captcha_no_session_calls_manual_login(self, tmp_path):
-        """Missing profile dir triggers _perform_manual_login when sync_all_projects runs."""
+        """Missing session file fails the pre-run health check and aborts the sync
+        with an admin alert — no interactive login is launched automatically on the
+        unattended scheduled path."""
         # profile_dir deliberately absent — profile check will fail
         profile_dir = str(tmp_path / "nonexistent_profile")
         downloads_dir = str(tmp_path / "downloads")
@@ -350,6 +352,83 @@ class TestPlaywrightFailures:
             agent = DataIngestionAgent(db=db, notifier=notifier)
 
         with patch.object(agent, "_perform_manual_login") as mock_login:
-            agent.sync_all_projects()
+            result = agent.sync_all_projects()
 
-        mock_login.assert_called_once()
+        mock_login.assert_not_called()
+        assert result == []
+        notifier.send_admin_alert.assert_called_once()
+
+
+class TestSessionHealthCheck:
+    """Tests for DataIngestionAgent.check_session_health() (proactive pre-flight check)."""
+
+    @pytest.fixture
+    def agent(self, tmp_path, mock_notifier, monkeypatch):
+        state_file = str(tmp_path / "state.json")
+        downloads_dir = str(tmp_path / "downloads")
+        os.makedirs(downloads_dir, exist_ok=True)
+
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
+        monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
+        monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
+        monkeypatch.setattr(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000)
+        monkeypatch.setattr(Config, "OVERLEAF_EMAIL", "test@example.com")
+
+        db = MagicMock()
+        db.get_last_modified.return_value = None
+        return DataIngestionAgent(db=db, notifier=mock_notifier)
+
+    def test_no_session_file_is_unhealthy(self, agent):
+        """No saved session at all → unhealthy, no browser launched."""
+        assert not os.path.exists(agent.state_file)
+        with patch("ingestion.data_ingestion_agent.sync_playwright") as mock_pw:
+            healthy = agent.check_session_health()
+        assert healthy is False
+        mock_pw.assert_not_called()
+
+    def test_valid_session_is_healthy(self, agent):
+        """Saved session that successfully reaches the project list → healthy."""
+        Path(agent.state_file).write_text(json.dumps({"cookies": [], "origins": []}))
+        mock_pw, mock_context, mock_page = _make_playwright_mocks()
+
+        with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw):
+            healthy = agent.check_session_health()
+
+        assert healthy is True
+        mock_page.goto.assert_called_once()
+        mock_context.close.assert_called_once()
+
+    def test_expired_session_is_unhealthy(self, agent):
+        """Saved session file exists but the dashboard never loads (expired/invalid
+        cookies) → unhealthy, simulating the exact silent-expiry incident."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        Path(agent.state_file).write_text(json.dumps({"cookies": [], "origins": []}))
+        mock_pw, mock_context, mock_page = _make_playwright_mocks()
+        mock_page.wait_for_selector.side_effect = PlaywrightTimeoutError("timeout")
+
+        with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw):
+            healthy = agent.check_session_health()
+
+        assert healthy is False
+        mock_context.close.assert_called_once()
+
+    def test_unhealthy_session_skips_sync_without_hanging(self, agent):
+        """sync_all_projects() must not call the blocking interactive login when the
+        pre-flight health check reports the session as expired — this is the
+        unattended scheduled path, and nobody is present to solve a reCAPTCHA."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        Path(agent.state_file).write_text(json.dumps({"cookies": [], "origins": []}))
+        mock_pw, mock_context, mock_page = _make_playwright_mocks()
+        mock_page.wait_for_selector.side_effect = PlaywrightTimeoutError("timeout")
+
+        with patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
+             patch.object(agent, "_perform_manual_login") as mock_login:
+            result = agent.sync_all_projects()
+
+        mock_login.assert_not_called()
+        assert result == []
+        agent.notifier.send_admin_alert.assert_called_once()
+        subject = agent.notifier.send_admin_alert.call_args.kwargs.get("subject", "")
+        assert "Overleaf" in subject and "Session" in subject

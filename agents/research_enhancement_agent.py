@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -34,7 +35,40 @@ class ResearchEnhancementAgent(BaseAgent):
         # Use Config for credentials
         self.uni_email = Config.OVERLEAF_EMAIL
 
+        # Cross-project circuit breaker: projects are processed concurrently via
+        # ThreadPoolExecutor, and Stanford has no API to give us a clean rate-limit
+        # signal from — only "did an upload succeed." If Stanford is failing
+        # systemically this run, we'd otherwise launch a full Playwright browser
+        # session (15-30s) per project only to watch it fail the same way each time.
+        self._stanford_lock = threading.Lock()
+        self._stanford_consecutive_failures = 0
+        self._stanford_cooldown_until = 0.0
+
         self.logger.info("ResearchEnhancementAgent initialized for %d projects.", len(self.projects))
+
+    def _stanford_cooldown_remaining(self) -> float:
+        with self._stanford_lock:
+            until = self._stanford_cooldown_until
+        return max(0.0, until - time.time())
+
+    def _record_stanford_outcome(self, success: bool):
+        """Tracks consecutive Stanford upload failures across ALL projects in this
+        run. After Config.STANFORD_CONSECUTIVE_FAILURE_THRESHOLD in a row, Stanford
+        is assumed to be down/unreachable for the rest of this run and further
+        projects skip the browser attempt entirely."""
+        with self._stanford_lock:
+            if success:
+                self._stanford_consecutive_failures = 0
+                self._stanford_cooldown_until = 0.0
+                return
+            self._stanford_consecutive_failures += 1
+            if self._stanford_consecutive_failures >= Config.STANFORD_CONSECUTIVE_FAILURE_THRESHOLD:
+                self._stanford_cooldown_until = time.time() + Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS
+                self.logger.error(
+                    "Stanford has failed %d times in a row this run — assuming it's "
+                    "unreachable and skipping further upload attempts for %.0fs.",
+                    self._stanford_consecutive_failures, Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS
+                )
 
     def _get_project_pdf_path(self, project_name: str) -> str:
         safe_name = project_name.replace(" ", "_")
@@ -63,27 +97,35 @@ class ResearchEnhancementAgent(BaseAgent):
                     "status": state.get('stanford_status') or "READY_FOR_UPLOAD",
                     "last_upload_time": state.get('last_upload_time'),
                     "token": state.get('stanford_token'),
+                    "upload_failures": state.get('stanford_upload_failures') or 0,
                 }
         except Exception as e:
             self.logger.warning("Could not read DB state for %s: %s", project_name, str(e))
 
-        return {"status": "READY_FOR_UPLOAD", "last_upload_time": None, "token": None}
+        return {"status": "READY_FOR_UPLOAD", "last_upload_time": None, "token": None, "upload_failures": 0}
 
-    def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None, token: str = None):
-        """Updates Stanford status in SQLite database."""
+    def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None, token: str = None,
+                                upload_failures: int = None) -> bool:
+        """Updates Stanford status in SQLite database. Returns True on success, False
+        on failure — callers persisting something irreplaceable (a review token) in
+        the same breath as this call must check the return value rather than assume
+        success just because nothing raised."""
         if not self.db:
-            return
+            return True
 
         fields = {"stanford_status": status}
         if upload_time:
             fields["last_upload_time"] = upload_time
         if token:
             fields["stanford_token"] = token
+        if upload_failures is not None:
+            fields["stanford_upload_failures"] = upload_failures
 
         try:
-            self.db.update_project_state(project_name, **fields)
+            return bool(self.db.update_project_state(project_name, **fields))
         except Exception as e:
             self.logger.error("Failed to update DB state for %s: %s", project_name, str(e))
+            return False
 
     def upload_to_stanford(self, project_name: str, pdf_path: str) -> str:
         """Phase 1: Uploads the PDF to paperreview.ai using Playwright.
@@ -440,11 +482,16 @@ avoid vague tasks like "improve the writing."
         """
         self.logger.info("Activating internal review fallback for project: %s", project_name)
 
-        # Step 1: Get paper text via injected OverleafConnector
+        # Step 1: Get paper text via injected OverleafConnector, with the appendix
+        # (if any) separated out. clean_latex_text() strips all \appendix / \section{}
+        # markup down to bare words, so this split must happen upstream in the
+        # connector — otherwise truncation below can't tell a real conclusion from
+        # trailing appendix filler and may silently show the LLM the wrong one.
         project_path = os.path.join(Config.OVERLEAF_DIR, project_name)
-        paper_text = self.connector.read_all_tex_files(project_path)
+        paper_text, appendix_text = self.connector.read_all_tex_files_split(project_path)
 
-        # Step 2: Minimum text check
+        # Step 2: Minimum text check (on the substantive body only — a paper padded
+        # mostly with appendix content still shouldn't pass as "enough to review")
         min_len = getattr(Config, 'MIN_REVIEW_LENGTH', MINIMUM_REVIEW_LENGTH)
         if not paper_text or len(paper_text.strip()) < min_len:
             self.logger.warning(
@@ -454,8 +501,14 @@ avoid vague tasks like "improve the writing."
             self._update_stanford_state(project_name, "SKIPPED_INSUFFICIENT_TEXT")
             return False
 
-        # Step 3: Truncate paper text
+        # Step 3: Truncate paper text — the tail bucket is now guaranteed to be the
+        # paper's actual conclusion/discussion, not an appendix.
         truncated_text = self._truncate_paper_text(paper_text)
+        if appendix_text:
+            self.logger.info(
+                "Excluded %d chars of appendix content from internal review for '%s'.",
+                len(appendix_text), project_name
+            )
 
         # Step 4: Load related papers from CSV
         related_papers_str = self._load_related_papers_from_csv(project_name)
@@ -513,13 +566,71 @@ avoid vague tasks like "improve the writing."
             if not pdf_path:
                 self.logger.warning("No PDF found for %s. Cannot upload.", project)
             else:
-                token = self.upload_to_stanford(project, pdf_path)
-                if token:
-                    self._update_stanford_state(project, "WAITING_FOR_REVIEW", datetime.now().isoformat(), token=token)
-                    self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW in DB.")
+                cooldown = self._stanford_cooldown_remaining()
+                if cooldown > 0:
+                    self.logger.warning(
+                        "Stanford assumed down this run (%.0fs cooldown remaining) — "
+                        "skipping browser upload for '%s' without attempting it.",
+                        cooldown, project
+                    )
+                    token = None
                 else:
-                    self.logger.warning("Stanford upload failed for '%s'. Activating internal fallback.", project)
-                    self._run_internal_review(project)
+                    token = self.upload_to_stanford(project, pdf_path)
+                    self._record_stanford_outcome(success=bool(token))
+
+                if token:
+                    saved = self._update_stanford_state(
+                        project, "WAITING_FOR_REVIEW", datetime.now().isoformat(),
+                        token=token, upload_failures=0
+                    )
+                    if saved:
+                        self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW in DB.")
+                    else:
+                        # The upload succeeded and Stanford has already issued a token for
+                        # it, but that token failed to persist. Without an alert, this is
+                        # silent: state stays READY_FOR_UPLOAD, so the next run re-uploads
+                        # the same manuscript to Stanford — burning another submission
+                        # against exactly the rate limits Focus Area 3 is protecting.
+                        self.logger.error(
+                            "Stanford upload for '%s' succeeded but the DB write failed — "
+                            "the review token was lost. Project will be re-uploaded to "
+                            "Stanford next run.", project
+                        )
+                        if self.notifier:
+                            try:
+                                self.notifier.send_admin_alert(
+                                    subject=f"Stanford Token Lost: {project}",
+                                    message=(
+                                        f"Project '{project}' was successfully uploaded to Stanford "
+                                        f"and a review token was issued, but saving it to the database "
+                                        f"failed. The project will be re-uploaded on the next scheduled "
+                                        f"run, which may waste a Stanford submission unnecessarily. "
+                                        f"Check database connectivity/disk space."
+                                    )
+                                )
+                            except Exception:
+                                pass
+                else:
+                    # Stanford's own upload endpoint can fail transiently (rate limits on
+                    # longer papers, brief outages) as well as permanently. Treating every
+                    # failure as permanent burns an LLM waterfall call on internal review
+                    # for what may just be "try again next run". Only give up on Stanford
+                    # after repeated consecutive failures.
+                    failures = state.get("upload_failures", 0) + 1
+                    if failures < Config.STANFORD_MAX_UPLOAD_RETRIES:
+                        self.logger.warning(
+                            "Stanford upload failed for '%s' (%d/%d) — will retry next scheduled run "
+                            "before falling back to internal review.",
+                            project, failures, Config.STANFORD_MAX_UPLOAD_RETRIES
+                        )
+                        self._update_stanford_state(project, "READY_FOR_UPLOAD", upload_failures=failures)
+                    else:
+                        self.logger.warning(
+                            "Stanford upload failed for '%s' %d times in a row. Activating internal fallback.",
+                            project, failures
+                        )
+                        self._update_stanford_state(project, "READY_FOR_UPLOAD", upload_failures=0)
+                        self._run_internal_review(project)
 
         elif state["status"] == "WAITING_FOR_REVIEW":
             if state.get("last_upload_time"):
@@ -598,4 +709,23 @@ avoid vague tasks like "improve the writing."
                     future.result()
                 except Exception as e:
                     self.logger.error("Unhandled error processing project '%s': %s", project, str(e))
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="FAILURE",
+                            error_message=str(e),
+                            finished_at=datetime.now().isoformat()
+                        )
+                    if self.notifier:
+                        try:
+                            self.notifier.send_admin_alert(
+                                subject=f"ResearchEnhancementAgent — Project Failed: {project}",
+                                message=(
+                                    f"Unhandled error while processing '{project}':\n\n{e}\n\n"
+                                    f"See ResearchEnhancementAgent.log for the full traceback."
+                                )
+                            )
+                        except Exception:
+                            pass  # do not let alert failure mask the original error
         self.logger.info("Research Enhancement cycle completed.")
