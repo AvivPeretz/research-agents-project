@@ -135,8 +135,14 @@ class ResearchEnhancementAgent(BaseAgent):
                 except Exception:
                     pass  # networkidle timeout is non-fatal — page loaded but may still have background XHR
 
+                # networkidle can fire before the client-side JS finishes rendering the success
+                # panel (confirmed live: #tokenDisplay.count() is 0 immediately after networkidle
+                # even on a successful submission) — wait for the element itself rather than
+                # checking immediately.
                 token_display = page.locator("#tokenDisplay")
-                if token_display.count() == 0:
+                try:
+                    token_display.wait_for(state="visible", timeout=10000)
+                except Exception:
                     self.logger.error(
                         "Upload for '%s' did not show a confirmation token — submission likely failed.",
                         project_name

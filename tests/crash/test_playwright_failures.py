@@ -177,7 +177,9 @@ class TestPlaywrightFailures:
         assert result is None
 
     def test_stanford_file_input_not_found_does_not_crash(self):
-        """upload_to_stanford completes without crash when file input locator is absent."""
+        """upload_to_stanford completes without crash (returns None, not an exception) when the
+        file input never attaches in time."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         mock_self = MagicMock()
@@ -185,14 +187,20 @@ class TestPlaywrightFailures:
         mock_self.uni_email = "uni@example.com"
 
         mock_pw, mock_context, mock_page = _make_enhancement_playwright_mocks()
-        mock_page.locator.return_value.count.return_value = 0  # no file input found
+
+        def locator_side_effect(selector):
+            m = MagicMock()
+            if selector == 'input[type="file"]':
+                m.wait_for.side_effect = PlaywrightTimeoutError("Timeout waiting for file input")
+            return m
+
+        mock_page.locator.side_effect = locator_side_effect
 
         with patch("agents.research_enhancement_agent.sync_playwright", mock_pw), \
              patch("agents.research_enhancement_agent.os.path.exists", return_value=True), \
              patch("agents.research_enhancement_agent.time.sleep"):
             result = ResearchEnhancementAgent.upload_to_stanford(mock_self, "TestProject", "/fake/path.pdf")
 
-        # Completes without exception; result is None (no file input means wait_for likely raised)
         assert result is None
 
     def test_upload_to_stanford_captures_token_from_confirmation_page(self):
@@ -223,8 +231,13 @@ class TestPlaywrightFailures:
 
         assert result == "YHX9F3EZukITLj-apsiDkaMLk-6e1Oy3FFO5gu0tT8I"
 
-    def test_upload_to_stanford_returns_none_when_token_display_missing(self):
-        """upload_to_stanford returns None when the confirmation page never shows a token (submission likely failed)."""
+    def test_upload_to_stanford_returns_none_when_token_display_never_appears(self):
+        """upload_to_stanford returns None when #tokenDisplay never becomes visible in time
+        (submission likely failed) — waits for it rather than checking immediately, since
+        networkidle can fire before the client-side JS finishes rendering the success panel
+        (confirmed live: #tokenDisplay.count() is 0 immediately after networkidle even on a
+        successful submission)."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         mock_self = MagicMock()
@@ -236,9 +249,7 @@ class TestPlaywrightFailures:
         def locator_side_effect(selector):
             m = MagicMock()
             if selector == "#tokenDisplay":
-                m.count.return_value = 0  # token element never appeared
-            else:
-                m.count.return_value = 1
+                m.wait_for.side_effect = PlaywrightTimeoutError("Timeout waiting for #tokenDisplay")
             return m
 
         mock_page.locator.side_effect = locator_side_effect
