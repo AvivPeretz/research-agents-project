@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace `LiteratureResearchAgent`'s blind-truncation token usage with structure-aware manuscript sampling and adaptive paper-abstract truncation, so the agent extracts maximum understanding per token and can no longer reproduce the Groq 8000-TPM failure seen on the Udi Aharon PhD Book v2 test run.
+**Goal:** Replace `LiteratureResearchAgent`'s blind-truncation token usage with structure-aware manuscript sampling and adaptive paper-abstract truncation, so the agent extracts maximum understanding per token and so a single request can no longer reproduce the Groq 8000-TPM-per-request-sized failure seen on the Udi Aharon PhD Book v2 test run (concurrent-request contention against Groq's account-wide TPM quota is a separate, out-of-scope concern — see the design doc's non-goals).
 
 **Architecture:** Two independent, additive changes wired into the existing `LiteratureResearchAgent` pipeline. Part A adds a structure-aware sampling method to `OverleafConnector`, replacing the prefix-truncation call site in `_read_project_text`. Part B adds a small pure-function module (`utils/token_budget.py`) that adaptively caps paper abstract lengths based on how many papers are in the batch, wired in right before the final summarization LLM call in `_process_project`.
 

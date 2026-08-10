@@ -14,6 +14,7 @@ from agents.notification_agent import NotificationAgent
 # NEW: Import our dedicated fetcher
 from utils.literature_fetcher import LiteratureFetcher
 from utils.overleaf_connector import OverleafConnector
+from utils.token_budget import truncate_paper_abstracts
 
 class LiteratureResearchAgent(BaseAgent):
     """
@@ -34,16 +35,20 @@ class LiteratureResearchAgent(BaseAgent):
         self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
 
     def _read_project_text(self, project_name: str) -> str:
-        """Reads all .tex files for the project using the shared OverleafConnector."""
+        """Reads all .tex files for the project and returns a structure-aware sample."""
         project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
-        text_content = self.connector.read_all_tex_files(project_dir)
-        if not text_content:
+        raw_text = self.connector.read_all_tex_files_raw(project_dir)
+        if not raw_text:
             self.logger.warning("No valid LaTeX text extracted for project: %s", project_name)
             return ""
         max_chars = getattr(Config, 'MAX_PROJECT_TEXT_CHARS', 4000)
-        if len(text_content) > max_chars:
-            self.logger.info("Truncating project text to %d chars for LLM (original: %d chars).", max_chars, len(text_content))
-        return text_content[:max_chars]
+        sample = self.connector.extract_representative_sample(raw_text, max_chars)
+        if len(raw_text) > max_chars:
+            self.logger.info(
+                "Sampled project text to %d chars for LLM (original: %d chars).",
+                len(sample), len(raw_text)
+            )
+        return sample
 
     # Preambles the cheap/fast extraction model sometimes prepends despite being told
     # not to (e.g. "Based on the provided excerpt from the academic manuscript...").
@@ -169,7 +174,7 @@ class LiteratureResearchAgent(BaseAgent):
             return fallback_data
             
         self.logger.info("Processing fetched literature data via LLM with Pydantic validation...")
-        data_str = json.dumps(scholar_data, indent=2)
+        data_str = json.dumps(scholar_data, indent=2, ensure_ascii=False)
         
         prompt = f"""
         Act as an expert academic research assistant. 
@@ -293,6 +298,13 @@ class LiteratureResearchAgent(BaseAgent):
                     finished_at=datetime.now().isoformat()
                 )
             return
+
+        all_papers = truncate_paper_abstracts(
+            all_papers,
+            total_budget_chars=Config.TOTAL_ABSTRACT_BUDGET_CHARS,
+            min_chars=Config.MIN_ABSTRACT_CHARS,
+            max_chars=Config.MAX_ABSTRACT_CHARS,
+        )
 
         keywords = f"{topic_kw} | {method_kw}"
         research_data = self.process_results_with_llm(project, keywords, all_papers)

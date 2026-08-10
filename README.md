@@ -51,6 +51,14 @@ exponential-backoff retry logic, and rotating file logging.
 
 - Reads the downloaded `.tex` files for each project and uses the LLM to extract two
   targeted search queries: a topic keyword set and a method keyword set.
+- Manuscript text is **structure-aware sampled** rather than blindly truncated: instead
+  of taking the first `MAX_PROJECT_TEXT_CHARS` characters (which for a long document only
+  captures the introduction), `OverleafConnector.extract_representative_sample` scans for
+  `\chapter`/`\section`/`\subsection`/`\subsubsection` markers and builds a sample spanning
+  the whole document — abstract in full, an excerpt after every heading (budget allocated
+  adaptively across however many headings exist), and extra room reserved for the final
+  section (typically the conclusion). Falls back to prefix truncation for documents with
+  no detectable LaTeX sectioning commands.
 - Runs a **three-tier search pipeline**:
   1. **Semantic Scholar API** (primary) — authenticated with `SEMANTIC_SCHOLAR_API_KEY`
      for higher rate limits; returns full abstracts, citation counts, and venues.
@@ -65,6 +73,12 @@ exponential-backoff retry logic, and rotating file logging.
   open-access URL). OpenAlex is an enrichment layer, not a search source.
 - An LLM relevance filter drops papers that are clearly off-topic before capping the
   pool at 15 unique papers per run.
+- Before the final summarization call, each paper's abstract is **adaptively truncated**
+  (`utils/token_budget.py`) so the total JSON payload sent to the LLM stays under a fixed
+  character budget regardless of how many papers were fetched — the per-paper cap scales
+  down as the paper count grows, rather than using one fixed length that only works for a
+  specific batch size. This prevents oversized-request rejections from the LLM provider on
+  projects that return many papers with long abstracts.
 - LLM output is validated against a **Pydantic v2 schema** (`LiteratureReport`) before
   any downstream processing, eliminating hallucinated or malformed records.
 - Results are written to a rolling CSV comparison table and a Markdown summary per
@@ -166,7 +180,7 @@ exponential-backoff retry logic, and rotating file logging.
 | Database | SQLite via a custom `DatabaseManager` wrapper |
 | Dashboard | Streamlit (`dashboard.py`) |
 | Logging | Python `RotatingFileHandler` |
-| Testing | pytest (250 tests) |
+| Testing | pytest (276 tests) |
 
 ---
 
@@ -430,7 +444,7 @@ source venv/bin/activate
 pytest tests/ -v
 ```
 
-Current count: **250 tests, 0 failures**.
+Current count: **276 tests, 0 failures**.
 
 Tests are organized under `tests/`:
 
@@ -465,8 +479,9 @@ research-agents/
 │   ├── garbage_collector.py        # TTL-based Markdown file cleanup
 │   ├── library_manager.py          # File I/O: Markdown summaries, rolling CSVs
 │   ├── literature_fetcher.py       # Semantic Scholar → SerpAPI → scholarly chain
-│   └── overleaf_connector.py       # LaTeX → plain text via regex
-├── tests/                          # 250 pytest tests
+│   ├── overleaf_connector.py       # LaTeX → plain text via regex, structure-aware sampling
+│   └── token_budget.py             # Adaptive char-budget caps for LLM payload sizing
+├── tests/                          # 276 pytest tests
 │   ├── crash/
 │   ├── db/
 │   ├── idempotency/
