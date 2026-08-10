@@ -154,8 +154,8 @@ class TestPlaywrightFailures:
         assert isinstance(result, list)
         assert "Crash Project" not in result
 
-    def test_stanford_site_down_returns_false(self):
-        """upload_to_stanford returns False when the site raises a network error."""
+    def test_stanford_site_down_returns_none(self):
+        """upload_to_stanford returns None when the site raises a network error."""
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         mock_self = MagicMock()
@@ -174,7 +174,7 @@ class TestPlaywrightFailures:
              patch("agents.research_enhancement_agent.os.path.exists", return_value=True):
             result = ResearchEnhancementAgent.upload_to_stanford(mock_self, "TestProject", "/fake/path.pdf")
 
-        assert result is False
+        assert result is None
 
     def test_stanford_file_input_not_found_does_not_crash(self):
         """upload_to_stanford completes without crash when file input locator is absent."""
@@ -192,68 +192,131 @@ class TestPlaywrightFailures:
              patch("agents.research_enhancement_agent.time.sleep"):
             result = ResearchEnhancementAgent.upload_to_stanford(mock_self, "TestProject", "/fake/path.pdf")
 
-        # Completes without exception; result can be True or False
-        assert isinstance(result, bool)
+        # Completes without exception; result is None (no file input means wait_for likely raised)
+        assert result is None
 
-    def test_stanford_token_rejected_returns_none(self):
-        """_fetch_review_from_stanford returns None when page shows 'Invalid Token'."""
+    def test_upload_to_stanford_captures_token_from_confirmation_page(self):
+        """upload_to_stanford returns the token text scraped from #tokenDisplay after a successful submit."""
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         mock_self = MagicMock()
         mock_self.logger = MagicMock()
+        mock_self.uni_email = "uni@example.com"
 
         mock_pw, mock_context, mock_page = _make_enhancement_playwright_mocks()
 
         def locator_side_effect(selector):
             m = MagicMock()
-            if selector == 'text="Invalid Token"':
-                m.count.return_value = 1  # site shows "Invalid Token"
-            elif selector == 'text="Summary"':
-                m.first.wait_for.side_effect = Exception("Not found")
+            if selector == "#tokenDisplay":
+                m.inner_text.return_value = "  YHX9F3EZukITLj-apsiDkaMLk-6e1Oy3FFO5gu0tT8I  \n"
+                m.count.return_value = 1
             else:
-                m.count.return_value = 0
+                m.count.return_value = 1
             return m
 
         mock_page.locator.side_effect = locator_side_effect
 
-        token = "validtoken12345678901234567890"
         with patch("agents.research_enhancement_agent.sync_playwright", mock_pw), \
-             patch("agents.research_enhancement_agent.Config.PLAYWRIGHT_HEADLESS", True):
+             patch("agents.research_enhancement_agent.os.path.exists", return_value=True), \
+             patch("agents.research_enhancement_agent.time.sleep"):
+            result = ResearchEnhancementAgent.upload_to_stanford(mock_self, "TestProject", "/fake/path.pdf")
+
+        assert result == "YHX9F3EZukITLj-apsiDkaMLk-6e1Oy3FFO5gu0tT8I"
+
+    def test_upload_to_stanford_returns_none_when_token_display_missing(self):
+        """upload_to_stanford returns None when the confirmation page never shows a token (submission likely failed)."""
+        from agents.research_enhancement_agent import ResearchEnhancementAgent
+
+        mock_self = MagicMock()
+        mock_self.logger = MagicMock()
+        mock_self.uni_email = "uni@example.com"
+
+        mock_pw, mock_context, mock_page = _make_enhancement_playwright_mocks()
+
+        def locator_side_effect(selector):
+            m = MagicMock()
+            if selector == "#tokenDisplay":
+                m.count.return_value = 0  # token element never appeared
+            else:
+                m.count.return_value = 1
+            return m
+
+        mock_page.locator.side_effect = locator_side_effect
+
+        with patch("agents.research_enhancement_agent.sync_playwright", mock_pw), \
+             patch("agents.research_enhancement_agent.os.path.exists", return_value=True), \
+             patch("agents.research_enhancement_agent.time.sleep"):
+            result = ResearchEnhancementAgent.upload_to_stanford(mock_self, "TestProject", "/fake/path.pdf")
+
+        assert result is None
+
+    def test_fetch_review_returns_content_when_ready(self):
+        """_fetch_review_from_stanford returns the review content when the API responds success=true."""
+        from agents.research_enhancement_agent import ResearchEnhancementAgent
+
+        mock_self = MagicMock()
+        mock_self.logger = MagicMock()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "success": True,
+            "title": "PQTrace",
+            "content": "1. Summary\nThis paper presents PQTrace...",
+        }
+
+        token = "validtoken12345678901234567890"
+        with patch("agents.research_enhancement_agent.requests.get", return_value=mock_response) as mock_get:
+            result = ResearchEnhancementAgent._fetch_review_from_stanford(mock_self, token)
+
+        mock_get.assert_called_once_with(
+            f"https://paperreview.ai/api/review/{token}", timeout=15
+        )
+        assert result == "1. Summary\nThis paper presents PQTrace..."
+
+    def test_fetch_review_returns_none_when_not_ready(self):
+        """_fetch_review_from_stanford returns None on a 404 (review not ready or invalid token)."""
+        from agents.research_enhancement_agent import ResearchEnhancementAgent
+
+        mock_self = MagicMock()
+        mock_self.logger = MagicMock()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.json.return_value = {"detail": "Invalid token or submission not found"}
+
+        token = "validtoken12345678901234567890"
+        with patch("agents.research_enhancement_agent.requests.get", return_value=mock_response):
             result = ResearchEnhancementAgent._fetch_review_from_stanford(mock_self, token)
 
         assert result is None
 
-    def test_stanford_review_too_short_returns_none(self):
-        """_fetch_review_from_stanford returns None when scraped text is < 400 chars."""
+    def test_fetch_review_returns_none_on_network_error(self):
+        """_fetch_review_from_stanford returns None (not an exception) when the request itself fails."""
+        from agents.research_enhancement_agent import ResearchEnhancementAgent
+        import requests
+
+        mock_self = MagicMock()
+        mock_self.logger = MagicMock()
+
+        token = "validtoken12345678901234567890"
+        with patch("agents.research_enhancement_agent.requests.get",
+                   side_effect=requests.exceptions.ConnectionError("network down")):
+            result = ResearchEnhancementAgent._fetch_review_from_stanford(mock_self, token)
+
+        assert result is None
+
+    def test_fetch_review_returns_none_for_empty_token(self):
+        """_fetch_review_from_stanford returns None immediately for an empty token, no HTTP call made."""
         from agents.research_enhancement_agent import ResearchEnhancementAgent
 
         mock_self = MagicMock()
         mock_self.logger = MagicMock()
 
-        mock_pw, mock_context, mock_page = _make_enhancement_playwright_mocks()
+        with patch("agents.research_enhancement_agent.requests.get") as mock_get:
+            result = ResearchEnhancementAgent._fetch_review_from_stanford(mock_self, "")
 
-        short_text = "This review is too short."
-        assert len(short_text) < 400  # Sanity check the fixture itself
-
-        def locator_side_effect(selector):
-            m = MagicMock()
-            if selector == "body":
-                m.inner_text.return_value = short_text
-            elif selector == 'text="Invalid Token"':
-                m.count.return_value = 0
-            elif selector == 'text="Error"':
-                m.count.return_value = 0
-            elif selector == 'button:visible':
-                m.count.return_value = 0
-            return m
-
-        mock_page.locator.side_effect = locator_side_effect
-
-        token = "validtoken12345678901234567890"
-        with patch("agents.research_enhancement_agent.sync_playwright", mock_pw), \
-             patch("agents.research_enhancement_agent.Config.PLAYWRIGHT_HEADLESS", True):
-            result = ResearchEnhancementAgent._fetch_review_from_stanford(mock_self, token)
-
+        mock_get.assert_not_called()
         assert result is None
 
     def test_google_scholar_captcha_no_session_calls_manual_login(self, tmp_path):

@@ -96,6 +96,7 @@ class DatabaseManager:
                 self._ensure_column_exists(cursor, "project_state", "supervisor_email", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "student_name", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "created_at", "TEXT")
+                self._ensure_column_exists(cursor, "project_state", "stanford_token", "TEXT")
                 
                 conn.commit()
             self.logger.info("Database tables verified/created successfully.")
@@ -207,7 +208,7 @@ class DatabaseManager:
 
     def get_project_state_slim(self, project_name: str) -> dict:
         """Returns project state without last_seen_text — use when the blob is not needed."""
-        query = """SELECT project_name, stanford_status, last_upload_time, researcher_email,
+        query = """SELECT project_name, stanford_status, last_upload_time, stanford_token, researcher_email,
                    student_status, update_frequency, supervisor_email, student_name, created_at
                    FROM project_state WHERE project_name = ?"""
         try:
@@ -226,7 +227,7 @@ class DatabaseManager:
 
         # Whitelist of valid column names to prevent SQL injection
         VALID_COLUMNS = {
-            "stanford_status", "last_upload_time", "last_seen_text",
+            "stanford_status", "last_upload_time", "last_seen_text", "stanford_token",
             "researcher_email", "student_status", "update_frequency",
             "supervisor_email", "student_name", "created_at"
         }

@@ -91,9 +91,13 @@ exponential-backoff retry logic, and rotating file logging.
 **`ResearchEnhancementAgent`** (`agents/research_enhancement_agent.py`)
 
 - Manages a two-phase external review cycle via Stanford's `paperreview.ai`:
-  - **Upload phase**: Playwright uploads the compiled PDF and submits the university email.
-  - **Fetch phase**: IMAP polls the Gmail relay for Stanford's reply, extracts the access
-    token via regex, and Playwright scrapes the generated review from the web portal.
+  - **Upload phase**: Playwright uploads the compiled PDF and submits the university email,
+    then captures the review access token directly from the confirmation page. paperreview.ai
+    itself warns that email delivery of this token is unreliable for some addresses, so the
+    token is saved immediately rather than relying on an email arriving later.
+  - **Fetch phase**: on a later run, polls paperreview.ai's JSON API
+    (`GET /api/review/<token>`) with the saved token. Processing can take hours, so a
+    not-ready response just means "try again next run" — it is not treated as a failure.
 - Translates the raw academic critique into an actionable to-do list with estimated effort
   and deadlines using the LLM.
 - **Internal review fallback**: when the Stanford pipeline fails at any stage, the agent
@@ -158,7 +162,7 @@ exponential-backoff retry logic, and rotating file logging.
 | Browser automation | Playwright (Chromium) |
 | Literature search | Semantic Scholar API → SerpAPI → scholarly |
 | Literature enrichment | OpenAlex API |
-| Email | smtplib (Gmail SMTP relay), imaplib (Gmail IMAP) |
+| Email | smtplib (Gmail SMTP relay, outbound notifications only) |
 | Database | SQLite via a custom `DatabaseManager` wrapper |
 | Dashboard | Streamlit (`dashboard.py`) |
 | Logging | Python `RotatingFileHandler` |
@@ -274,25 +278,6 @@ the SQLite database automatically. The JSON file is only needed once.
 
 ---
 
-### Setting Up Stanford Email Forwarding
-
-The Research Enhancement Agent submits manuscripts to Stanford's `paperreview.ai` using
-the university email address and reads the reply token from the Gmail relay. Because
-Stanford's confirmation goes to the university inbox (which blocks automated IMAP), you
-must configure a one-time forwarding rule:
-
-1. Log in to your university email at [outlook.office.com](https://outlook.office.com).
-2. **Settings** → **View all Outlook settings** → **Mail** → **Rules** → **Add new rule**.
-3. Configure:
-
-| Field | Value |
-|---|---|
-| Rule name | `Forward Stanford Review to Gmail` |
-| Condition | **From** contains `paperreview.ai` |
-| Action | **Forward to** → `your-relay@gmail.com` |
-
-4. Save. No further maintenance is required.
-
 The Gmail account receiving forwarded emails must be the same account configured as
 `NOTIFICATION_SENDER_EMAIL` in `.env`.
 
@@ -328,7 +313,9 @@ NOTIFICATION_SENDER_PASSWORD=xxxx xxxx xxxx xxxx
 
 # ── OVERLEAF / UNIVERSITY ACCOUNT ─────────────────────────────────────────────
 # Your university email connected to Overleaf.
-# Used for logging in to Overleaf and receiving Stanford review tokens.
+# Used for logging in to Overleaf and submitted as the contact email for
+# Stanford paperreview.ai (the review token itself is scraped from the
+# confirmation page, not received by email).
 
 OVERLEAF_EMAIL=your.name@university.edu
 OVERLEAF_PASSWORD=your-overleaf-password
@@ -528,9 +515,10 @@ plan. If your lab tracks many projects simultaneously, monitor usage at serpapi.
 
 **Stanford `paperreview.ai` dependency**
 The external peer-review phase depends on Stanford's third-party service. If that service
-changes its login flow, email format, or web portal structure, the scraping logic in
-`ResearchEnhancementAgent` will need updating. The internal review fallback activates
-automatically in these cases, maintaining continuity.
+changes its upload form, confirmation page, or `/api/review/<token>` response format, the
+upload/fetch logic in `ResearchEnhancementAgent` will need updating. The internal review
+fallback activates automatically on upload failure or if a project stays unreviewed past
+the 48-hour timeout, maintaining continuity.
 
 **Single-machine deployment**
 The current architecture runs all agents sequentially in a single process. On a lab server

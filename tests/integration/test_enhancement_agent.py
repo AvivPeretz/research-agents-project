@@ -33,6 +33,13 @@ class TestResearchEnhancementAgent:
         result = db_in_memory.get_project_state(sample_project_name)
         assert result["stanford_status"] == "WAITING_FOR_REVIEW"
 
+    def test_stanford_token_persists_to_db(self, db_in_memory, sample_project_name):
+        """Asserts that stanford_token can be written and read back via the slim state getter."""
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+        db_in_memory.update_project_state(sample_project_name, stanford_token="tok_abc123xyz")
+        result = db_in_memory.get_project_state_slim(sample_project_name)
+        assert result["stanford_token"] == "tok_abc123xyz"
+
     def test_get_project_pdf_path_finds_pdf(self, enhancement_agent, tmp_path, monkeypatch):
         """Asserts that PDF path is returned when file exists."""
         from config import Config
@@ -52,16 +59,10 @@ class TestResearchEnhancementAgent:
         result = enhancement_agent._get_project_pdf_path("empty_project")
         assert result is None
 
-    def test_upload_to_stanford_returns_false_on_invalid_path(self, enhancement_agent):
-        """Asserts that upload returns False when pdf_path is None."""
+    def test_upload_to_stanford_returns_none_on_invalid_path(self, enhancement_agent):
+        """Asserts that upload returns None when pdf_path is None."""
         result = enhancement_agent.upload_to_stanford(project_name="Test", pdf_path=None)
-        assert result is False
-
-    def test_get_token_from_email_returns_none_on_imap_error(self, enhancement_agent):
-        """Asserts that None is returned when IMAP connection fails."""
-        with patch("imaplib.IMAP4_SSL", side_effect=ConnectionRefusedError("IMAP unavailable")):
-            result = enhancement_agent._get_stanford_token_from_email("Test_Project")
-            assert result is None
+        assert result is None
 
     def test_generate_actionable_tasks_calls_llm(self, enhancement_agent, sample_project_name):
         """Asserts that LLM is called during task generation."""
