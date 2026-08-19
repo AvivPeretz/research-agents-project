@@ -40,8 +40,10 @@ class Config:
     # Cheaper/faster Groq model used only for lightweight extraction calls (keyword
     # generation, paper relevance filtering) — synthesis calls that produce the actual
     # content a researcher reads (reviews, feedback, reports) keep LLM_MODEL_NAME.
-    # Verify this model id is still current in Groq's catalog before relying on it.
-    LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", "llama-3.1-8b-instant")
+    # Groq deleted llama-3.1-8b-instant (~2026-08-17); reusing LLM_MODEL_NAME here
+    # until a dedicated lightweight replacement is confirmed still live in Groq's
+    # catalog. Verify this model id is still current before relying on it.
+    LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", LLM_MODEL_NAME)
     
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL_NAME = "gemini-1.5-flash"

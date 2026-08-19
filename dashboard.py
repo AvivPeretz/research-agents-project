@@ -764,8 +764,8 @@ elif page == "Config":
     _groq_key = getattr(Config, "GROQ_API_KEY", None)
     _gemini_key = getattr(Config, "GEMINI_API_KEY", None)
     _openai_key = getattr(Config, "OPENAI_API_KEY", None)
-    _groq_model = getattr(Config, "LLM_MODEL_NAME", "groq/llama-3.1-8b-instant")
-    _gemini_model = getattr(Config, "GEMINI_MODEL_NAME", "gemini/gemini-1.5-flash")
+    _groq_model = getattr(Config, "LLM_MODEL_NAME", "openai/gpt-oss-120b")
+    _gemini_model = getattr(Config, "GEMINI_MODEL_NAME", "gemini-1.5-flash")
     _openai_model = getattr(Config, "OPENAI_MODEL_NAME", "openai/gpt-4o-mini")
     st.table(pd.DataFrame({
         "Provider": ["Groq", "Gemini", "OpenAI"],
