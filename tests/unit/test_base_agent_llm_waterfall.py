@@ -429,3 +429,118 @@ class TestCerebrasRateLimiter:
                 agent.ask_llm("prompt")
 
         agent.cerebras_client.chat.completions.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 6. Synthetic client-side rejection must NOT be treated like a real 429:
+#    short, non-persisted cooldown only (final-review Finding 1).
+# ---------------------------------------------------------------------------
+
+class TestCerebrasProactiveRejectionCooldown:
+    def _agent_with_exhausted_limiter(self):
+        from agents.base_agent import BaseAgent, Config
+
+        agent = _make_stub_agent()
+        agent.cerebras_available = True
+        agent.cerebras_client = MagicMock()
+        agent._providers_waterfall = ["cerebras"]
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "ok"
+        agent.cerebras_client.chat.completions.create.return_value = mock_resp
+
+        # Exhaust the shared class-level limiter so the next try_acquire() rejects.
+        for _ in range(Config.CEREBRAS_SAFE_RPM):
+            assert BaseAgent._cerebras_rate_limiter.try_acquire() is True
+        return agent
+
+    def test_synthetic_rejection_gets_short_cooldown_not_full_90s(self):
+        """A client-side proactive rejection must not apply the full
+        LLM_RATE_LIMIT_COOLDOWN_SECONDS (90s) — that over-penalizes Cerebras for an
+        event that never touched the real provider."""
+        from agents.base_agent import BaseAgent, Config
+
+        agent = self._agent_with_exhausted_limiter()
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        agent.cerebras_client.chat.completions.create.assert_not_called()
+        remaining = BaseAgent._provider_cooldown_remaining("cerebras")
+        assert 0 < remaining <= 60
+        assert remaining < Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS
+
+    def test_synthetic_rejection_is_not_persisted_to_db(self, db_in_memory):
+        """The synthetic cooldown is a purely local/in-process pacing signal — a
+        cold-started process must NOT inherit it. Verified two ways: (1) the DB's
+        own record shows nothing for cerebras, and (2) simulating a cold start (fresh
+        in-memory dict + reload from DB) shows the provider immediately available."""
+        from agents.base_agent import BaseAgent
+        from agents.literature_research_agent import LiteratureResearchAgent
+
+        BaseAgent._shared_db_manager = db_in_memory
+        agent = self._agent_with_exhausted_limiter()
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        persisted = db_in_memory.get_all_cooldowns()
+        assert "cerebras" not in persisted or persisted["cerebras"] is None
+
+        # Simulate a cold start: clear in-memory state, spin up a fresh agent that
+        # reloads persisted cooldowns at __init__ time.
+        BaseAgent._provider_cooldowns.clear()
+        fresh_notifier = MagicMock()
+        fresh_agent = LiteratureResearchAgent(active_projects=["ProjectA"], notifier=fresh_notifier)
+        assert fresh_agent._provider_cooldown_remaining("cerebras") == 0
+
+    def test_real_429_from_cerebras_still_gets_full_persisted_cooldown(self, db_in_memory):
+        """Regression guard: a REAL 429 returned by the Cerebras client (not the
+        proactive client-side guard) must still go through the unchanged full-length,
+        persisted cooldown path — this fix must not weaken real rate-limit handling
+        for any provider, Cerebras included."""
+        from agents.base_agent import BaseAgent, Config
+
+        BaseAgent._shared_db_manager = db_in_memory
+        agent = _make_stub_agent()
+        agent.cerebras_available = True
+        agent.cerebras_client = MagicMock()
+        agent._providers_waterfall = ["cerebras"]
+        agent.cerebras_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - Rate limit exceeded"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        remaining = BaseAgent._provider_cooldown_remaining("cerebras")
+        assert remaining > 60
+        assert remaining <= Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS
+
+        persisted = db_in_memory.get_all_cooldowns()
+        assert "cerebras" in persisted
+        assert persisted["cerebras"] > 0
+
+    def test_real_429_from_any_other_provider_still_fully_persisted(self, db_in_memory):
+        """Same regression guard as above, exercised for Groq — the fix is scoped to
+        the Cerebras proactive guard's synthetic error only, not to rate-limit
+        handling in general."""
+        from agents.base_agent import BaseAgent, Config
+
+        BaseAgent._shared_db_manager = db_in_memory
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - Rate limit exceeded"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        remaining = BaseAgent._provider_cooldown_remaining("groq")
+        assert remaining > 60
+        persisted = db_in_memory.get_all_cooldowns()
+        assert "groq" in persisted and persisted["groq"] > 0

@@ -14,6 +14,17 @@ from config import Config
 from utils.database_manager import DatabaseManager
 
 
+class _CerebrasProactiveRateLimitError(Exception):
+    """Raised when the client-side _SlidingWindowLimiter proactively rejects a
+    Cerebras call BEFORE any real network request is made. Deliberately a distinct
+    type from a real provider-returned 429/rate-limit error: this event carries no
+    information about Cerebras's actual server-side state (Cerebras never saw the
+    request), so it must not be treated the same as a genuine rate-limit response
+    from ask_llm()'s classification logic. See the cerebras branch of _ask_provider
+    and the isinstance check near the top of the except block in ask_llm()."""
+    pass
+
+
 class _SlidingWindowLimiter:
     """Thread-safe proactive rate limiter — narrowly scoped to a single provider's
     live-verified request-per-minute ceiling. This is NOT the system-wide token-bucket
@@ -61,6 +72,21 @@ class _SlidingWindowLimiter:
                 return False
             self._timestamps.append(now)
             return True
+
+    def seconds_until_slot_free(self) -> float:
+        """How long until the oldest request in the current window ages out and a
+        slot frees up (0.0 if a slot is already free). Used to size a short,
+        proportionate local cooldown for a proactive client-side rejection — unlike
+        a real provider 429, there is no external signal to wait out; the window
+        itself IS the wait."""
+        now = time.time()
+        with self._lock:
+            cutoff = now - self.window_seconds
+            self._timestamps = [t for t in self._timestamps if t > cutoff]
+            if len(self._timestamps) < self.max_requests:
+                return 0.0
+            oldest = min(self._timestamps)
+            return max(0.0, oldest + self.window_seconds - now)
 
 
 class BaseAgent(ABC):
@@ -174,7 +200,8 @@ class BaseAgent(ABC):
     def _setup_llm(self):
         """
         Initialize connections to LLM providers.
-        Sets up Groq as Primary, Gemini as Fallback 1, and OpenAI as Fallback 2.
+        Sets up Groq as Primary, Gemini as Fallback 1, Cerebras as Fallback 2,
+        NVIDIA NIM as Fallback 3, and OpenAI as Fallback 4 (last resort).
         """
         # 1. Setup Groq (Primary - MUST EXIST)
         groq_key = Config.GROQ_API_KEY
@@ -253,8 +280,12 @@ class BaseAgent(ABC):
         model_override, when given, is only honored for Groq (the primary provider) — it
         exists so lightweight extraction calls (keyword generation, relevance filtering)
         can use a cheaper/faster model while synthesis calls keep the configured default.
-        Gemini/OpenAI are fallbacks, not the primary cost driver, so they always use their
-        one configured model regardless of tier.
+        Gemini, Cerebras, NVIDIA NIM, and OpenAI are all fallbacks, not the primary
+        cost driver, so each of them always uses its own single configured model
+        (Config.GEMINI_MODEL_NAME / CEREBRAS_MODEL_NAME / NVIDIA_NIM_MODEL_NAME /
+        OPENAI_MODEL_NAME) regardless of model_override — the parameter is silently
+        ignored for all four, exactly as it always was for Gemini/OpenAI before
+        Cerebras and NVIDIA NIM were added to the waterfall.
         """
         if provider_name == "groq":
             chat_completion = self.groq_client.chat.completions.create(
@@ -277,12 +308,14 @@ class BaseAgent(ABC):
             if not getattr(self, 'cerebras_available', False):
                 raise ValueError("Cerebras is not configured.")
             # Proactive, narrowly-scoped guard against Cerebras's live-verified 5
-            # requests/minute ceiling (see _SlidingWindowLimiter). A rejection here is
-            # raised in the same shape as a real 429 so the existing rate-limit
-            # detection/cooldown/failover logic in ask_llm() handles it identically —
-            # no separate error path needed.
+            # requests/minute ceiling (see _SlidingWindowLimiter). A rejection here
+            # raises a distinct _CerebrasProactiveRateLimitError (NOT a generic
+            # 429-shaped Exception) so ask_llm() can route it through a short,
+            # non-persisted local cooldown instead of the full persisted
+            # LLM_RATE_LIMIT_COOLDOWN_SECONDS used for real provider 429s — see the
+            # isinstance check near the top of the except block in ask_llm().
             if not self._cerebras_rate_limiter.try_acquire():
-                raise Exception(
+                raise _CerebrasProactiveRateLimitError(
                     "429 - Cerebras client-side rate limit exceeded "
                     f"(proactive guard, {Config.CEREBRAS_SAFE_RPM} rpm safety ceiling "
                     f"below the live {Config.CEREBRAS_RATE_LIMIT_RPM} rpm limit)"
@@ -319,8 +352,12 @@ class BaseAgent(ABC):
 
     @staticmethod
     def _is_rate_limit_error(err_str: str) -> bool:
-        """Recognizes rate-limit signals across Groq/Gemini/OpenAI's differently-shaped
-        error strings (HTTP 429, provider-specific quota wording)."""
+        """Recognizes rate-limit signals across all five waterfall providers'
+        differently-shaped error strings (HTTP 429, provider-specific quota wording).
+        Groq, Gemini, and OpenAI have their own distinct wordings; Cerebras and
+        NVIDIA NIM go through the OpenAI SDK (OpenAI-compatible APIs) so their errors
+        are typically OpenAI-shaped, but the marker list below is deliberately
+        provider-agnostic rather than enumerating each SDK's exact format."""
         lowered = err_str.lower()
         return any(marker in lowered for marker in (
             "429", "rate limit", "rate_limit", "quota", "resource_exhausted", "too many requests"
@@ -334,27 +371,39 @@ class BaseAgent(ABC):
         return max(0.0, until - time.time())
 
     @classmethod
-    def _start_provider_cooldown(cls, provider: str, seconds: float = None) -> float:
+    def _start_provider_cooldown(cls, provider: str, seconds: float = None, persist: bool = True) -> float:
         """Marks *provider* as rate-limited for `seconds` (default: Config value).
         Shared across all agents in this process, so a 429 discovered by one agent
-        immediately protects every other agent's waterfall for the rest of the run."""
+        immediately protects every other agent's waterfall for the rest of the run.
+
+        persist=False skips the cross-run SQLite write (see the call below): this is
+        for cooldowns that carry no information about the provider's actual
+        server-side state — e.g. a Cerebras proactive client-side rejection, where no
+        real request ever reached Cerebras — and so must NOT be inherited by a fresh
+        cold-started process. Real 429/413-rate-shaped responses from an actual
+        provider call must keep persist=True (the default) so cold starts still
+        benefit from cross-run protection, unchanged from before this parameter
+        existed."""
         seconds = Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS if seconds is None else seconds
         until = time.time() + seconds
         with cls._cooldown_lock:
             cls._provider_cooldowns[provider] = until
-        # Persist so a cold-started process (e.g. a future per-project container)
-        # doesn't rediscover the same rate limit from scratch. Best-effort: a DB write
-        # failure must not break the in-process cooldown that already protects this run.
-        try:
-            cls._get_db_manager().set_cooldown(provider, until)
-        except Exception:
-            pass
+        if persist:
+            # Persist so a cold-started process (e.g. a future per-project container)
+            # doesn't rediscover the same rate limit from scratch. Best-effort: a DB
+            # write failure must not break the in-process cooldown that already
+            # protects this run.
+            try:
+                cls._get_db_manager().set_cooldown(provider, until)
+            except Exception:
+                pass
         return seconds
 
     def ask_llm(self, prompt: str, model_override: str = None) -> str:
         """
         Sends a prompt using a Multi-LLM Waterfall strategy.
-        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> OpenAI) if available.
+        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> Cerebras ->
+        NVIDIA NIM -> OpenAI) if available.
         A provider that returns a rate-limit error is put into a shared cooldown and
         skipped (by this agent and every other agent in the process) until it expires,
         instead of being retried with generic backoff or re-discovered independently by
@@ -362,7 +411,8 @@ class BaseAgent(ABC):
 
         model_override lets a caller use a cheaper/faster Groq model for lightweight
         extraction work (see Config.LLM_EXTRACTION_MODEL_NAME) while synthesis calls
-        keep the default. Ignored for the Gemini/OpenAI fallbacks.
+        keep the default. Ignored for the Gemini, Cerebras, NVIDIA NIM, and OpenAI
+        fallbacks — each of those always uses its own single configured model.
         """
         max_retries = Config.LLM_MAX_RETRIES
         skipped_on_cooldown = []
@@ -397,6 +447,26 @@ class BaseAgent(ABC):
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
                     err_str = str(e)
+
+                    if isinstance(e, _CerebrasProactiveRateLimitError):
+                        # Client-side-only rejection — no real request reached
+                        # Cerebras, so the full persisted LLM_RATE_LIMIT_COOLDOWN_SECONDS
+                        # would over-penalize (e.g. cutting Cerebras's effective
+                        # throughput from ~4rpm to ~2.7rpm) and would wrongly persist a
+                        # "provider is rate-limited" fact that a fresh cold-started
+                        # process should NOT inherit, since nothing actually happened on
+                        # Cerebras's side. Instead: cooldown only for the remainder of
+                        # the current sliding window (capped at 60s) and never persisted
+                        # to SQLite — this is purely local in-process pacing.
+                        short_cooldown = min(self._cerebras_rate_limiter.seconds_until_slot_free(), 60.0)
+                        cooldown = self._start_provider_cooldown(provider, seconds=short_cooldown, persist=False)
+                        self.logger.warning(
+                            "[%s] Proactive client-side rate limit guard triggered (no real "
+                            "request was sent) — entering short local-only %.0fs cooldown "
+                            "(not persisted), skipping remaining retries for this provider.",
+                            provider.upper(), cooldown
+                        )
+                        break
 
                     if self._is_rate_limit_error(err_str):
                         cooldown = self._start_provider_cooldown(provider)
