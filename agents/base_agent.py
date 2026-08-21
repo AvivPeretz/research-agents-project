@@ -11,12 +11,46 @@ from openai import OpenAI
 
 # Import the centralized configuration
 from config import Config
+from utils.database_manager import DatabaseManager
+
+
+class _SlidingWindowLimiter:
+    """Thread-safe proactive rate limiter — narrowly scoped to a single provider's
+    live-verified request-per-minute ceiling. This is NOT the system-wide token-bucket
+    rate limiter the original stability-hardening plan considered and rejected as
+    over-engineered; it exists only because LiteratureResearchAgent runs concurrent
+    per-project LLM calls via ThreadPoolExecutor, and a burst of even a handful of
+    simultaneous fallbacks to a 5-requests/minute provider would blow through that
+    ceiling on the very first burst under real concurrent load, not as a rare edge
+    case. See Cerebras usage in BaseAgent for the specific justification."""
+
+    def __init__(self, max_requests: int, window_seconds: float):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._timestamps = []
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        """Non-blocking: returns True and reserves a slot if under the limit, False
+        otherwise. Never blocks the caller — a rejection is meant to be surfaced as a
+        rate-limit-shaped error so the normal waterfall/cooldown logic handles it,
+        rather than stalling a worker thread."""
+        now = time.time()
+        with self._lock:
+            cutoff = now - self.window_seconds
+            self._timestamps = [t for t in self._timestamps if t > cutoff]
+            if len(self._timestamps) >= self.max_requests:
+                return False
+            self._timestamps.append(now)
+            return True
+
 
 class BaseAgent(ABC):
     """
     Abstract base class for all agents in the project.
     Provides common functionality like logging and LLM integration.
-    Features a Multi-LLM Waterfall strategy (Groq -> Gemini -> OpenAI) with built-in retries.
+    Features a Multi-LLM Waterfall strategy
+    (Groq -> Gemini -> Cerebras -> NVIDIA NIM -> OpenAI) with built-in retries.
     """
 
     # Class-level (shared across every agent instance/subclass in this process) so that
@@ -26,11 +60,64 @@ class BaseAgent(ABC):
     _provider_cooldowns: dict = {}
     _cooldown_lock = threading.Lock()
 
+    # Lazily-created, class-level (shared for the life of the process, same rationale as
+    # _provider_cooldowns above) DatabaseManager used to persist cooldowns across cold
+    # starts. Tests reset this to None between runs (see tests/conftest.py) so they never
+    # touch a real on-disk database.
+    _shared_db_manager = None
+    _db_manager_lock = threading.Lock()
+
+    # Cerebras-specific proactive concurrency guard — see _SlidingWindowLimiter and the
+    # Cerebras branch of _ask_provider for the full reasoning. Scoped ONLY to Cerebras;
+    # no other provider has a live-verified limit this low.
+    _cerebras_rate_limiter = _SlidingWindowLimiter(
+        max_requests=Config.CEREBRAS_SAFE_RPM, window_seconds=60.0
+    )
+
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
         self.logger = self._setup_logger()
         self._setup_llm()
+        self._load_persisted_cooldowns()
         self.logger.info("Agent '%s' initialized.", self.agent_name)
+
+    @classmethod
+    def _get_db_manager(cls) -> DatabaseManager:
+        """Lazily creates (once per process) the shared DatabaseManager used for
+        cross-run cooldown persistence.
+
+        Deliberately assigns to BaseAgent explicitly rather than `cls`: a classmethod
+        assignment of `cls._shared_db_manager = ...` would, when invoked through a
+        subclass (e.g. LiteratureResearchAgent), create a NEW class attribute shadowing
+        BaseAgent's on that subclass alone — defeating the "one shared instance across
+        every agent in the process" design (the same reason _provider_cooldowns is
+        mutated in place via __setitem__ rather than ever reassigned)."""
+        with BaseAgent._db_manager_lock:
+            if BaseAgent._shared_db_manager is None:
+                BaseAgent._shared_db_manager = DatabaseManager()
+            return BaseAgent._shared_db_manager
+
+    def _load_persisted_cooldowns(self):
+        """Reads any cooldowns persisted by a previous (possibly now-dead) process and
+        merges them into the in-process _provider_cooldowns dict. This is what makes the
+        circuit breaker survive a cold restart — without it, a fresh container/process
+        would silently forget an active rate limit and immediately re-trigger it.
+        Best-effort: a DB read failure must not prevent the agent from starting."""
+        try:
+            persisted = self._get_db_manager().get_all_cooldowns()
+        except Exception as e:
+            self.logger.warning(
+                "Could not load persisted LLM provider cooldowns (cross-run protection "
+                "unavailable this run): %s", str(e)
+            )
+            return
+        with self.__class__._cooldown_lock:
+            for provider, until in persisted.items():
+                if until is None:
+                    continue
+                current = self.__class__._provider_cooldowns.get(provider, 0.0)
+                if until > current:
+                    self.__class__._provider_cooldowns[provider] = until
 
     def _setup_logger(self):
         logger = logging.getLogger(self.agent_name)
@@ -84,21 +171,54 @@ class BaseAgent(ABC):
             except Exception as e:
                 self.logger.warning("Failed to configure Gemini Fallback: %s", str(e))
 
-        # 3. Setup OpenAI (Fallback 2)
+        # 3. Setup Cerebras (Fallback 2) — OpenAI-compatible API, reuses the OpenAI SDK
+        # client pointed at Cerebras's base URL rather than a separate SDK dependency.
+        self.cerebras_available = False
+        cerebras_key = getattr(Config, 'CEREBRAS_API_KEY', None)
+        if cerebras_key:
+            try:
+                self.cerebras_client = OpenAI(api_key=cerebras_key, base_url=Config.CEREBRAS_BASE_URL)
+                self.cerebras_available = True
+                self.logger.info("Fallback 2 (Cerebras) configured successfully.")
+            except Exception as e:
+                self.logger.warning("Failed to configure Cerebras Fallback: %s", str(e))
+
+        # 4. Setup NVIDIA NIM (Fallback 3) — also OpenAI-compatible.
+        self.nvidia_nim_available = False
+        nvidia_nim_key = getattr(Config, 'NVIDIA_NIM_API_KEY', None)
+        if nvidia_nim_key:
+            try:
+                self.nvidia_nim_client = OpenAI(api_key=nvidia_nim_key, base_url=Config.NVIDIA_NIM_BASE_URL)
+                self.nvidia_nim_available = True
+                self.logger.info("Fallback 3 (NVIDIA NIM) configured successfully.")
+            except Exception as e:
+                self.logger.warning("Failed to configure NVIDIA NIM Fallback: %s", str(e))
+
+        # 5. Setup OpenAI (Fallback 4 — last resort)
         self.openai_available = False
         openai_key = getattr(Config, 'OPENAI_API_KEY', None)
         if openai_key:
             try:
                 self.openai_client = OpenAI(api_key=openai_key)
                 self.openai_available = True
-                self.logger.info("Fallback 2 (OpenAI) configured successfully.")
+                self.logger.info("Fallback 4 (OpenAI) configured successfully.")
             except Exception as e:
                 self.logger.warning("Failed to configure OpenAI Fallback: %s", str(e))
 
-        # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call
+        # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call.
+        # Order: Groq (primary) -> Gemini -> Cerebras -> NVIDIA NIM -> OpenAI (last
+        # resort, kept intact despite currently failing with insufficient_quota — an
+        # external billing issue, not a code defect). NVIDIA NIM's context window
+        # could not be live-verified (no API key available this session), so there is
+        # no confirmed basis to place it ahead of Cerebras for long-manuscript calls;
+        # it stays after Cerebras until that number is confirmed.
         self._providers_waterfall = ["groq"]
         if self.gemini_available:
             self._providers_waterfall.append("gemini")
+        if self.cerebras_available:
+            self._providers_waterfall.append("cerebras")
+        if self.nvidia_nim_available:
+            self._providers_waterfall.append("nvidia_nim")
         if self.openai_available:
             self._providers_waterfall.append("openai")
 
@@ -128,6 +248,37 @@ class BaseAgent(ABC):
             )
             return response.text
             
+        elif provider_name == "cerebras":
+            if not getattr(self, 'cerebras_available', False):
+                raise ValueError("Cerebras is not configured.")
+            # Proactive, narrowly-scoped guard against Cerebras's live-verified 5
+            # requests/minute ceiling (see _SlidingWindowLimiter). A rejection here is
+            # raised in the same shape as a real 429 so the existing rate-limit
+            # detection/cooldown/failover logic in ask_llm() handles it identically —
+            # no separate error path needed.
+            if not self._cerebras_rate_limiter.try_acquire():
+                raise Exception(
+                    "429 - Cerebras client-side rate limit exceeded "
+                    f"(proactive guard, {Config.CEREBRAS_SAFE_RPM} rpm safety ceiling "
+                    f"below the live {Config.CEREBRAS_RATE_LIMIT_RPM} rpm limit)"
+                )
+            response = self.cerebras_client.chat.completions.create(
+                model=Config.CEREBRAS_MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=Config.LLM_TIMEOUT_SECONDS
+            )
+            return response.choices[0].message.content
+
+        elif provider_name == "nvidia_nim":
+            if not getattr(self, 'nvidia_nim_available', False):
+                raise ValueError("NVIDIA NIM is not configured.")
+            response = self.nvidia_nim_client.chat.completions.create(
+                model=Config.NVIDIA_NIM_MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=Config.LLM_TIMEOUT_SECONDS
+            )
+            return response.choices[0].message.content
+
         elif provider_name == "openai":
             if not getattr(self, 'openai_available', False):
                 raise ValueError("OpenAI is not configured.")
@@ -137,7 +288,7 @@ class BaseAgent(ABC):
                 timeout=Config.LLM_TIMEOUT_SECONDS
             )
             return response.choices[0].message.content
-            
+
         else:
             raise ValueError(f"Unknown LLM provider requested: {provider_name}")
 
@@ -163,8 +314,16 @@ class BaseAgent(ABC):
         Shared across all agents in this process, so a 429 discovered by one agent
         immediately protects every other agent's waterfall for the rest of the run."""
         seconds = Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS if seconds is None else seconds
+        until = time.time() + seconds
         with cls._cooldown_lock:
-            cls._provider_cooldowns[provider] = time.time() + seconds
+            cls._provider_cooldowns[provider] = until
+        # Persist so a cold-started process (e.g. a future per-project container)
+        # doesn't rediscover the same rate limit from scratch. Best-effort: a DB write
+        # failure must not break the in-process cooldown that already protects this run.
+        try:
+            cls._get_db_manager().set_cooldown(provider, until)
+        except Exception:
+            pass
         return seconds
 
     def ask_llm(self, prompt: str, model_override: str = None) -> str:
@@ -222,10 +381,38 @@ class BaseAgent(ABC):
                         )
                         break
 
-                    # Permanent errors — retrying won't help, move to next provider immediately
+                    # Permanent errors — retrying won't help, move to next provider immediately.
+                    # A 413 is NOT always permanent: Groq's TPM (tokens-per-minute) ceiling
+                    # also surfaces as 413, and TPM limits are transient (they clear on
+                    # their own) — treating every 413 as permanent meant the very next call
+                    # in the same run hit the identical TPM wall and repeated the wasted
+                    # attempt. Only a genuinely oversized single request (chunking is the
+                    # real fix, not retry) stays classified as permanent; a 413 whose
+                    # message names a per-minute/rate ceiling is rate-limit-shaped and
+                    # routed through the same cooldown path as a real 429.
+                    lowered_err = err_str.lower()
                     is_auth_error = "401" in err_str or "403" in err_str or "invalid_api_key" in err_str or "Incorrect API key" in err_str
-                    is_size_error = "413" in err_str or "context_length_exceeded" in err_str or ("tokens" in err_str and "reduce" in err_str)
-                    if is_auth_error or is_size_error:
+                    has_413 = "413" in err_str
+                    is_context_length_error = "context_length_exceeded" in lowered_err or "maximum context length" in lowered_err
+                    is_rate_shaped_413 = has_413 and not is_context_length_error and any(
+                        marker in lowered_err for marker in ("tokens per minute", "tpm", "rate")
+                    )
+
+                    if is_rate_shaped_413:
+                        cooldown = self._start_provider_cooldown(provider)
+                        self.logger.error(
+                            "[%s] 413 is rate-limit-shaped (TPM/rate ceiling) — entering "
+                            "%.0fs cooldown, skipping remaining retries for this provider.",
+                            provider.upper(), cooldown
+                        )
+                        break
+
+                    is_permanent_size_error = (
+                        is_context_length_error
+                        or (has_413 and not is_rate_shaped_413)
+                        or ("tokens" in lowered_err and "reduce" in lowered_err)
+                    )
+                    if is_auth_error or is_permanent_size_error:
                         self.logger.error("[%s] Permanent error (auth/size) — skipping retries for this provider.", provider.upper())
                         break
                     if attempt < max_retries - 1:
