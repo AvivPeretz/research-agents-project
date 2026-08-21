@@ -32,7 +32,39 @@ class LiteratureResearchAgent(BaseAgent):
         self.connector = OverleafConnector()
 
         self.db = db
+        # Dedup guard for _alert_waterfall_exhausted: a full LLM waterfall exhaustion
+        # is alerted at most once per project per run (not once per paper/call) so a
+        # project that hits the exhausted waterfall on every keyword-extraction and
+        # summarization call doesn't spam the admin inbox with a dozen identical alerts.
+        self._waterfall_exhausted_alerted: set = set()
         self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
+
+    def _alert_waterfall_exhausted(self, context: str, project_name: str):
+        """Sends exactly one deduplicated admin alert per run per project when the full
+        LLM waterfall is exhausted for that project. Closes the silent-degradation gap:
+        previously a total waterfall failure fell back to degraded output (keyword-only
+        search, or fallback_data) with no signal anyone would see. This does not change
+        that degrade-but-alert behavior — a full crash is disproportionate to one
+        paper's LLM failure — it only makes sure someone is told."""
+        if project_name in self._waterfall_exhausted_alerted:
+            return
+        self._waterfall_exhausted_alerted.add(project_name)
+        if not self.notifier:
+            return
+        try:
+            self.notifier.send_admin_alert(
+                subject=f"LiteratureResearchAgent — LLM waterfall exhausted: {project_name}",
+                message=(
+                    f"The full LLM provider waterfall was exhausted while processing "
+                    f"project '{project_name}' ({context}). The agent is continuing "
+                    f"with degraded output for this project rather than crashing, but "
+                    f"this project's literature results for this run may be incomplete "
+                    f"or fall back to keyword-only search.\n\n"
+                    f"See LiteratureResearchAgent.log for the full traceback."
+                )
+            )
+        except Exception:
+            pass  # do not let alert failure mask the original degraded-output path
 
     def _read_project_text(self, project_name: str) -> str:
         """Reads all .tex files for the project and returns a structure-aware sample."""
@@ -128,6 +160,7 @@ class LiteratureResearchAgent(BaseAgent):
             return project_name, project_name + " method"
         except RuntimeError as e:
             self.logger.error("LLM failed to generate keywords: %s", str(e))
+            self._alert_waterfall_exhausted("keyword extraction", project_name)
             return project_name, project_name + " method"
 
     def _filter_relevant_papers(self, project_name: str, text: str, papers: list) -> list:
@@ -229,7 +262,11 @@ class LiteratureResearchAgent(BaseAgent):
         except ValidationError as e:
             self.logger.error("Pydantic Schema Validation Failed! LLM hallucinated bad structure: %s", str(e))
             return fallback_data
-        except (RuntimeError, ValueError, json.JSONDecodeError) as e:
+        except RuntimeError as e:
+            self.logger.error("Failed to parse or extract JSON from LLM: %s", str(e))
+            self._alert_waterfall_exhausted("literature summarization", project)
+            return fallback_data
+        except (ValueError, json.JSONDecodeError) as e:
             self.logger.error("Failed to parse or extract JSON from LLM: %s", str(e))
             return fallback_data
 
