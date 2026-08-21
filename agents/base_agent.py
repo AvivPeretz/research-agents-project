@@ -130,7 +130,53 @@ class BaseAgent(ABC):
         self.logger = self._setup_logger()
         self._setup_llm()
         self._load_persisted_cooldowns()
+        # Dedup guard for _alert_waterfall_exhausted: a full LLM waterfall exhaustion
+        # is alerted at most once per project per run (not once per call site/paper) so
+        # a project that hits the exhausted waterfall on every LLM call in a run
+        # doesn't spam the admin inbox with a dozen identical alerts. Instance-level
+        # (not class-level, unlike _provider_cooldowns) — each agent instance tracks
+        # its own run independently, which is what "once per project per run" means
+        # for a specific agent's specific degrade-but-continue path.
+        self._waterfall_exhausted_alerted: set = set()
         self.logger.info("Agent '%s' initialized.", self.agent_name)
+
+    def _alert_waterfall_exhausted(self, context: str, project_name: str):
+        """Sends exactly one deduplicated admin alert per run per project when the full
+        LLM waterfall is exhausted for that project. Closes the silent-degradation gap:
+        previously a total waterfall failure fell back to degraded output (whatever this
+        call site's caller does on RuntimeError — e.g. keyword-only search, a system-note
+        placeholder, or simply giving up on this project for the run) with no signal
+        anyone would see. This does not change that degrade-but-continue behavior — a
+        full crash is disproportionate to one LLM call's failure — it only makes sure
+        someone is told.
+
+        Promoted here from LiteratureResearchAgent (which had this same helper as a
+        private, non-shared implementation) once a second and third agent needed the
+        identical pattern — see the stability-hardening backlog note this closes.
+        Dedup key is project_name alone (not (context, project_name)): a project is
+        alerted at most once per run regardless of which LLM call within it exhausted
+        the waterfall first, matching the original LiteratureResearchAgent behavior.
+        """
+        if project_name in self._waterfall_exhausted_alerted:
+            return
+        self._waterfall_exhausted_alerted.add(project_name)
+        notifier = getattr(self, "notifier", None)
+        if not notifier:
+            return
+        try:
+            notifier.send_admin_alert(
+                subject=f"{self.agent_name} — LLM waterfall exhausted: {project_name}",
+                message=(
+                    f"The full LLM provider waterfall was exhausted while processing "
+                    f"project '{project_name}' ({context}). The agent is continuing "
+                    f"with degraded output for this project rather than crashing, but "
+                    f"this project's results for this run may be incomplete or "
+                    f"degraded.\n\n"
+                    f"See {self.agent_name}.log for the full traceback."
+                )
+            )
+        except Exception:
+            pass  # do not let alert failure mask the original degraded-output path
 
     @classmethod
     def _get_db_manager(cls) -> DatabaseManager:
