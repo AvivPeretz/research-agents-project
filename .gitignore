@@ -12,6 +12,9 @@ sync_registry.json
 scholar_state.json
 researchers_map.json
 
+# Run-lock file (fcntl.flock) preventing concurrent main.py invocations
+run.lock
+
 # Persistent Chrome profile — contains Overleaf session credentials
 playwright_state/
 

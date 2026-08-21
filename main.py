@@ -2,6 +2,8 @@ import os
 import logging
 import argparse
 import time
+import fcntl
+import contextlib
 
 # Import the centralized configuration
 from config import Config
@@ -27,6 +29,52 @@ def get_all_active_projects() -> list:
 
 
 _pipeline_logger = logging.getLogger("Pipeline")
+
+
+@contextlib.contextmanager
+def acquire_run_lock(lock_path=None):
+    """Acquire an exclusive, non-blocking run-lock for the duration of a pipeline run.
+
+    Prevents two `main.py` invocations from racing (e.g. a scheduled run
+    overlapping a still-running one, both writing to overleaf_projects/ or
+    sharing one Playwright OVERLEAF_STATE_PATH file).
+
+    Implementation notes (crash-safety):
+      - Uses `fcntl.flock(LOCK_EX | LOCK_NB)` on a dedicated lock file. On
+        POSIX, a flock lock is bound to the (open file description, i.e. the
+        fd created by this `open()` call) for as long as the process holding
+        it is alive. The kernel releases it automatically as soon as every fd
+        referring to that open file description is closed -- which happens
+        unconditionally on process exit, including on crash or SIGKILL. No
+        stale-lock cleanup is required.
+      - This guarantee only holds because the fd is opened fresh here and
+        never duplicated/inherited into a way that would outlive this
+        process's natural lifetime (e.g. no `os.fork` + parent exit while
+        child keeps running, no passing the fd to another long-lived process).
+        Do not refactor this to share the fd across processes.
+      - Non-blocking (`LOCK_NB`) is essential: if the lock is already held we
+        must fail fast and let the caller skip cleanly, not block waiting for
+        the other run to finish (which would just queue up racing runs).
+
+    Yields True if the lock was acquired (caller now holds it and must do its
+    work inside the `with` block), or False if another process already holds
+    it (caller should skip this run, not error).
+    """
+    lock_path = lock_path or Config.RUN_LOCK_PATH
+    lock_file = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Someone else holds the lock right now -- fail fast, don't block.
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
 
 def run_agent_safely(agent, dry_run: bool = False, notifier=None, *args, **kwargs) -> bool:
     """Runs one agent's full cycle. An agent-level exception here means the whole
@@ -98,97 +146,106 @@ def main():
     print(f"\n🚀 Starting ResearchAgents Pipeline | Target Agent: [{args.agent.upper()}] | Target Project: [{args.project}]\n")
 
     # ==========================================
-    # 2. Setup & Validation
+    # 1b. Run-Lock (mutual exclusion across invocations)
     # ==========================================
-    Config.validate()
+    with acquire_run_lock() as _lock_acquired:
+        if not _lock_acquired:
+            print("--- \u23ed\ufe0f Another run is already in progress (run-lock held). Skipping this run. ---")
+            _pipeline_logger.info("Run lock at %s already held by another process; exiting cleanly.", Config.RUN_LOCK_PATH)
+            return
 
-    print("--- Initializing Shared Services (Notification Agent) ---")
-    db = DatabaseManager()
-    notifier = NotificationAgent(db=db)
+        # ==========================================
+        # 2. Setup & Validation
+        # ==========================================
+        Config.validate()
+
+        print("--- Initializing Shared Services (Notification Agent) ---")
+        db = DatabaseManager()
+        notifier = NotificationAgent(db=db)
     
-    if db.get_project_count() == 0:
-        db.migrate_from_json(str(Config.RESEARCHERS_MAP_PATH))
-        print("--- DB Migration Completed ---\n")
-    else:
-        print("--- DB already populated, skipping JSON migration ---\n")
+        if db.get_project_count() == 0:
+            db.migrate_from_json(str(Config.RESEARCHERS_MAP_PATH))
+            print("--- DB Migration Completed ---\n")
+        else:
+            print("--- DB already populated, skipping JSON migration ---\n")
 
-    # Determine scope based on CLI args
-    all_projects = get_all_active_projects()
-    target_projects = all_projects if args.project == 'all' else [args.project]
-    updated_projects = []
+        # Determine scope based on CLI args
+        all_projects = get_all_active_projects()
+        target_projects = all_projects if args.project == 'all' else [args.project]
+        updated_projects = []
 
-    # ==========================================
-    # 3. Agent Execution Logic
-    # ==========================================
+        # ==========================================
+        # 3. Agent Execution Logic
+        # ==========================================
 
-    # --- 0. Data Ingestion (Delta Sync) ---
-    if args.agent in ['all', 'ingestion']:
-        print("--- 0. Running Data Ingestion (Delta Sync) ---")
-        scraper = DataIngestionAgent(db=db, notifier=notifier)
-        updated_projects = scraper.sync_all_projects()
+        # --- 0. Data Ingestion (Delta Sync) ---
+        if args.agent in ['all', 'ingestion']:
+            print("--- 0. Running Data Ingestion (Delta Sync) ---")
+            scraper = DataIngestionAgent(db=db, notifier=notifier)
+            updated_projects = scraper.sync_all_projects()
         
-        # If a specific project was requested, filter the updated list
-        if args.project != 'all':
-            updated_projects = [p for p in updated_projects if p == args.project]
+            # If a specific project was requested, filter the updated list
+            if args.project != 'all':
+                updated_projects = [p for p in updated_projects if p == args.project]
 
-        # A brand-new project's first-ever sync downloads it here, but all_projects
-        # was computed before this block ran, so it wouldn't otherwise be considered
-        # a "valid target" for any downstream phase in this same run. Union it in.
-        all_projects = list(set(all_projects) | set(updated_projects))
+            # A brand-new project's first-ever sync downloads it here, but all_projects
+            # was computed before this block ran, so it wouldn't otherwise be considered
+            # a "valid target" for any downstream phase in this same run. Union it in.
+            all_projects = list(set(all_projects) | set(updated_projects))
 
-    # Validate that the targeted projects actually exist before giving them to AI agents
-    valid_targets = [p for p in target_projects if p in all_projects]
-    if not valid_targets and args.agent not in ['gc', 'ingestion', 'supervisor']:
-        print(f"--- ⚠️ No valid projects found matching '{args.project}' in overleaf_projects/. Exiting. ---")
-        return
+        # Validate that the targeted projects actually exist before giving them to AI agents
+        valid_targets = [p for p in target_projects if p in all_projects]
+        if not valid_targets and args.agent not in ['gc', 'ingestion', 'supervisor']:
+            print(f"--- ⚠️ No valid projects found matching '{args.project}' in overleaf_projects/. Exiting. ---")
+            return
 
-    # --- 1. Literature Research Agent ---
-    if args.agent in ['all', 'literature']:
-        # When running 'all', only search literature for projects that actually changed
-        lit_targets = valid_targets if args.agent == 'literature' else [p for p in updated_projects if p in all_projects]
-        if lit_targets:
-            print(f"\n--- 1. Running Literature Research Agent for: {lit_targets} ---")
-            lit_agent = LiteratureResearchAgent(active_projects=lit_targets, notifier=notifier, db=db)
-            run_agent_safely(lit_agent, dry_run=args.dry_run, notifier=notifier)
-        else:
-            print("\n--- No updated projects for Literature Research. Skipping. ---")
+        # --- 1. Literature Research Agent ---
+        if args.agent in ['all', 'literature']:
+            # When running 'all', only search literature for projects that actually changed
+            lit_targets = valid_targets if args.agent == 'literature' else [p for p in updated_projects if p in all_projects]
+            if lit_targets:
+                print(f"\n--- 1. Running Literature Research Agent for: {lit_targets} ---")
+                lit_agent = LiteratureResearchAgent(active_projects=lit_targets, notifier=notifier, db=db)
+                run_agent_safely(lit_agent, dry_run=args.dry_run, notifier=notifier)
+            else:
+                print("\n--- No updated projects for Literature Research. Skipping. ---")
     
-    # --- 2. Progress Tracking Agent ---
-    if args.agent in ['all', 'progress']:
-        # If running explicitly via CLI, override the "must be updated" rule to allow force-testing
-        projects_to_track = valid_targets if args.agent == 'progress' else updated_projects
+        # --- 2. Progress Tracking Agent ---
+        if args.agent in ['all', 'progress']:
+            # If running explicitly via CLI, override the "must be updated" rule to allow force-testing
+            projects_to_track = valid_targets if args.agent == 'progress' else updated_projects
         
-        if projects_to_track:
-            print(f"\n--- 2. Running Progress Tracking Agent for: {projects_to_track} 🚀 ---")
-            prog_agent = ProgressTrackingAgent(overleaf_projects=projects_to_track, notifier=notifier, db=db)
-            run_agent_safely(prog_agent, dry_run=args.dry_run, notifier=notifier)
-        else:
-            print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
+            if projects_to_track:
+                print(f"\n--- 2. Running Progress Tracking Agent for: {projects_to_track} 🚀 ---")
+                prog_agent = ProgressTrackingAgent(overleaf_projects=projects_to_track, notifier=notifier, db=db)
+                run_agent_safely(prog_agent, dry_run=args.dry_run, notifier=notifier)
+            else:
+                print("\n--- No Overleaf projects were updated. Skipping Progress Tracking Agent. 😴 ---")
     
-    # --- 3. Research Enhancement Agent ---
-    if args.agent in ['all', 'enhancement']:
-        enh_targets = valid_targets if args.agent == 'enhancement' else [p for p in updated_projects if p in all_projects]
-        if enh_targets:
-            print(f"\n--- 3. Running Research Enhancement Agent for: {enh_targets} 🚀 ---")
-            enhancement_agent = ResearchEnhancementAgent(overleaf_projects=enh_targets, notifier=notifier, db=db)
-            run_agent_safely(enhancement_agent, dry_run=args.dry_run, notifier=notifier)
-        else:
-            print("\n--- No updated projects for Research Enhancement. Skipping. ---")
+        # --- 3. Research Enhancement Agent ---
+        if args.agent in ['all', 'enhancement']:
+            enh_targets = valid_targets if args.agent == 'enhancement' else [p for p in updated_projects if p in all_projects]
+            if enh_targets:
+                print(f"\n--- 3. Running Research Enhancement Agent for: {enh_targets} 🚀 ---")
+                enhancement_agent = ResearchEnhancementAgent(overleaf_projects=enh_targets, notifier=notifier, db=db)
+                run_agent_safely(enhancement_agent, dry_run=args.dry_run, notifier=notifier)
+            else:
+                print("\n--- No updated projects for Research Enhancement. Skipping. ---")
     
-    # --- 4. Supervisor Status Agent ---
-    if args.agent in ['all', 'supervisor']:
-        print(f"\n--- 4. Running Supervisor Status Agent ---")
-        supervisor_agent = SupervisorStatusAgent(db=db, notifier=notifier)
-        run_agent_safely(supervisor_agent, dry_run=args.dry_run, notifier=notifier)
+        # --- 4. Supervisor Status Agent ---
+        if args.agent in ['all', 'supervisor']:
+            print(f"\n--- 4. Running Supervisor Status Agent ---")
+            supervisor_agent = SupervisorStatusAgent(db=db, notifier=notifier)
+            run_agent_safely(supervisor_agent, dry_run=args.dry_run, notifier=notifier)
 
-    # --- 5. System Cleanup (Garbage Collector) ---
-    if args.agent in ['all', 'gc']:
-        print(f"\n--- 5. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
-        gc = GarbageCollector(db=db, retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS, notifier=notifier)
-        run_agent_safely(gc, dry_run=args.dry_run, notifier=notifier)
+        # --- 5. System Cleanup (Garbage Collector) ---
+        if args.agent in ['all', 'gc']:
+            print(f"\n--- 5. Running System Cleanup (Retention Policy: {Config.GARBAGE_COLLECTION_TTL_DAYS} days) 🧹 ---")
+            gc = GarbageCollector(db=db, retention_days=Config.GARBAGE_COLLECTION_TTL_DAYS, notifier=notifier)
+            run_agent_safely(gc, dry_run=args.dry_run, notifier=notifier)
 
-    print(f"\n--- Pipeline completed | Agent={args.agent} | Project={args.project} | Dry-run={args.dry_run} ---")
-    print("\n--- ✅ All Executions Finished Successfully ---")
+        print(f"\n--- Pipeline completed | Agent={args.agent} | Project={args.project} | Dry-run={args.dry_run} ---")
+        print("\n--- ✅ All Executions Finished Successfully ---")
 
 if __name__ == "__main__":
     main()
