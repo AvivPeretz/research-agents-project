@@ -91,6 +91,49 @@ class TestSupervisorStatusAgent:
         supervisor_agent.run()
         # Verify notifier was called (implementation dependent)
 
+    # TEST — FIX 4c: one supervisor's LLM failure must not abort remaining supervisors
+    def test_one_supervisor_llm_failure_does_not_abort_remaining_supervisors(
+        self, supervisor_agent, db_in_memory, mock_notifier
+    ):
+        """2 supervisors, each with 1 student project. The first supervisor's
+        _generate_report_via_llm raises; the second supervisor must still get a
+        report generated and sent, and an admin alert must fire for the failure."""
+        sup_fail = "prof.fail@university.edu"
+        sup_ok = "prof.ok@university.edu"
+
+        db_in_memory.add_project("Project_Fail", "student1@university.edu")
+        db_in_memory.update_project_state(
+            "Project_Fail", supervisor_email=sup_fail, student_name="Student Fail"
+        )
+        db_in_memory.add_project("Project_Ok", "student2@university.edu")
+        db_in_memory.update_project_state(
+            "Project_Ok", supervisor_email=sup_ok, student_name="Student Ok"
+        )
+
+        def fake_generate_report(supervisor_email, projects_metrics):
+            if supervisor_email == sup_fail:
+                raise RuntimeError("Simulated LLM failure for first supervisor")
+            from tests.fixtures.mock_responses import VALID_SUPERVISOR_JSON
+            from domain.schemas import SupervisorReport
+            return SupervisorReport.model_validate_json(VALID_SUPERVISOR_JSON)
+
+        with patch.object(
+            supervisor_agent, "_generate_report_via_llm", side_effect=fake_generate_report
+        ):
+            supervisor_agent.run()
+
+        # The second (successful) supervisor's report must still have been sent,
+        # despite the first supervisor's failure.
+        sent_to = [
+            c.kwargs.get("supervisor_email", c.args[0] if c.args else None)
+            for c in mock_notifier.send_supervisor_report.call_args_list
+        ]
+        assert sup_ok in sent_to
+        assert sup_fail not in sent_to
+
+        # An admin alert must have been sent for the failing supervisor.
+        assert mock_notifier.send_admin_alert.called
+
 
 class TestSupervisorCLIDispatch:
     """Tests that --agent supervisor dispatches to SupervisorStatusAgent.run()."""
