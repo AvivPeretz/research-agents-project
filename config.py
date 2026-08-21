@@ -67,8 +67,15 @@ class Config:
     # Live-verified: 5 requests/minute, 2,400 requests/day (operator dashboard).
     CEREBRAS_RATE_LIMIT_RPM = 5
     # Proactive client-side ceiling used by the Cerebras concurrency guard in
-    # base_agent.py — deliberately below the live 5 rpm limit to leave headroom for
-    # clock-boundary/timing-window slop rather than racing the real ceiling exactly.
+    # base_agent.py (_SlidingWindowLimiter) — deliberately below the live 5 rpm limit
+    # to leave headroom for clock-boundary/timing-window slop rather than racing the
+    # real ceiling exactly.
+    # NOTE: this limiter's window is held in-process only (not persisted, unlike
+    # llm_provider_cooldowns) — correct for today's one-process-per-run architecture,
+    # but a future per-project-container deployment would give each container its own
+    # independent window, so N containers could collectively exceed the real 5rpm
+    # ceiling by up to Nx. See the "IMPORTANT" note on _SlidingWindowLimiter in
+    # base_agent.py before assuming this is already cross-process-safe.
     CEREBRAS_SAFE_RPM = 4
 
     # NVIDIA NIM — model id and base URL confirmed live (2026-08-21) via

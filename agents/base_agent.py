@@ -22,7 +22,25 @@ class _SlidingWindowLimiter:
     per-project LLM calls via ThreadPoolExecutor, and a burst of even a handful of
     simultaneous fallbacks to a 5-requests/minute provider would blow through that
     ceiling on the very first burst under real concurrent load, not as a rare edge
-    case. See Cerebras usage in BaseAgent for the specific justification."""
+    case. See Cerebras usage in BaseAgent for the specific justification.
+
+    IMPORTANT — PROCESS-SCOPED ONLY, NOT CROSS-PROCESS: this window lives entirely
+    in this process's memory (a plain list guarded by a threading.Lock), the same as
+    _provider_cooldowns was before this task added SQLite-backed persistence for it.
+    Unlike _provider_cooldowns, this limiter's state is deliberately NOT persisted —
+    it protects a fast-moving per-minute window, not a slow cooldown, so cross-process
+    sharing would need a shared, low-latency, atomically-updated store (e.g. a DB row
+    updated per request), which is a meaningfully bigger piece of work than the
+    cooldown table. Today, with one long-lived process handling every project in a
+    run, one shared in-memory window is correct and sufficient. If/when this migrates
+    to per-project-per-agent containers (the same future architecture the cooldown-
+    persistence work in this task was built to survive), each container would get its
+    OWN independent window — N concurrent containers could then send up to
+    N * max_requests per minute against Cerebras's real ceiling, silently defeating
+    this guard. That migration must not assume this limiter already handles it; it
+    will need to move to a shared store (the llm_provider_cooldowns table's pattern is
+    a reasonable model) before per-container deployment goes live with Cerebras in the
+    waterfall."""
 
     def __init__(self, max_requests: int, window_seconds: float):
         self.max_requests = max_requests
@@ -70,6 +88,13 @@ class BaseAgent(ABC):
     # Cerebras-specific proactive concurrency guard — see _SlidingWindowLimiter and the
     # Cerebras branch of _ask_provider for the full reasoning. Scoped ONLY to Cerebras;
     # no other provider has a live-verified limit this low.
+    # PER-PROCESS ONLY — see the "IMPORTANT" note on _SlidingWindowLimiter above. This
+    # single shared instance is correct for today's one-process-per-run architecture;
+    # it does NOT hold under a future per-project-container deployment (each container
+    # would get its own independent window, so N containers could collectively exceed
+    # Cerebras's real 5rpm ceiling by up to Nx). Not persisted to SQLite like
+    # _provider_cooldowns — this window would need a shared, low-latency store to be
+    # made cross-process-safe, which is out of scope for this task.
     _cerebras_rate_limiter = _SlidingWindowLimiter(
         max_requests=Config.CEREBRAS_SAFE_RPM, window_seconds=60.0
     )
@@ -394,8 +419,18 @@ class BaseAgent(ABC):
                     is_auth_error = "401" in err_str or "403" in err_str or "invalid_api_key" in err_str or "Incorrect API key" in err_str
                     has_413 = "413" in err_str
                     is_context_length_error = "context_length_exceeded" in lowered_err or "maximum context length" in lowered_err
+                    # NOTE: markers are deliberately specific multi-word phrases, not a
+                    # bare "rate" substring — "rate" alone false-positives on ordinary
+                    # English words like "generate", "accurate", "separate", "moderate"
+                    # that show up in genuinely permanent oversized-request messages
+                    # (e.g. "request too large to generate a response"). A false match
+                    # here would put a healthy provider into a bogus cooldown that then
+                    # gets persisted to SQLite, so a cold-started process would honor a
+                    # cooldown that was never real.
                     is_rate_shaped_413 = has_413 and not is_context_length_error and any(
-                        marker in lowered_err for marker in ("tokens per minute", "tpm", "rate")
+                        marker in lowered_err for marker in (
+                            "tokens per minute", "tpm", "rate limit", "per minute", "requests per"
+                        )
                     )
 
                     if is_rate_shaped_413:

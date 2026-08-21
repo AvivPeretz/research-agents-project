@@ -47,16 +47,47 @@ class TestSizeErrorReclassification:
 
         assert agent._provider_cooldowns.get("groq") is not None
 
-    def test_413_with_rate_word_starts_cooldown(self):
+    def test_413_with_rate_limit_phrase_starts_cooldown(self):
         agent = _make_stub_agent()
         agent.groq_client.chat.completions.create.side_effect = Exception(
-            "413 Payload Too Large: rate ceiling exceeded for this model"
+            "413 Payload Too Large: rate limit ceiling exceeded for this model"
         )
         with patch("agents.base_agent.time.sleep"):
             with pytest.raises(RuntimeError):
                 agent.ask_llm("prompt")
 
         assert agent._provider_cooldowns.get("groq") is not None
+
+    def test_413_with_requests_per_phrase_starts_cooldown(self):
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception(
+            "413 - too many requests per minute for this model"
+        )
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("groq") is not None
+
+    @pytest.mark.parametrize("message", [
+        "413 - request too large to generate a response for this model",
+        "413 - the accurate token count exceeds the model limit",
+        "413 - please separate your request into smaller chunks",
+        "413 - a moderate reduction in prompt size is required",
+    ])
+    def test_413_with_bare_rate_substring_words_stays_permanent(self, message):
+        """Regression test: the classifier must not false-positive on ordinary English
+        words that merely CONTAIN the substring 'rate' (generate, accurate, separate,
+        moderate). A bare `"rate" in lowered_err` check previously misclassified these
+        genuinely permanent oversized-request errors as transient, which would put a
+        healthy provider into a bogus (and persisted) cooldown."""
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception(message)
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("groq") is None
 
     def test_413_with_context_length_exceeded_stays_permanent(self):
         """A genuinely oversized single request must NOT start a cooldown — chunking
