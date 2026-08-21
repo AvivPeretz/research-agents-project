@@ -24,6 +24,8 @@ Two layers are covered:
    case.
 """
 
+import errno
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -59,6 +61,39 @@ class TestAcquireRunLock:
         with acquire_run_lock(lock_path) as acquired:
             assert acquired is True
             assert lock_path.exists()
+
+    @pytest.mark.parametrize("contention_errno", [errno.EACCES, errno.EAGAIN])
+    def test_contention_errnos_are_treated_as_lock_held(self, tmp_path, contention_errno):
+        """The specific errnos POSIX defines for LOCK_NB contention must be
+        downgraded to a clean 'lock held' (False) result, not propagated."""
+        from main import acquire_run_lock
+
+        lock_path = tmp_path / "run.lock"
+
+        with patch(
+            "main.fcntl.flock",
+            side_effect=OSError(contention_errno, "simulated contention"),
+        ):
+            with acquire_run_lock(lock_path) as acquired:
+                assert acquired is False
+
+    def test_non_contention_oserror_propagates_instead_of_being_swallowed(self, tmp_path):
+        """A genuine I/O failure (e.g. lock file unwritable, filesystem doesn't
+        support flock) must NOT be silently downgraded to 'lock held' -- it's a
+        real failure and must surface as an exception, not a routine skip."""
+        from main import acquire_run_lock
+
+        lock_path = tmp_path / "run.lock"
+
+        with patch(
+            "main.fcntl.flock",
+            side_effect=OSError(errno.EIO, "simulated real I/O failure"),
+        ):
+            with pytest.raises(OSError) as exc_info:
+                with acquire_run_lock(lock_path):
+                    pass  # pragma: no cover -- should never be entered
+
+            assert exc_info.value.errno == errno.EIO
 
 
 class TestMainRunLockIntegration:

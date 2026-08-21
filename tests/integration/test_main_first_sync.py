@@ -26,6 +26,11 @@ class TestMainFirstSync:
         monkeypatch.setattr(Config, "OVERLEAF_DIR", str(overleaf_dir))
         # overleaf_projects/ starts out not existing at all -> get_all_active_projects() returns []
 
+        # Use a tmp_path-scoped run-lock, not the real project-root run.lock --
+        # otherwise this test would race/contend with a real main.py invocation
+        # on the lab server (or any other test acquiring the real lock).
+        monkeypatch.setattr(Config, "RUN_LOCK_PATH", tmp_path / "run.lock")
+
         monkeypatch.setattr(
             "sys.argv",
             ["main.py", "--project", "brand_new_project", "--agent", "all"],
@@ -68,6 +73,10 @@ class TestMainFirstSync:
         overleaf_dir = tmp_path / "overleaf_projects"
         overleaf_dir.mkdir(parents=True)
         monkeypatch.setattr(Config, "OVERLEAF_DIR", str(overleaf_dir))
+        # Use a tmp_path-scoped run-lock, not the real project-root run.lock --
+        # otherwise this test would race/contend with a real main.py invocation
+        # on the lab server (or any other test acquiring the real lock).
+        monkeypatch.setattr(Config, "RUN_LOCK_PATH", tmp_path / "run.lock")
         monkeypatch.setattr("sys.argv", ["main.py", "--agent", "gc"])
 
         mock_db = MagicMock()

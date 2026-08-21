@@ -2,6 +2,7 @@ import os
 import logging
 import argparse
 import time
+import errno
 import fcntl
 import contextlib
 
@@ -55,6 +56,15 @@ def acquire_run_lock(lock_path=None):
       - Non-blocking (`LOCK_NB`) is essential: if the lock is already held we
         must fail fast and let the caller skip cleanly, not block waiting for
         the other run to finish (which would just queue up racing runs).
+      - Only the specific errnos POSIX defines for "lock already held under
+        LOCK_NB" (`EACCES`/`EAGAIN`, exposed as `BlockingIOError` by Python's
+        OSError subclassing) are treated as "someone else is running" and
+        downgraded to an INFO-level skip. Any other `OSError` (e.g. the lock
+        file becomes unwritable, or the filesystem doesn't support flock) is
+        a genuine failure, not routine contention, and must not be silently
+        swallowed into the same "lock held" path -- it propagates to the
+        caller instead, so it surfaces as a loud failure (uncaught exception)
+        rather than being misreported as "a run was already in progress".
 
     Yields True if the lock was acquired (caller now holds it and must do its
     work inside the `with` block), or False if another process already holds
@@ -65,10 +75,14 @@ def acquire_run_lock(lock_path=None):
     try:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            # Someone else holds the lock right now -- fail fast, don't block.
-            yield False
-            return
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN):
+                # Someone else holds the lock right now -- fail fast, don't block.
+                yield False
+                return
+            # A genuine I/O failure (not routine contention) -- don't
+            # misreport this as "lock held", let it propagate as a real error.
+            raise
         try:
             yield True
         finally:
