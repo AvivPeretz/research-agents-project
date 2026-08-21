@@ -131,6 +131,11 @@ def main():
         if args.project != 'all':
             updated_projects = [p for p in updated_projects if p == args.project]
 
+        # A brand-new project's first-ever sync downloads it here, but all_projects
+        # was computed before this block ran, so it wouldn't otherwise be considered
+        # a "valid target" for any downstream phase in this same run. Union it in.
+        all_projects = list(set(all_projects) | set(updated_projects))
+
     # Validate that the targeted projects actually exist before giving them to AI agents
     valid_targets = [p for p in target_projects if p in all_projects]
     if not valid_targets and args.agent not in ['gc', 'ingestion', 'supervisor']:
