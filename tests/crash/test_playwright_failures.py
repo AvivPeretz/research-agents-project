@@ -334,8 +334,6 @@ class TestPlaywrightFailures:
         """Missing session file fails the pre-run health check and aborts the sync
         with an admin alert — no interactive login is launched automatically on the
         unattended scheduled path."""
-        # profile_dir deliberately absent — profile check will fail
-        profile_dir = str(tmp_path / "nonexistent_profile")
         downloads_dir = str(tmp_path / "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
 
@@ -345,7 +343,6 @@ class TestPlaywrightFailures:
         state_file = str(tmp_path / "nonexistent_state.json")
 
         with patch.object(Config, "OVERLEAF_DIR", downloads_dir), \
-             patch.object(Config, "OVERLEAF_USER_DATA_DIR", profile_dir), \
              patch.object(Config, "OVERLEAF_STATE_PATH", state_file), \
              patch.object(Config, "PLAYWRIGHT_HEADLESS", True), \
              patch.object(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000):
@@ -432,3 +429,19 @@ class TestSessionHealthCheck:
         agent.notifier.send_admin_alert.assert_called_once()
         subject = agent.notifier.send_admin_alert.call_args.kwargs.get("subject", "")
         assert "Overleaf" in subject and "Session" in subject
+
+    def test_unhealthy_session_alert_gives_exact_recovery_command(self, agent):
+        """The admin alert fired on a failed pre-flight session check must state the
+        exact recovery command an operator needs to run, not just a vague "manual
+        login required" -- this is what makes the alert actionable and shrinks
+        mean-time-to-recovery (stability-hardening task 5b)."""
+        with patch("ingestion.data_ingestion_agent.sync_playwright") as mock_pw, \
+             patch.object(agent, "_perform_manual_login") as mock_login:
+            mock_pw.side_effect = AssertionError("no session file -- sync_playwright should not be invoked")
+            result = agent.sync_all_projects()
+
+        mock_login.assert_not_called()
+        assert result == []
+        agent.notifier.send_admin_alert.assert_called_once()
+        message = agent.notifier.send_admin_alert.call_args.kwargs.get("message", "")
+        assert "python3 reauth_overleaf.py" in message

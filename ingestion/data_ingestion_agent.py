@@ -422,6 +422,18 @@ class DataIngestionAgent:
 
             except Exception as e:
                 print(f"❌ Sync failed: {e}")
+                self.logger.error("Sync cycle failed: %s", str(e), exc_info=True)
+                if self.notifier:
+                    try:
+                        self.notifier.send_admin_alert(
+                            subject="DataIngestionAgent — Sync Cycle Failed",
+                            message=(
+                                "The Overleaf sync cycle failed with an unhandled "
+                                f"error outside the per-project loop.\n\nError: {str(e)}"
+                            )
+                        )
+                    except Exception:
+                        pass  # Do not let alert failure mask the original error
             finally:
                 context.close()
                 browser.close()

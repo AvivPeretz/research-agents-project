@@ -217,49 +217,75 @@ class SupervisorStatusAgent(BaseAgent):
                 return
 
             for sup_email, projects in projects_by_sup.items():
-                if self.db:
-                    self.db.log_agent_run(
-                        agent_name=self.agent_name,
-                        project_name=sup_email,
-                        status="STARTED",
-                        started_at=datetime.now().isoformat()
-                    )
-                self.logger.info("Processing %d projects for supervisor: %s", len(projects), sup_email)
-
-                metrics_list = []
-                for proj in projects:
-                    if not proj.get('student_name'):
-                        self.logger.info(
-                            "Skipping project '%s' — no student_name assigned.", proj['project_name']
+                try:
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=sup_email,
+                            status="STARTED",
+                            started_at=datetime.now().isoformat()
                         )
-                        continue
-                    metrics = self._calculate_project_metrics(proj['project_name'], proj['created_at'])
-                    metrics['student_name'] = proj['student_name']
-                    metrics_list.append(metrics)
+                    self.logger.info("Processing %d projects for supervisor: %s", len(projects), sup_email)
 
-                if not metrics_list:
-                    self.logger.info("No projects with assigned students for supervisor %s. Skipping.", sup_email)
-                    continue
-                
-                # 1. Send metrics to LLM to get the Pydantic structured report
-                report_obj = self._generate_report_via_llm(sup_email, metrics_list)
-                
-                # 2. Convert Pydantic object to Markdown
-                markdown_content = self._format_to_markdown(report_obj, metrics_list)
-                
-                # 3. Send email via NotificationAgent
-                self.logger.info("Dispatching email report to %s...", sup_email)
-                self.notifier.send_supervisor_report(
-                    supervisor_email=sup_email,
-                    md_content=markdown_content
-                )
-                if self.db:
-                    self.db.log_agent_run(
-                        agent_name=self.agent_name,
-                        project_name=sup_email,
-                        status="SUCCESS",
-                        finished_at=datetime.now().isoformat()
+                    metrics_list = []
+                    for proj in projects:
+                        if not proj.get('student_name'):
+                            self.logger.info(
+                                "Skipping project '%s' — no student_name assigned.", proj['project_name']
+                            )
+                            continue
+                        metrics = self._calculate_project_metrics(proj['project_name'], proj['created_at'])
+                        metrics['student_name'] = proj['student_name']
+                        metrics_list.append(metrics)
+
+                    if not metrics_list:
+                        self.logger.info("No projects with assigned students for supervisor %s. Skipping.", sup_email)
+                        continue
+
+                    # 1. Send metrics to LLM to get the Pydantic structured report
+                    report_obj = self._generate_report_via_llm(sup_email, metrics_list)
+
+                    # 2. Convert Pydantic object to Markdown
+                    markdown_content = self._format_to_markdown(report_obj, metrics_list)
+
+                    # 3. Send email via NotificationAgent
+                    self.logger.info("Dispatching email report to %s...", sup_email)
+                    self.notifier.send_supervisor_report(
+                        supervisor_email=sup_email,
+                        md_content=markdown_content
                     )
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=sup_email,
+                            status="SUCCESS",
+                            finished_at=datetime.now().isoformat()
+                        )
+                except Exception as e:
+                    self.logger.error(
+                        "SupervisorStatusAgent failed to process supervisor %s: %s",
+                        sup_email, str(e), exc_info=True
+                    )
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=sup_email,
+                            status="FAILURE",
+                            finished_at=datetime.now().isoformat()
+                        )
+                    if self.notifier:
+                        try:
+                            self.notifier.send_admin_alert(
+                                subject="SupervisorStatusAgent — Supervisor Report Failed",
+                                message=(
+                                    f"SupervisorStatusAgent failed to generate/send the report for "
+                                    f"supervisor '{sup_email}'. Continuing with remaining supervisors."
+                                    f"\n\nError: {str(e)}"
+                                )
+                            )
+                        except Exception:
+                            pass  # Do not let alert failure mask the original error
+                    continue
 
         except Exception as e:
             self.logger.error("SupervisorStatusAgent encountered a critical error: %s", str(e), exc_info=True)
