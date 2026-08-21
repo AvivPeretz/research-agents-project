@@ -30,7 +30,6 @@ class Config:
     RESEARCHERS_MAP_PATH = BASE_DIR / "researchers_map.json"
     SCHOLAR_STATE_PATH = BASE_DIR / "scholar_state.json"
     OVERLEAF_STATE_PATH = BASE_DIR / "overleaf_state.json"
-    OVERLEAF_USER_DATA_DIR: str = str(BASE_DIR / "playwright_state" / "overleaf_profile")
     # Run-lock file (fcntl.flock) preventing two concurrent main.py invocations
     # (e.g. a scheduled run overlapping a still-running one) from racing.
     RUN_LOCK_PATH = BASE_DIR / "run.lock"

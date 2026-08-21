@@ -116,7 +116,6 @@ class TestDataIngestionAgent:
         os.makedirs(downloads_dir, exist_ok=True)
 
         monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", str(tmp_path / "profile"))
         monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "SCHOLAR_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
@@ -146,7 +145,6 @@ class TestDataIngestionAgent:
     def test_db_none_aborts_and_returns_empty_list(self, mock_notifier, monkeypatch):
         """sync_all_projects() returns [] immediately when db is None."""
         monkeypatch.setattr(Config, "OVERLEAF_DIR", "/tmp/_dia_test_downloads")
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", "/tmp/_dia_test_profile")
         a = DataIngestionAgent(db=None, notifier=mock_notifier)
         result = a.sync_all_projects()
         assert result == []

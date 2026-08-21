@@ -334,8 +334,6 @@ class TestPlaywrightFailures:
         """Missing session file fails the pre-run health check and aborts the sync
         with an admin alert — no interactive login is launched automatically on the
         unattended scheduled path."""
-        # profile_dir deliberately absent — profile check will fail
-        profile_dir = str(tmp_path / "nonexistent_profile")
         downloads_dir = str(tmp_path / "downloads")
         os.makedirs(downloads_dir, exist_ok=True)
 
@@ -345,7 +343,6 @@ class TestPlaywrightFailures:
         state_file = str(tmp_path / "nonexistent_state.json")
 
         with patch.object(Config, "OVERLEAF_DIR", downloads_dir), \
-             patch.object(Config, "OVERLEAF_USER_DATA_DIR", profile_dir), \
              patch.object(Config, "OVERLEAF_STATE_PATH", state_file), \
              patch.object(Config, "PLAYWRIGHT_HEADLESS", True), \
              patch.object(Config, "PLAYWRIGHT_TIMEOUT_MS", 30000):
