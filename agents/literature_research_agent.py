@@ -261,7 +261,7 @@ class LiteratureResearchAgent(BaseAgent):
                     all_papers.append(paper)
 
         all_papers = self._filter_relevant_papers(project, text, all_papers)
-        all_papers = all_papers[:15]
+        all_papers = all_papers[:Config.MAX_LITERATURE_PAPERS]
 
         if not all_papers:
             self.logger.warning(
@@ -355,7 +355,7 @@ class LiteratureResearchAgent(BaseAgent):
 
     def run(self):
         self.logger.info("Starting the literature research cycle.")
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=getattr(Config, 'LITERATURE_MAX_WORKERS', 4)) as executor:
             futures = {executor.submit(self._process_project, p): p for p in self.projects}
             for future in as_completed(futures):
                 project = futures[future]
