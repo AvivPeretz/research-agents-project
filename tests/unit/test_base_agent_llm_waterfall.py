@@ -342,3 +342,149 @@ class TestNewProviders:
             result = agent.ask_llm("prompt")
 
         assert result == "openai last resort"
+
+
+# ---------------------------------------------------------------------------
+# 5. Permanent quota exhaustion vs. renewing quota (Task 2, Cerebras-removal
+#    follow-up): a bare "quota" substring must not send a permanently
+#    exhausted billing allowance down the same cooldown path as a renewing
+#    per-minute/per-day rate limit.
+# ---------------------------------------------------------------------------
+
+class TestPermanentQuotaExhaustion:
+    def test_openai_insufficient_quota_skips_retries_with_no_cooldown(self):
+        """Real OpenAI insufficient_quota error shape (documented format at
+        https://platform.openai.com/docs/guides/error-codes/api-errors, matching what
+        this project's own logs have previously captured for this failure class): an
+        exhausted billing allowance with no automatic reset. Must NOT start a cooldown
+        — cooldowns mean "try again later," which is wrong when the actual fix is a
+        human adding billing/credits."""
+        agent = _make_stub_agent()
+        agent.openai_available = True
+        agent.openai_client = MagicMock()
+        agent._providers_waterfall = ["groq", "openai"]
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.openai_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - {'error': {'message': 'You exceeded your current quota, "
+            "please check your plan and billing details. For more information on this "
+            "error, read the docs: https://platform.openai.com/docs/guides/error-codes/"
+            "api-errors.', 'type': 'insufficient_quota', 'param': None, "
+            "'code': 'insufficient_quota'}}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("openai") is None
+
+    def test_402_payment_required_with_param_quota_skips_retries_with_no_cooldown(self):
+        """Real, verbatim error text from this project's own logs/LiveProbeAgent.log:36
+        (from the now-removed Cerebras integration; the error SHAPE is what's under
+        test, not the provider). This is exactly the failure mode the bug describes: a
+        bare "quota" substring (here via 'param': 'quota') sitting inside a genuinely
+        permanent 402 payment_required billing error. Reused against the "openai"
+        provider slot to prove the classifier is provider-agnostic."""
+        agent = _make_stub_agent()
+        agent.openai_available = True
+        agent.openai_client = MagicMock()
+        agent._providers_waterfall = ["groq", "openai"]
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.openai_client.chat.completions.create.side_effect = Exception(
+            "Error code: 402 - {'message': 'Payment required to access this resource. "
+            "Visit your billing tab.', 'type': 'payment_required_error', "
+            "'param': 'quota', 'code': 'payment_required'}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("openai") is None
+
+    def test_renewing_daily_quota_still_enters_cooldown_no_regression(self):
+        """Groq's real daily-rate-limit error format (per Groq's own rate-limit docs:
+        https://console.groq.com/docs/rate-limits — 429 responses name the specific
+        limit type, e.g. "Rate limit reached for ... Limit 14400, Used 14400,
+        Requested 1. Please try again in ... or upgrade")..."""
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - {'error': {'message': 'Rate limit reached for "
+            "requests-per-day in organization org_xxx on tokens per day (TPD): "
+            "Limit 14400, Used 14400, Requested 1. Please try again in 1m4s or "
+            "upgrade your plan.', 'type': 'requests', 'code': 'rate_limit_exceeded'}}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("groq") is not None
+
+    def test_gemini_per_minute_quota_still_enters_cooldown_no_regression(self):
+        """Gemini's real quota-exceeded error format (per Google's documented Gemini
+        API error shape: a RESOURCE_EXHAUSTED 429 whose message names a specific
+        per-minute quota metric). Must still enter cooldown, unchanged from before."""
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception(
+            "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+            "'Resource has been exhausted (e.g. check quota). You exceeded your "
+            "current quota, please check your plan and billing details... "
+            "generate_content_requests_per_minute_per_project_per_model limit: 15, "
+            "please retry in 42 seconds.', 'status': 'RESOURCE_EXHAUSTED'}}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("groq") is not None
+
+    def test_openai_permanent_quota_as_last_provider_reaches_full_exhaustion_path(self):
+        """OpenAI is the last waterfall tier. A permanent quota exhaustion there (not a
+        cooldown, since is_permanent_quota_error takes precedence) must still fall
+        through the per-provider loop to the same "All available LLM providers have
+        been exhausted" / RuntimeError('CRITICAL: All LLM providers exhausted...')
+        path that a real 429/413/auth failure would reach — this is the path that
+        agent call sites use to trigger _alert_waterfall_exhausted. A silent early-exit
+        that skipped this would mean OpenAI's real insufficient_quota failures never
+        page anyone."""
+        agent = _make_stub_agent()
+        agent.openai_available = True
+        agent.openai_client = MagicMock()
+        agent._providers_waterfall = ["groq", "openai"]
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.openai_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - {'error': {'message': 'You exceeded your current quota, "
+            "please check your plan and billing details.', "
+            "'type': 'insufficient_quota', 'code': 'insufficient_quota'}}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError, match="CRITICAL: All LLM providers exhausted"):
+                agent.ask_llm("prompt")
+
+        # Neither provider should be left with a cooldown: groq failed generically
+        # (not rate-limit-shaped) and openai failed permanently — neither case starts
+        # a cooldown timer.
+        assert agent._provider_cooldowns.get("openai") is None
+
+    def test_alert_dedup_guard_fires_on_last_provider_permanent_quota_exhaustion(self, mock_notifier):
+        """End-to-end through a real agent call site: when the LAST waterfall provider
+        fails with a permanent quota error, ask_llm still raises the same RuntimeError
+        shape that literature_research_agent.py's call site catches to invoke
+        _alert_waterfall_exhausted — confirming the alerting path (added in a prior
+        session for Issue 3) is still reached for this failure class."""
+        from agents.literature_research_agent import LiteratureResearchAgent
+
+        agent = LiteratureResearchAgent(active_projects=["ProjectA"], notifier=mock_notifier)
+        with patch.object(
+            agent, "ask_llm",
+            side_effect=RuntimeError(
+                "CRITICAL: All LLM providers exhausted. Tried: groq, gemini, "
+                "nvidia_nim, openai. Check API keys and rate limits."
+            )
+        ):
+            agent.extract_keywords_from_text("ProjectA", "some manuscript text")
+
+        assert mock_notifier.send_admin_alert.call_count == 1

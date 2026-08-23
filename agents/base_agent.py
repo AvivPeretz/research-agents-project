@@ -364,6 +364,46 @@ class BaseAgent(ABC):
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
                     err_str = str(e)
+                    lowered_err_early = err_str.lower()
+
+                    # A bare "quota" substring (caught by _is_rate_limit_error below)
+                    # conflates two very different situations: a renewing quota (daily/
+                    # per-minute request caps that reset on their own — correctly
+                    # transient) and an exhausted billing allowance with no automatic
+                    # reset (OpenAI's real insufficient_quota error, or a 402
+                    # payment_required-class response — permanent until a human adds
+                    # billing/credits). Markers here are deliberately specific
+                    # multi-word/structured phrases, not the bare word "quota", mirroring
+                    # the is_rate_shaped_413 pattern below: a real OpenAI insufficient_quota
+                    # error reads "You exceeded your current quota, please check your plan
+                    # and billing details ... 'type': 'insufficient_quota' ... 'code':
+                    # 'insufficient_quota'"; a real 402 payment-required error (logged by
+                    # this project's own LiveProbeAgent) reads "Payment required to access
+                    # this resource ... 'type': 'payment_required_error' ... 'code':
+                    # 'payment_required'". Neither of those should ever start a cooldown —
+                    # cooldowns mean "try again later," which is wrong when the fix is a
+                    # human adding billing, not waiting.
+                    #
+                    # Deliberately NOT included as a standalone marker: the generic
+                    # "check your plan and billing details" sentence. Both OpenAI and
+                    # Gemini attach that exact boilerplate to effectively all quota-style
+                    # 429s — including ordinary renewing per-minute/per-day limits, not
+                    # just genuinely exhausted billing — so alone it is not a reliable
+                    # permanent-vs-transient signal and would overcorrect. It's only
+                    # trustworthy combined with a structured code/type field
+                    # ("insufficient_quota") or an actual 402 status, both handled below.
+                    is_permanent_quota_error = (
+                        "insufficient_quota" in lowered_err_early
+                        or "payment_required" in lowered_err_early
+                        or ("402" in err_str and "quota" in lowered_err_early)
+                    )
+                    if is_permanent_quota_error:
+                        self.logger.error(
+                            "[%s] Permanent quota/billing exhaustion (not a renewing rate "
+                            "limit) — skipping retries for this provider, no cooldown.",
+                            provider.upper()
+                        )
+                        break
 
                     if self._is_rate_limit_error(err_str):
                         cooldown = self._start_provider_cooldown(provider)
