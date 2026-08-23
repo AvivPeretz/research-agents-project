@@ -46,7 +46,7 @@ class Config:
     LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", LLM_MODEL_NAME)
     
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    GEMINI_MODEL_NAME = "gemini-1.5-flash"
+    GEMINI_MODEL_NAME = "gemini-2.5-flash"
     
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL_NAME = "gpt-4o-mini"
