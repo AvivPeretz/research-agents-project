@@ -155,9 +155,10 @@ exponential-backoff retry logic, and rotating file logging.
 ### Infrastructure
 **`BaseAgent`** (`agents/base_agent.py`) — abstract base class for all LLM agents.
 
-- **Multi-LLM Waterfall**: tries Groq (primary) → Gemini (fallback 1) → OpenAI
-  (fallback 2). Each provider gets up to 3 retries with exponential backoff before the
-  waterfall advances. Permanent auth/context-size errors skip retries immediately.
+- **Multi-LLM Waterfall**: tries Groq (primary) → Gemini (fallback 1) → NVIDIA NIM
+  (fallback 2) → OpenAI (fallback 3). Each provider gets up to 3 retries with
+  exponential backoff before the waterfall advances. Permanent auth/context-size
+  errors skip retries immediately.
 - Raises `RuntimeError` when all providers are exhausted — never returns `None` silently.
 - Sets up a `RotatingFileHandler` (5 MB limit, 3 backups) plus `StreamHandler` for each
   agent, writing to `logs/<AgentName>.log`.
@@ -171,7 +172,7 @@ exponential-backoff retry logic, and rotating file logging.
 | Layer | Technology |
 |---|---|
 | Language | Python 3.10–3.13 |
-| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-1.5-flash`), OpenAI (`gpt-4o-mini`) |
+| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-2.5-flash`), NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`), OpenAI (`gpt-4o-mini`) |
 | LLM contracts | Pydantic v2 |
 | Browser automation | Playwright (Chromium) |
 | Literature search | Semantic Scholar API → SerpAPI → scholarly |
@@ -196,8 +197,9 @@ exponential-backoff retry logic, and rotating file logging.
 | Gmail App Password | — | See [Configuration](#configuration) |
 | An Overleaf account | Free/Pro | Your university Overleaf account |
 
-Gemini and OpenAI API keys are **optional**. They activate as automatic LLM fallbacks
-when Groq is unavailable. The system runs correctly with only Groq configured.
+Gemini, NVIDIA NIM, and OpenAI API keys are **optional**. They activate as automatic
+LLM fallbacks when Groq is unavailable. The system runs correctly with only Groq
+configured.
 
 ---
 
@@ -557,5 +559,5 @@ mitigates this, but cross-agent parallelism is not implemented.
   text + rolling CSV data; activated automatically as fallback when Stanford pipeline fails.
 - [x] **Three-tier literature search** — Semantic Scholar → SerpAPI → scholarly, with
   OpenAlex enrichment and LLM relevance filtering.
-- [x] **Multi-LLM waterfall** — Groq → Gemini → OpenAI with per-provider exponential
-  backoff and automatic failover.
+- [x] **Multi-LLM waterfall** — Groq → Gemini → NVIDIA NIM → OpenAI with per-provider
+  exponential backoff and automatic failover.

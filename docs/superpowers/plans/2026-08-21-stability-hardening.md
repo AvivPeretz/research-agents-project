@@ -92,6 +92,10 @@ def test_waterfall_exhaustion_sends_exactly_one_alert(literature_agent, mock_not
 - [ ] **Step 9: Add the `llm_provider_cooldowns` table** to `utils/database_manager.py`'s schema init, with `get_cooldown(provider)` / `set_cooldown(provider, until)` methods; wire `BaseAgent` to read/write through it instead of the bare class dict. Write a test that restarts a fresh `BaseAgent` instance (simulating cold start) mid-cooldown and confirms the new instance still skips the cooling-down provider.
 - [ ] **Step 10: Run full `tests/unit/test_base_agent_llm_waterfall.py` and existing `tests/crash/` suite** to confirm no regression, then commit.
 
+### Post-implementation update (2026-08-23)
+
+Cerebras was evaluated as a 4th waterfall fallback after this plan was written, integrated (`config.py`, `agents/base_agent.py`), and live-tested end-to-end. It was then **fully removed**: real calls returned a `402 payment_required_error` on every model available to the account, meaning Cerebras's free tier requires billing/credit setup despite the operator's own dashboard advertising usable free-tier quotas — this violates the hard requirement that every fallback provider be usable with zero payment setup. The final waterfall is Groq → Gemini → NVIDIA NIM → OpenAI. This is a permanent decision; do not re-propose Cerebras without new evidence the billing requirement has changed.
+
 ---
 
 ## Task 2: Fix `main.py` first-sync eligibility bug

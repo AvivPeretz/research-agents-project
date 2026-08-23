@@ -31,14 +31,9 @@ def _reset_llm_provider_cooldowns(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "LIBRARY_DIR", str(tmp_path))
     BaseAgent._provider_cooldowns.clear()
     BaseAgent._shared_db_manager = None
-    # _cerebras_rate_limiter is also class-level/shared-per-process by design (same
-    # rationale as _provider_cooldowns), so its sliding window must be reset between
-    # tests too or one test's Cerebras calls would count against another's budget.
-    BaseAgent._cerebras_rate_limiter._timestamps.clear()
     yield
     BaseAgent._provider_cooldowns.clear()
     BaseAgent._shared_db_manager = None
-    BaseAgent._cerebras_rate_limiter._timestamps.clear()
 
 
 @pytest.fixture
