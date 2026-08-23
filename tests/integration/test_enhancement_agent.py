@@ -74,3 +74,40 @@ class TestResearchEnhancementAgent:
         """Asserts that empty review text returns None."""
         result = enhancement_agent._generate_actionable_tasks(project_name=sample_project_name, review_text="")
         assert result is None
+
+    def test_generate_actionable_tasks_alerts_admin_on_waterfall_exhaustion(
+        self, enhancement_agent, mock_notifier, sample_project_name
+    ):
+        """When ask_llm raises RuntimeError (full waterfall exhausted), the method must
+        still return the degraded system-note placeholder (unchanged behavior) AND send
+        exactly one admin alert for the project."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
+            result = enhancement_agent._generate_actionable_tasks(
+                project_name=sample_project_name, review_text="Test review"
+            )
+
+        assert "unable to generate actionable tasks" in result
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert sample_project_name in kwargs["subject"]
+
+    def test_generate_actionable_tasks_dedups_alert_for_same_project(
+        self, enhancement_agent, mock_notifier, sample_project_name
+    ):
+        """Two waterfall-exhaustion failures for the SAME project in one run produce
+        only one admin alert."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+            enhancement_agent._generate_actionable_tasks(project_name=sample_project_name, review_text="review 1")
+            enhancement_agent._generate_actionable_tasks(project_name=sample_project_name, review_text="review 2")
+
+        mock_notifier.send_admin_alert.assert_called_once()
+
+    def test_generate_actionable_tasks_alerts_separately_for_different_projects(
+        self, enhancement_agent, mock_notifier
+    ):
+        """Waterfall-exhaustion failures for DIFFERENT projects each get their own alert."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+            enhancement_agent._generate_actionable_tasks(project_name="ProjectA", review_text="review")
+            enhancement_agent._generate_actionable_tasks(project_name="ProjectB", review_text="review")
+
+        assert mock_notifier.send_admin_alert.call_count == 2

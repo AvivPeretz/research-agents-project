@@ -103,8 +103,12 @@ class ProgressTrackingAgent(BaseAgent):
             
         return {"has_changes": True, "delta_text": delta_text}
 
-    def analyze_delta(self, delta_text: str) -> tuple:
-        """Single LLM call returning (feedback, suggestions) — halves token usage vs two separate calls."""
+    def analyze_delta(self, delta_text: str, project: str = None) -> tuple:
+        """Single LLM call returning (feedback, suggestions) — halves token usage vs two separate calls.
+
+        project is used only to key the waterfall-exhaustion admin alert on RuntimeError
+        (see BaseAgent._alert_waterfall_exhausted) — it does not affect the prompt or the
+        degraded-output return value on failure."""
         self.logger.info("Analyzing Delta (single LLM call for feedback + suggestions)...")
         prompt = f"""
         You are an expert academic reviewer and editor. Review the following NEW ADDITIONS or MODIFICATIONS to a research paper:
@@ -133,6 +137,8 @@ class ProgressTrackingAgent(BaseAgent):
             return feedback, suggestions
         except RuntimeError as e:
             self.logger.error("LLM failed to generate analysis: %s", str(e))
+            if project:
+                self._alert_waterfall_exhausted("delta analysis", project)
             return _error, _error
 
     def _get_writing_velocity(self, project: str, days: int = 7) -> str:
@@ -218,7 +224,7 @@ class ProgressTrackingAgent(BaseAgent):
                 )
                 delta_text = delta_text[:MAX_DELTA_CHARS] + "\n\n[... truncated ...]"
 
-            feedback, suggestions = self.analyze_delta(delta_text)
+            feedback, suggestions = self.analyze_delta(delta_text, project)
 
             self.library.save_tracking_feedback(project, feedback, suggestions)
             self.logger.info("Saved focused feedback and suggestions for %s.", project)

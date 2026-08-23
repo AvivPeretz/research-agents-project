@@ -127,6 +127,68 @@ class TestInternalReviewAgent:
         enhancement_agent.notifier.send_stanford_tasks.assert_not_called()
 
     # ------------------------------------------------------------------
+    # 4b. waterfall-exhaustion admin alerting (uses patch.object on the real
+    # connector, like test 3 above, so the ask_llm call site is actually reached
+    # rather than short-circuiting on the insufficient-text path).
+    # ------------------------------------------------------------------
+    def test_internal_review_alerts_admin_on_waterfall_exhaustion(
+        self, enhancement_agent, db_in_memory, sample_project_name
+    ):
+        """RuntimeError from ask_llm must still return False (unchanged behavior) AND
+        send exactly one admin alert for the project."""
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+        long_text = "This is a research paper about deep learning. " * 100
+
+        with patch.object(enhancement_agent.connector, "read_all_tex_files_split", return_value=(long_text, "")), \
+             patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All LLM providers failed")):
+
+            result = enhancement_agent._run_internal_review(sample_project_name)
+
+        assert result is False
+        enhancement_agent.notifier.send_admin_alert.assert_called_once()
+        _, kwargs = enhancement_agent.notifier.send_admin_alert.call_args
+        assert sample_project_name in kwargs["subject"]
+
+    def test_internal_review_dedups_alert_for_same_project(
+        self, enhancement_agent, db_in_memory, sample_project_name
+    ):
+        """Two waterfall-exhaustion failures for the SAME project in one run produce
+        only one admin alert."""
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+        long_text = "This is a research paper about deep learning. " * 100
+
+        with patch.object(enhancement_agent.connector, "read_all_tex_files_split", return_value=(long_text, "")), \
+             patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+
+            enhancement_agent._run_internal_review(sample_project_name)
+            enhancement_agent._run_internal_review(sample_project_name)
+
+        enhancement_agent.notifier.send_admin_alert.assert_called_once()
+
+    def test_internal_review_and_task_generation_share_one_alert_per_project(
+        self, enhancement_agent, db_in_memory, sample_project_name
+    ):
+        """The two ResearchEnhancementAgent waterfall-exhaustion swallow sites
+        (_run_internal_review and _generate_actionable_tasks) share the same
+        per-project dedup key: within a single run, a project can only be in one
+        state-machine branch at a time (READY_FOR_UPLOAD -> internal review fallback,
+        XOR WAITING_FOR_REVIEW -> task generation), so a project hitting waterfall
+        exhaustion in one of these never legitimately needs a second, independent
+        alert from the other in the same run."""
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+        long_text = "This is a research paper about deep learning. " * 100
+
+        with patch.object(enhancement_agent.connector, "read_all_tex_files_split", return_value=(long_text, "")), \
+             patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+
+            enhancement_agent._run_internal_review(sample_project_name)
+            enhancement_agent._generate_actionable_tasks(
+                project_name=sample_project_name, review_text="some review text"
+            )
+
+        enhancement_agent.notifier.send_admin_alert.assert_called_once()
+
+    # ------------------------------------------------------------------
     # 5. test_truncate_paper_text_short_paper_unchanged
     # ------------------------------------------------------------------
     def test_truncate_paper_text_short_paper_unchanged(self, enhancement_agent):

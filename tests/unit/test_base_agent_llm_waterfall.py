@@ -1,6 +1,6 @@
 """TDD tests for Task 1 (stability hardening): 413 reclassification, waterfall
-exhaustion alert dedup, cross-run cooldown persistence, and the new Cerebras /
-NVIDIA NIM provider paths (all mocked — no real network calls, no real keys)."""
+exhaustion alert dedup, cross-run cooldown persistence, and the NVIDIA NIM
+provider path (all mocked — no real network calls, no real keys)."""
 
 from unittest.mock import MagicMock, patch
 
@@ -21,7 +21,6 @@ def _make_stub_agent():
     agent.logger = MagicMock()
     agent.groq_client = MagicMock()
     agent.gemini_available = False
-    agent.cerebras_available = False
     agent.nvidia_nim_available = False
     agent.openai_available = False
     agent._providers_waterfall = ["groq"]
@@ -281,21 +280,10 @@ class TestCooldownPersistence:
 
 
 # ---------------------------------------------------------------------------
-# 4. Cerebras / NVIDIA NIM provider paths (mocked clients only)
+# 4. NVIDIA NIM provider path (mocked client only)
 # ---------------------------------------------------------------------------
 
 class TestNewProviders:
-    def _agent_with_cerebras(self):
-        agent = _make_stub_agent()
-        agent.cerebras_available = True
-        agent.cerebras_client = MagicMock()
-        agent._providers_waterfall = ["groq", "cerebras"]
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock()]
-        mock_resp.choices[0].message.content = "cerebras response"
-        agent.cerebras_client.chat.completions.create.return_value = mock_resp
-        return agent
-
     def _agent_with_nvidia_nim(self):
         agent = _make_stub_agent()
         agent.nvidia_nim_available = True
@@ -306,27 +294,6 @@ class TestNewProviders:
         mock_resp.choices[0].message.content = "nim response"
         agent.nvidia_nim_client.chat.completions.create.return_value = mock_resp
         return agent
-
-    def test_groq_fails_falls_over_to_cerebras(self):
-        agent = self._agent_with_cerebras()
-        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
-
-        with patch("agents.base_agent.time.sleep"):
-            result = agent.ask_llm("prompt")
-
-        assert result == "cerebras response"
-
-    def test_cerebras_uses_configured_model_and_base_url_client(self):
-        from config import Config
-        agent = self._agent_with_cerebras()
-        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
-
-        with patch("agents.base_agent.time.sleep"):
-            agent.ask_llm("prompt")
-
-        _, kwargs = agent.cerebras_client.chat.completions.create.call_args
-        assert kwargs["model"] == Config.CEREBRAS_MODEL_NAME
-        assert Config.CEREBRAS_MODEL_NAME == "gpt-oss-120b"
 
     def test_groq_fails_falls_over_to_nvidia_nim(self):
         agent = self._agent_with_nvidia_nim()
@@ -348,18 +315,14 @@ class TestNewProviders:
         _, kwargs = agent.nvidia_nim_client.chat.completions.create.call_args
         assert kwargs["model"] == Config.NVIDIA_NIM_MODEL_NAME
 
-    def test_full_waterfall_order_groq_gemini_cerebras_nvidia_openai(self):
-        """Exercises the full 5-tier waterfall in order when every provider is
+    def test_full_waterfall_order_groq_gemini_nvidia_openai(self):
+        """Exercises the full 4-tier waterfall in order when every provider is
         configured and every provider but the last fails."""
         agent = _make_stub_agent()
         agent.gemini_available = True
         agent.gemini_model_name = "gemini-2.5-flash"
         agent.gemini_client = MagicMock()
         agent.gemini_client.models.generate_content.side_effect = Exception("Gemini down")
-
-        agent.cerebras_available = True
-        agent.cerebras_client = MagicMock()
-        agent.cerebras_client.chat.completions.create.side_effect = Exception("Cerebras down")
 
         agent.nvidia_nim_available = True
         agent.nvidia_nim_client = MagicMock()
@@ -372,7 +335,7 @@ class TestNewProviders:
         mock_resp.choices[0].message.content = "openai last resort"
         agent.openai_client.chat.completions.create.return_value = mock_resp
 
-        agent._providers_waterfall = ["groq", "gemini", "cerebras", "nvidia_nim", "openai"]
+        agent._providers_waterfall = ["groq", "gemini", "nvidia_nim", "openai"]
         agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
 
         with patch("agents.base_agent.time.sleep"):
@@ -382,165 +345,155 @@ class TestNewProviders:
 
 
 # ---------------------------------------------------------------------------
-# 5. Cerebras-specific proactive rate limiter
+# 5. Permanent quota exhaustion vs. renewing quota (Task 2, Cerebras-removal
+#    follow-up): a bare "quota" substring must not send a permanently
+#    exhausted billing allowance down the same cooldown path as a renewing
+#    per-minute/per-day rate limit.
 # ---------------------------------------------------------------------------
 
-class TestCerebrasRateLimiter:
-    def test_sliding_window_limiter_rejects_beyond_capacity(self):
-        from agents.base_agent import _SlidingWindowLimiter
-        limiter = _SlidingWindowLimiter(max_requests=4, window_seconds=60.0)
-        results = [limiter.try_acquire() for _ in range(5)]
-        assert results == [True, True, True, True, False]
-
-    def test_sliding_window_limiter_allows_again_after_window_elapses(self):
-        from agents.base_agent import _SlidingWindowLimiter
-        limiter = _SlidingWindowLimiter(max_requests=1, window_seconds=60.0)
-        with patch("agents.base_agent.time.time", return_value=1000.0):
-            assert limiter.try_acquire() is True
-            assert limiter.try_acquire() is False
-        with patch("agents.base_agent.time.time", return_value=1061.0):
-            assert limiter.try_acquire() is True
-
-    def test_burst_beyond_safe_rpm_raises_rate_limit_shaped_error_not_real_call(self):
-        """Simulates the concrete failure mode from the extension brief: several
-        concurrent calls fall back to Cerebras in a burst. Once the proactive guard's
-        capacity is exhausted, further calls must be rejected as rate-limit-shaped
-        (handled by the existing cooldown/failover machinery) WITHOUT ever reaching
-        the real Cerebras client — that's the whole point of the guard."""
-        from config import Config
-
+class TestPermanentQuotaExhaustion:
+    def test_openai_insufficient_quota_skips_retries_with_no_cooldown(self):
+        """Real OpenAI insufficient_quota error shape (documented format at
+        https://platform.openai.com/docs/guides/error-codes/api-errors, matching what
+        this project's own logs have previously captured for this failure class): an
+        exhausted billing allowance with no automatic reset. Must NOT start a cooldown
+        — cooldowns mean "try again later," which is wrong when the actual fix is a
+        human adding billing/credits."""
         agent = _make_stub_agent()
-        agent.cerebras_available = True
-        agent.cerebras_client = MagicMock()
-        agent._providers_waterfall = ["cerebras"]
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock()]
-        mock_resp.choices[0].message.content = "ok"
-        agent.cerebras_client.chat.completions.create.return_value = mock_resp
-
-        # Exhaust the shared limiter's capacity directly (it's class-level/shared,
-        # matching production: all agent instances in the process share one guard).
-        from agents.base_agent import BaseAgent
-        for _ in range(Config.CEREBRAS_SAFE_RPM):
-            assert BaseAgent._cerebras_rate_limiter.try_acquire() is True
-
-        with patch("agents.base_agent.time.sleep"):
-            with pytest.raises(RuntimeError):
-                agent.ask_llm("prompt")
-
-        agent.cerebras_client.chat.completions.create.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# 6. Synthetic client-side rejection must NOT be treated like a real 429:
-#    short, non-persisted cooldown only (final-review Finding 1).
-# ---------------------------------------------------------------------------
-
-class TestCerebrasProactiveRejectionCooldown:
-    def _agent_with_exhausted_limiter(self):
-        from agents.base_agent import BaseAgent, Config
-
-        agent = _make_stub_agent()
-        agent.cerebras_available = True
-        agent.cerebras_client = MagicMock()
-        agent._providers_waterfall = ["cerebras"]
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock()]
-        mock_resp.choices[0].message.content = "ok"
-        agent.cerebras_client.chat.completions.create.return_value = mock_resp
-
-        # Exhaust the shared class-level limiter so the next try_acquire() rejects.
-        for _ in range(Config.CEREBRAS_SAFE_RPM):
-            assert BaseAgent._cerebras_rate_limiter.try_acquire() is True
-        return agent
-
-    def test_synthetic_rejection_gets_short_cooldown_not_full_90s(self):
-        """A client-side proactive rejection must not apply the full
-        LLM_RATE_LIMIT_COOLDOWN_SECONDS (90s) — that over-penalizes Cerebras for an
-        event that never touched the real provider."""
-        from agents.base_agent import BaseAgent, Config
-
-        agent = self._agent_with_exhausted_limiter()
-
-        with patch("agents.base_agent.time.sleep"):
-            with pytest.raises(RuntimeError):
-                agent.ask_llm("prompt")
-
-        agent.cerebras_client.chat.completions.create.assert_not_called()
-        remaining = BaseAgent._provider_cooldown_remaining("cerebras")
-        assert 0 < remaining <= 60
-        assert remaining < Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS
-
-    def test_synthetic_rejection_is_not_persisted_to_db(self, db_in_memory):
-        """The synthetic cooldown is a purely local/in-process pacing signal — a
-        cold-started process must NOT inherit it. Verified two ways: (1) the DB's
-        own record shows nothing for cerebras, and (2) simulating a cold start (fresh
-        in-memory dict + reload from DB) shows the provider immediately available."""
-        from agents.base_agent import BaseAgent
-        from agents.literature_research_agent import LiteratureResearchAgent
-
-        BaseAgent._shared_db_manager = db_in_memory
-        agent = self._agent_with_exhausted_limiter()
-
-        with patch("agents.base_agent.time.sleep"):
-            with pytest.raises(RuntimeError):
-                agent.ask_llm("prompt")
-
-        persisted = db_in_memory.get_all_cooldowns()
-        assert "cerebras" not in persisted or persisted["cerebras"] is None
-
-        # Simulate a cold start: clear in-memory state, spin up a fresh agent that
-        # reloads persisted cooldowns at __init__ time.
-        BaseAgent._provider_cooldowns.clear()
-        fresh_notifier = MagicMock()
-        fresh_agent = LiteratureResearchAgent(active_projects=["ProjectA"], notifier=fresh_notifier)
-        assert fresh_agent._provider_cooldown_remaining("cerebras") == 0
-
-    def test_real_429_from_cerebras_still_gets_full_persisted_cooldown(self, db_in_memory):
-        """Regression guard: a REAL 429 returned by the Cerebras client (not the
-        proactive client-side guard) must still go through the unchanged full-length,
-        persisted cooldown path — this fix must not weaken real rate-limit handling
-        for any provider, Cerebras included."""
-        from agents.base_agent import BaseAgent, Config
-
-        BaseAgent._shared_db_manager = db_in_memory
-        agent = _make_stub_agent()
-        agent.cerebras_available = True
-        agent.cerebras_client = MagicMock()
-        agent._providers_waterfall = ["cerebras"]
-        agent.cerebras_client.chat.completions.create.side_effect = Exception(
-            "Error code: 429 - Rate limit exceeded"
+        agent.openai_available = True
+        agent.openai_client = MagicMock()
+        agent._providers_waterfall = ["groq", "openai"]
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.openai_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - {'error': {'message': 'You exceeded your current quota, "
+            "please check your plan and billing details. For more information on this "
+            "error, read the docs: https://platform.openai.com/docs/guides/error-codes/"
+            "api-errors.', 'type': 'insufficient_quota', 'param': None, "
+            "'code': 'insufficient_quota'}}"
         )
 
         with patch("agents.base_agent.time.sleep"):
             with pytest.raises(RuntimeError):
                 agent.ask_llm("prompt")
 
-        remaining = BaseAgent._provider_cooldown_remaining("cerebras")
-        assert remaining > 60
-        assert remaining <= Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS
+        assert agent._provider_cooldowns.get("openai") is None
+        # Proves the permanent-quota path takes exactly ONE attempt before giving up
+        # (break on first exception), not a loop through Config.LLM_MAX_RETRIES
+        # retries — retrying a permanent billing failure just wastes time/requests
+        # for a result that cannot change until a human adds credits.
+        assert agent.openai_client.chat.completions.create.call_count == 1
 
-        persisted = db_in_memory.get_all_cooldowns()
-        assert "cerebras" in persisted
-        assert persisted["cerebras"] > 0
+    def test_402_payment_required_with_param_quota_skips_retries_with_no_cooldown(self):
+        """Real, verbatim error text from this project's own logs/LiveProbeAgent.log:36
+        (from the now-removed Cerebras integration; the error SHAPE is what's under
+        test, not the provider). This is exactly the failure mode the bug describes: a
+        bare "quota" substring (here via 'param': 'quota') sitting inside a genuinely
+        permanent 402 payment_required billing error. Reused against the "openai"
+        provider slot to prove the classifier is provider-agnostic."""
+        agent = _make_stub_agent()
+        agent.openai_available = True
+        agent.openai_client = MagicMock()
+        agent._providers_waterfall = ["groq", "openai"]
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.openai_client.chat.completions.create.side_effect = Exception(
+            "Error code: 402 - {'message': 'Payment required to access this resource. "
+            "Visit your billing tab.', 'type': 'payment_required_error', "
+            "'param': 'quota', 'code': 'payment_required'}"
+        )
 
-    def test_real_429_from_any_other_provider_still_fully_persisted(self, db_in_memory):
-        """Same regression guard as above, exercised for Groq — the fix is scoped to
-        the Cerebras proactive guard's synthetic error only, not to rate-limit
-        handling in general."""
-        from agents.base_agent import BaseAgent, Config
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
 
-        BaseAgent._shared_db_manager = db_in_memory
+        assert agent._provider_cooldowns.get("openai") is None
+        # Same single-attempt property as the insufficient_quota case above — the
+        # 402 permanent-billing branch must break immediately, not loop through
+        # Config.LLM_MAX_RETRIES retries against a failure that can't self-resolve.
+        assert agent.openai_client.chat.completions.create.call_count == 1
+
+    def test_renewing_daily_quota_still_enters_cooldown_no_regression(self):
+        """Groq's real daily-rate-limit error format (per Groq's own rate-limit docs:
+        https://console.groq.com/docs/rate-limits — 429 responses name the specific
+        limit type, e.g. "Rate limit reached for ... Limit 14400, Used 14400,
+        Requested 1. Please try again in ... or upgrade")..."""
         agent = _make_stub_agent()
         agent.groq_client.chat.completions.create.side_effect = Exception(
-            "Error code: 429 - Rate limit exceeded"
+            "Error code: 429 - {'error': {'message': 'Rate limit reached for "
+            "requests-per-day in organization org_xxx on tokens per day (TPD): "
+            "Limit 14400, Used 14400, Requested 1. Please try again in 1m4s or "
+            "upgrade your plan.', 'type': 'requests', 'code': 'rate_limit_exceeded'}}"
         )
 
         with patch("agents.base_agent.time.sleep"):
             with pytest.raises(RuntimeError):
                 agent.ask_llm("prompt")
 
-        remaining = BaseAgent._provider_cooldown_remaining("groq")
-        assert remaining > 60
-        persisted = db_in_memory.get_all_cooldowns()
-        assert "groq" in persisted and persisted["groq"] > 0
+        assert agent._provider_cooldowns.get("groq") is not None
+
+    def test_gemini_per_minute_quota_still_enters_cooldown_no_regression(self):
+        """Gemini's real quota-exceeded error format (per Google's documented Gemini
+        API error shape: a RESOURCE_EXHAUSTED 429 whose message names a specific
+        per-minute quota metric). Must still enter cooldown, unchanged from before."""
+        agent = _make_stub_agent()
+        agent.groq_client.chat.completions.create.side_effect = Exception(
+            "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+            "'Resource has been exhausted (e.g. check quota). You exceeded your "
+            "current quota, please check your plan and billing details... "
+            "generate_content_requests_per_minute_per_project_per_model limit: 15, "
+            "please retry in 42 seconds.', 'status': 'RESOURCE_EXHAUSTED'}}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError):
+                agent.ask_llm("prompt")
+
+        assert agent._provider_cooldowns.get("groq") is not None
+
+    def test_openai_permanent_quota_as_last_provider_reaches_full_exhaustion_path(self):
+        """OpenAI is the last waterfall tier. A permanent quota exhaustion there (not a
+        cooldown, since is_permanent_quota_error takes precedence) must still fall
+        through the per-provider loop to the same "All available LLM providers have
+        been exhausted" / RuntimeError('CRITICAL: All LLM providers exhausted...')
+        path that a real 429/413/auth failure would reach — this is the path that
+        agent call sites use to trigger _alert_waterfall_exhausted. A silent early-exit
+        that skipped this would mean OpenAI's real insufficient_quota failures never
+        page anyone."""
+        agent = _make_stub_agent()
+        agent.openai_available = True
+        agent.openai_client = MagicMock()
+        agent._providers_waterfall = ["groq", "openai"]
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.openai_client.chat.completions.create.side_effect = Exception(
+            "Error code: 429 - {'error': {'message': 'You exceeded your current quota, "
+            "please check your plan and billing details.', "
+            "'type': 'insufficient_quota', 'code': 'insufficient_quota'}}"
+        )
+
+        with patch("agents.base_agent.time.sleep"):
+            with pytest.raises(RuntimeError, match="CRITICAL: All LLM providers exhausted"):
+                agent.ask_llm("prompt")
+
+        # Neither provider should be left with a cooldown: groq failed generically
+        # (not rate-limit-shaped) and openai failed permanently — neither case starts
+        # a cooldown timer.
+        assert agent._provider_cooldowns.get("openai") is None
+
+    def test_alert_dedup_guard_fires_on_last_provider_permanent_quota_exhaustion(self, mock_notifier):
+        """End-to-end through a real agent call site: when the LAST waterfall provider
+        fails with a permanent quota error, ask_llm still raises the same RuntimeError
+        shape that literature_research_agent.py's call site catches to invoke
+        _alert_waterfall_exhausted — confirming the alerting path (added in a prior
+        session for Issue 3) is still reached for this failure class."""
+        from agents.literature_research_agent import LiteratureResearchAgent
+
+        agent = LiteratureResearchAgent(active_projects=["ProjectA"], notifier=mock_notifier)
+        with patch.object(
+            agent, "ask_llm",
+            side_effect=RuntimeError(
+                "CRITICAL: All LLM providers exhausted. Tried: groq, gemini, "
+                "nvidia_nim, openai. Check API keys and rate limits."
+            )
+        ):
+            agent.extract_keywords_from_text("ProjectA", "some manuscript text")
+
+        assert mock_notifier.send_admin_alert.call_count == 1
