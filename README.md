@@ -18,6 +18,7 @@ lab server and notify researchers and supervisors by email.
 - [How to Run](#how-to-run)
 - [Testing](#testing)
 - [File Structure](#file-structure)
+- [Current Status](#current-status)
 - [Known Limitations](#known-limitations)
 - [Roadmap](#roadmap)
 
@@ -148,7 +149,8 @@ exponential-backoff retry logic, and rotating file logging.
 - Sends via a Gmail SMTP relay account using App Passwords; retries on transient failures.
 - `send_admin_alert()` delivers operational alerts (session expiry, pipeline crashes) to
   the operator email.
-- Does not use the LLM and does not extend `BaseAgent`.
+- Does not use the LLM. It extends `BaseAgent` in its class declaration but skips
+  `BaseAgent.__init__()`, so none of the LLM-waterfall machinery applies to it.
 
 ---
 
@@ -163,7 +165,23 @@ exponential-backoff retry logic, and rotating file logging.
 - Sets up a `RotatingFileHandler` (5 MB limit, 3 backups) plus `StreamHandler` for each
   agent, writing to `logs/<AgentName>.log`.
 
-**`main.py`** — orchestrator and CLI entry point. See [How to Run](#how-to-run).
+- Rate-limit cooldowns are shared across every agent in the same process (a 429 on one
+  provider protects every other agent's calls for the rest of the run) and persisted to
+  SQLite (`llm_provider_cooldowns`) so they survive a cold restart, not just an
+  in-process retry.
+- Permanent quota/billing errors (`insufficient_quota`, HTTP 402) are classified
+  separately from transient rate-limit errors: they skip retries and do not start a
+  cooldown, since retrying a billing-exhausted key wastes an attempt on every
+  subsequent call until a human intervenes.
+- A full waterfall exhaustion for a given project sends exactly one deduplicated admin
+  alert per project per run (`_alert_waterfall_exhausted`) rather than failing silently.
+- **`NotificationAgent`** extends `BaseAgent` in its class declaration (for type
+  consistency across the agent list) but does not call `BaseAgent.__init__()` and does
+  not use the LLM waterfall — it manages its own minimal logger setup.
+
+**`main.py`** — orchestrator and CLI entry point, wrapped in an `fcntl`-based run-lock
+(`run.lock`, POSIX only) so a scheduled invocation that overlaps a still-running one
+exits cleanly instead of racing it. See [How to Run](#how-to-run).
 
 ---
 
@@ -172,7 +190,7 @@ exponential-backoff retry logic, and rotating file logging.
 | Layer | Technology |
 |---|---|
 | Language | Python 3.10–3.13 |
-| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-2.5-flash`), NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`), OpenAI (`gpt-4o-mini`) |
+| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-2.5-flash`), NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`), OpenAI (`gpt-4o-mini`) — waterfall order, verified from `agents/base_agent.py`; expect this roster to keep changing as providers are evaluated |
 | LLM contracts | Pydantic v2 |
 | Browser automation | Playwright (Chromium) |
 | Literature search | Semantic Scholar API → SerpAPI → scholarly |
@@ -181,7 +199,7 @@ exponential-backoff retry logic, and rotating file logging.
 | Database | SQLite via a custom `DatabaseManager` wrapper |
 | Dashboard | Streamlit (`dashboard.py`) |
 | Logging | Python `RotatingFileHandler` |
-| Testing | pytest (276 tests) |
+| Testing | pytest (400 tests, 2 additional `live` tests deselected by default) |
 
 ---
 
@@ -313,7 +331,10 @@ GROQ_API_KEY=gsk_...
 # [OPTIONAL] Fallback LLM #1 — free tier at aistudio.google.com
 GEMINI_API_KEY=AIza...
 
-# [OPTIONAL] Fallback LLM #2 — paid, at platform.openai.com
+# [OPTIONAL] Fallback LLM #2 — build.nvidia.com NIM endpoint
+NVIDIA_NIM_API_KEY=nvapi-...
+
+# [OPTIONAL] Fallback LLM #3 — paid, at platform.openai.com
 OPENAI_API_KEY=sk-...
 
 
@@ -446,7 +467,11 @@ source venv/bin/activate
 pytest tests/ -v
 ```
 
-Current count: **276 tests, 0 failures**.
+Current count (verified by running the suite in this session): **400 passed, 2
+deselected**. The 2 deselected tests carry the `live` pytest marker (see
+`pytest.ini`) — they make real network calls to LLM provider APIs and require real
+API keys, so they're excluded from the default run. Run them explicitly with
+`pytest -m live tests/live/`.
 
 Tests are organized under `tests/`:
 
@@ -483,11 +508,12 @@ research-agents/
 │   ├── literature_fetcher.py       # Semantic Scholar → SerpAPI → scholarly chain
 │   ├── overleaf_connector.py       # LaTeX → plain text via regex, structure-aware sampling
 │   └── token_budget.py             # Adaptive char-budget caps for LLM payload sizing
-├── tests/                          # 276 pytest tests
+├── tests/                          # 400 pytest tests (+2 `live` tests, opt-in only)
 │   ├── crash/
 │   ├── db/
 │   ├── idempotency/
 │   ├── integration/
+│   ├── live/                       # Real-network LLM provider calls; `live` marker
 │   ├── stress/
 │   ├── unit/
 │   ├── fixtures/
@@ -506,9 +532,48 @@ research-agents/
 ├── setup_overleaf_session.py       # One-time Overleaf session bootstrap
 ├── setup.sh                        # Automated setup script (venv + deps + .env)
 ├── requirements.txt
+├── pytest.ini                      # `live` marker config — excludes real-network tests by default
 ├── .env.example                    # Template — copy to .env and fill in
 └── .gitignore
 ```
+
+---
+
+## Current Status
+
+The system has completed a university course requirement and is currently in a live
+test phase against real research projects, ahead of eventual deployment to a lab
+server. This section separates what's actually running from what's designed but not
+yet built, and from what's blocked on a decision outside engineering.
+
+**Implemented and verified (real code, real test coverage):**
+- All six agents described in [Architecture](#architecture), orchestrated by `main.py`.
+- The four-provider LLM waterfall (Groq → Gemini → NVIDIA NIM → OpenAI), including
+  shared/persisted cooldowns and permanent-vs-transient error classification.
+- The `fcntl`-based run-lock preventing overlapping `main.py` invocations.
+- 400 passing tests across unit, integration, crash/resilience, DB, idempotency, and
+  stress suites (verified by running the suite in this session — see
+  [Testing](#testing)).
+
+**Designed but not yet implemented:**
+- **Heartbeat + independent watchdog** (`docs/superpowers/plans/2026-08-21-heartbeat-watchdog.md`):
+  a design for a `run_heartbeats` SQLite table plus a standalone, stdlib-only watchdog
+  script that would notice a missing/failed run through a code path independent of the
+  normal email-alerting path. This closes a known gap — today, if the primary
+  notification path fails at the exact moment an agent crashes, nothing else notices —
+  but the design has not been implemented: there is no `watchdog.py` and no
+  `run_heartbeats` table in the codebase yet.
+
+**Blocked on a decision outside engineering:**
+- **Overleaf Premium / native Git integration**: the project's own engineering analysis
+  (`docs/superpowers/plans/2026-08-21-stability-hardening.md`) recommends migrating off
+  session-based Overleaf scraping to a paid Git-integration tier, independent of cost,
+  because the current approach carries both operational fragility (see below) and a
+  ToS risk that a paid tier removes outright. This is pending a department-head
+  decision on the subscription cost, not an engineering blocker.
+- **Supervisor email mapping** for the projects currently in live testing is entered
+  and maintained manually by the operator; it is not yet a self-service or automated
+  process.
 
 ---
 
@@ -537,6 +602,15 @@ upload/fetch logic in `ResearchEnhancementAgent` will need updating. The interna
 fallback activates automatically on upload failure or if a project stays unreviewed past
 the 48-hour timeout, maintaining continuity.
 
+**`requirements.txt` does not include the dashboard's dependencies**
+`dashboard.py` imports `streamlit` and `plotly`, but neither package is listed in
+`requirements.txt`. A fresh `pip install -r requirements.txt` followed by
+`streamlit run dashboard.py` will fail with `ModuleNotFoundError` until those two
+packages are installed separately. This was flagged in a prior review and has
+recurred — verify `requirements.txt` against actual imports (e.g. `grep` every
+`import`/`from` in the repo against the pinned package list) before each release
+rather than assuming it stayed in sync.
+
 **Single-machine deployment**
 The current architecture runs all agents sequentially in a single process. On a lab server
 with many projects, long runs (literature + enhancement for 10+ projects) may take
@@ -549,6 +623,13 @@ mitigates this, but cross-agent parallelism is not implemented.
 
 - [ ] **Docker containerization** — Package the system into a Docker image with persistent
   volumes for SQLite and downloaded project files; deploy to the university lab server.
+  Not yet started.
+- [ ] **Heartbeat + independent watchdog** — Designed (see [Current Status](#current-status)
+  and `docs/superpowers/plans/2026-08-21-heartbeat-watchdog.md`) but not implemented:
+  no `watchdog.py`, no `run_heartbeats` table exist in the codebase yet.
+- [ ] **Overleaf Premium / Git integration migration** — Recommended by engineering
+  analysis; pending a department-head decision on subscription cost (see
+  [Current Status](#current-status)).
 - [ ] **Streamlit/Flask intranet dashboard** — A hosted lab manager UI for visualizing
   `progress_snapshots` as velocity graphs, managing project/researcher assignments, and
   reviewing agent run history without CLI access.
@@ -560,4 +641,9 @@ mitigates this, but cross-agent parallelism is not implemented.
 - [x] **Three-tier literature search** — Semantic Scholar → SerpAPI → scholarly, with
   OpenAlex enrichment and LLM relevance filtering.
 - [x] **Multi-LLM waterfall** — Groq → Gemini → NVIDIA NIM → OpenAI with per-provider
-  exponential backoff and automatic failover.
+  exponential backoff, shared/persisted cooldowns, and permanent-error classification.
+  The provider roster has changed twice already (a Cerebras integration was added and
+  fully removed after a live billing failure) — treat this order as subject to further
+  change as providers are evaluated, not as a fixed architecture decision.
+- [x] **Run-lock** — `fcntl`-based lock in `main.py` preventing overlapping scheduled
+  invocations from racing each other.
