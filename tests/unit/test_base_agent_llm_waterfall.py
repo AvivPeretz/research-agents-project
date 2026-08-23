@@ -377,6 +377,11 @@ class TestPermanentQuotaExhaustion:
                 agent.ask_llm("prompt")
 
         assert agent._provider_cooldowns.get("openai") is None
+        # Proves the permanent-quota path takes exactly ONE attempt before giving up
+        # (break on first exception), not a loop through Config.LLM_MAX_RETRIES
+        # retries — retrying a permanent billing failure just wastes time/requests
+        # for a result that cannot change until a human adds credits.
+        assert agent.openai_client.chat.completions.create.call_count == 1
 
     def test_402_payment_required_with_param_quota_skips_retries_with_no_cooldown(self):
         """Real, verbatim error text from this project's own logs/LiveProbeAgent.log:36
@@ -401,6 +406,10 @@ class TestPermanentQuotaExhaustion:
                 agent.ask_llm("prompt")
 
         assert agent._provider_cooldowns.get("openai") is None
+        # Same single-attempt property as the insufficient_quota case above — the
+        # 402 permanent-billing branch must break immediately, not loop through
+        # Config.LLM_MAX_RETRIES retries against a failure that can't self-resolve.
+        assert agent.openai_client.chat.completions.create.call_count == 1
 
     def test_renewing_daily_quota_still_enters_cooldown_no_regression(self):
         """Groq's real daily-rate-limit error format (per Groq's own rate-limit docs:
