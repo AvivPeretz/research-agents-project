@@ -11,12 +11,15 @@ from openai import OpenAI
 
 # Import the centralized configuration
 from config import Config
+from utils.database_manager import DatabaseManager
+
 
 class BaseAgent(ABC):
     """
     Abstract base class for all agents in the project.
     Provides common functionality like logging and LLM integration.
-    Features a Multi-LLM Waterfall strategy (Groq -> Gemini -> OpenAI) with built-in retries.
+    Features a Multi-LLM Waterfall strategy
+    (Groq -> Gemini -> NVIDIA NIM -> OpenAI) with built-in retries.
     """
 
     # Class-level (shared across every agent instance/subclass in this process) so that
@@ -26,11 +29,103 @@ class BaseAgent(ABC):
     _provider_cooldowns: dict = {}
     _cooldown_lock = threading.Lock()
 
+    # Lazily-created, class-level (shared for the life of the process, same rationale as
+    # _provider_cooldowns above) DatabaseManager used to persist cooldowns across cold
+    # starts. Tests reset this to None between runs (see tests/conftest.py) so they never
+    # touch a real on-disk database.
+    _shared_db_manager = None
+    _db_manager_lock = threading.Lock()
+
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
         self.logger = self._setup_logger()
         self._setup_llm()
+        self._load_persisted_cooldowns()
+        # Dedup guard for _alert_waterfall_exhausted: a full LLM waterfall exhaustion
+        # is alerted at most once per project per run (not once per call site/paper) so
+        # a project that hits the exhausted waterfall on every LLM call in a run
+        # doesn't spam the admin inbox with a dozen identical alerts. Instance-level
+        # (not class-level, unlike _provider_cooldowns) — each agent instance tracks
+        # its own run independently, which is what "once per project per run" means
+        # for a specific agent's specific degrade-but-continue path.
+        self._waterfall_exhausted_alerted: set = set()
         self.logger.info("Agent '%s' initialized.", self.agent_name)
+
+    def _alert_waterfall_exhausted(self, context: str, project_name: str):
+        """Sends exactly one deduplicated admin alert per run per project when the full
+        LLM waterfall is exhausted for that project. Closes the silent-degradation gap:
+        previously a total waterfall failure fell back to degraded output (whatever this
+        call site's caller does on RuntimeError — e.g. keyword-only search, a system-note
+        placeholder, or simply giving up on this project for the run) with no signal
+        anyone would see. This does not change that degrade-but-continue behavior — a
+        full crash is disproportionate to one LLM call's failure — it only makes sure
+        someone is told.
+
+        Promoted here from LiteratureResearchAgent (which had this same helper as a
+        private, non-shared implementation) once a second and third agent needed the
+        identical pattern — see the stability-hardening backlog note this closes.
+        Dedup key is project_name alone (not (context, project_name)): a project is
+        alerted at most once per run regardless of which LLM call within it exhausted
+        the waterfall first, matching the original LiteratureResearchAgent behavior.
+        """
+        if project_name in self._waterfall_exhausted_alerted:
+            return
+        self._waterfall_exhausted_alerted.add(project_name)
+        notifier = getattr(self, "notifier", None)
+        if not notifier:
+            return
+        try:
+            notifier.send_admin_alert(
+                subject=f"{self.agent_name} — LLM waterfall exhausted: {project_name}",
+                message=(
+                    f"The full LLM provider waterfall was exhausted while processing "
+                    f"project '{project_name}' ({context}). The agent is continuing "
+                    f"with degraded output for this project rather than crashing, but "
+                    f"this project's results for this run may be incomplete or "
+                    f"degraded.\n\n"
+                    f"See {self.agent_name}.log for the full traceback."
+                )
+            )
+        except Exception:
+            pass  # do not let alert failure mask the original degraded-output path
+
+    @classmethod
+    def _get_db_manager(cls) -> DatabaseManager:
+        """Lazily creates (once per process) the shared DatabaseManager used for
+        cross-run cooldown persistence.
+
+        Deliberately assigns to BaseAgent explicitly rather than `cls`: a classmethod
+        assignment of `cls._shared_db_manager = ...` would, when invoked through a
+        subclass (e.g. LiteratureResearchAgent), create a NEW class attribute shadowing
+        BaseAgent's on that subclass alone — defeating the "one shared instance across
+        every agent in the process" design (the same reason _provider_cooldowns is
+        mutated in place via __setitem__ rather than ever reassigned)."""
+        with BaseAgent._db_manager_lock:
+            if BaseAgent._shared_db_manager is None:
+                BaseAgent._shared_db_manager = DatabaseManager()
+            return BaseAgent._shared_db_manager
+
+    def _load_persisted_cooldowns(self):
+        """Reads any cooldowns persisted by a previous (possibly now-dead) process and
+        merges them into the in-process _provider_cooldowns dict. This is what makes the
+        circuit breaker survive a cold restart — without it, a fresh container/process
+        would silently forget an active rate limit and immediately re-trigger it.
+        Best-effort: a DB read failure must not prevent the agent from starting."""
+        try:
+            persisted = self._get_db_manager().get_all_cooldowns()
+        except Exception as e:
+            self.logger.warning(
+                "Could not load persisted LLM provider cooldowns (cross-run protection "
+                "unavailable this run): %s", str(e)
+            )
+            return
+        with self.__class__._cooldown_lock:
+            for provider, until in persisted.items():
+                if until is None:
+                    continue
+                current = self.__class__._provider_cooldowns.get(provider, 0.0)
+                if until > current:
+                    self.__class__._provider_cooldowns[provider] = until
 
     def _setup_logger(self):
         logger = logging.getLogger(self.agent_name)
@@ -62,7 +157,8 @@ class BaseAgent(ABC):
     def _setup_llm(self):
         """
         Initialize connections to LLM providers.
-        Sets up Groq as Primary, Gemini as Fallback 1, and OpenAI as Fallback 2.
+        Sets up Groq as Primary, Gemini as Fallback 1, NVIDIA NIM as Fallback 2,
+        and OpenAI as Fallback 3 (last resort).
         """
         # 1. Setup Groq (Primary - MUST EXIST)
         groq_key = Config.GROQ_API_KEY
@@ -84,21 +180,37 @@ class BaseAgent(ABC):
             except Exception as e:
                 self.logger.warning("Failed to configure Gemini Fallback: %s", str(e))
 
-        # 3. Setup OpenAI (Fallback 2)
+        # 3. Setup NVIDIA NIM (Fallback 2) — also OpenAI-compatible.
+        self.nvidia_nim_available = False
+        nvidia_nim_key = getattr(Config, 'NVIDIA_NIM_API_KEY', None)
+        if nvidia_nim_key:
+            try:
+                self.nvidia_nim_client = OpenAI(api_key=nvidia_nim_key, base_url=Config.NVIDIA_NIM_BASE_URL)
+                self.nvidia_nim_available = True
+                self.logger.info("Fallback 2 (NVIDIA NIM) configured successfully.")
+            except Exception as e:
+                self.logger.warning("Failed to configure NVIDIA NIM Fallback: %s", str(e))
+
+        # 4. Setup OpenAI (Fallback 3 — last resort)
         self.openai_available = False
         openai_key = getattr(Config, 'OPENAI_API_KEY', None)
         if openai_key:
             try:
                 self.openai_client = OpenAI(api_key=openai_key)
                 self.openai_available = True
-                self.logger.info("Fallback 2 (OpenAI) configured successfully.")
+                self.logger.info("Fallback 3 (OpenAI) configured successfully.")
             except Exception as e:
                 self.logger.warning("Failed to configure OpenAI Fallback: %s", str(e))
 
-        # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call
+        # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call.
+        # Order: Groq (primary) -> Gemini -> NVIDIA NIM -> OpenAI (last resort, kept
+        # intact despite currently failing with insufficient_quota — an external
+        # billing issue, not a code defect).
         self._providers_waterfall = ["groq"]
         if self.gemini_available:
             self._providers_waterfall.append("gemini")
+        if self.nvidia_nim_available:
+            self._providers_waterfall.append("nvidia_nim")
         if self.openai_available:
             self._providers_waterfall.append("openai")
 
@@ -108,8 +220,12 @@ class BaseAgent(ABC):
         model_override, when given, is only honored for Groq (the primary provider) — it
         exists so lightweight extraction calls (keyword generation, relevance filtering)
         can use a cheaper/faster model while synthesis calls keep the configured default.
-        Gemini/OpenAI are fallbacks, not the primary cost driver, so they always use their
-        one configured model regardless of tier.
+        Gemini, NVIDIA NIM, and OpenAI are all fallbacks, not the primary
+        cost driver, so each of them always uses its own single configured model
+        (Config.GEMINI_MODEL_NAME / NVIDIA_NIM_MODEL_NAME / OPENAI_MODEL_NAME)
+        regardless of model_override — the parameter is silently ignored for all
+        three, exactly as it always was for Gemini/OpenAI before NVIDIA NIM was
+        added to the waterfall.
         """
         if provider_name == "groq":
             chat_completion = self.groq_client.chat.completions.create(
@@ -128,6 +244,16 @@ class BaseAgent(ABC):
             )
             return response.text
             
+        elif provider_name == "nvidia_nim":
+            if not getattr(self, 'nvidia_nim_available', False):
+                raise ValueError("NVIDIA NIM is not configured.")
+            response = self.nvidia_nim_client.chat.completions.create(
+                model=Config.NVIDIA_NIM_MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=Config.LLM_TIMEOUT_SECONDS
+            )
+            return response.choices[0].message.content
+
         elif provider_name == "openai":
             if not getattr(self, 'openai_available', False):
                 raise ValueError("OpenAI is not configured.")
@@ -137,14 +263,18 @@ class BaseAgent(ABC):
                 timeout=Config.LLM_TIMEOUT_SECONDS
             )
             return response.choices[0].message.content
-            
+
         else:
             raise ValueError(f"Unknown LLM provider requested: {provider_name}")
 
     @staticmethod
     def _is_rate_limit_error(err_str: str) -> bool:
-        """Recognizes rate-limit signals across Groq/Gemini/OpenAI's differently-shaped
-        error strings (HTTP 429, provider-specific quota wording)."""
+        """Recognizes rate-limit signals across all four waterfall providers'
+        differently-shaped error strings (HTTP 429, provider-specific quota wording).
+        Groq, Gemini, and OpenAI have their own distinct wordings; NVIDIA NIM goes
+        through the OpenAI SDK (OpenAI-compatible API) so its errors are typically
+        OpenAI-shaped, but the marker list below is deliberately provider-agnostic
+        rather than enumerating each SDK's exact format."""
         lowered = err_str.lower()
         return any(marker in lowered for marker in (
             "429", "rate limit", "rate_limit", "quota", "resource_exhausted", "too many requests"
@@ -158,19 +288,39 @@ class BaseAgent(ABC):
         return max(0.0, until - time.time())
 
     @classmethod
-    def _start_provider_cooldown(cls, provider: str, seconds: float = None) -> float:
+    def _start_provider_cooldown(cls, provider: str, seconds: float = None, persist: bool = True) -> float:
         """Marks *provider* as rate-limited for `seconds` (default: Config value).
         Shared across all agents in this process, so a 429 discovered by one agent
-        immediately protects every other agent's waterfall for the rest of the run."""
+        immediately protects every other agent's waterfall for the rest of the run.
+
+        persist=False skips the cross-run SQLite write (see the call below): this is
+        for cooldowns that carry no information about the provider's actual
+        server-side state — i.e. a proactive client-side rejection where no real
+        request ever reached the provider — and so must NOT be inherited by a fresh
+        cold-started process. Real 429/413-rate-shaped responses from an actual
+        provider call must keep persist=True (the default) so cold starts still
+        benefit from cross-run protection, unchanged from before this parameter
+        existed."""
         seconds = Config.LLM_RATE_LIMIT_COOLDOWN_SECONDS if seconds is None else seconds
+        until = time.time() + seconds
         with cls._cooldown_lock:
-            cls._provider_cooldowns[provider] = time.time() + seconds
+            cls._provider_cooldowns[provider] = until
+        if persist:
+            # Persist so a cold-started process (e.g. a future per-project container)
+            # doesn't rediscover the same rate limit from scratch. Best-effort: a DB
+            # write failure must not break the in-process cooldown that already
+            # protects this run.
+            try:
+                cls._get_db_manager().set_cooldown(provider, until)
+            except Exception:
+                pass
         return seconds
 
     def ask_llm(self, prompt: str, model_override: str = None) -> str:
         """
         Sends a prompt using a Multi-LLM Waterfall strategy.
-        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> OpenAI) if available.
+        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> NVIDIA NIM ->
+        OpenAI) if available.
         A provider that returns a rate-limit error is put into a shared cooldown and
         skipped (by this agent and every other agent in the process) until it expires,
         instead of being retried with generic backoff or re-discovered independently by
@@ -178,7 +328,8 @@ class BaseAgent(ABC):
 
         model_override lets a caller use a cheaper/faster Groq model for lightweight
         extraction work (see Config.LLM_EXTRACTION_MODEL_NAME) while synthesis calls
-        keep the default. Ignored for the Gemini/OpenAI fallbacks.
+        keep the default. Ignored for the Gemini, NVIDIA NIM, and OpenAI
+        fallbacks — each of those always uses its own single configured model.
         """
         max_retries = Config.LLM_MAX_RETRIES
         skipped_on_cooldown = []
@@ -213,6 +364,46 @@ class BaseAgent(ABC):
                 except Exception as e:
                     self.logger.warning("[%s] API call failed on attempt %d: %s", provider.upper(), attempt + 1, str(e))
                     err_str = str(e)
+                    lowered_err_early = err_str.lower()
+
+                    # A bare "quota" substring (caught by _is_rate_limit_error below)
+                    # conflates two very different situations: a renewing quota (daily/
+                    # per-minute request caps that reset on their own — correctly
+                    # transient) and an exhausted billing allowance with no automatic
+                    # reset (OpenAI's real insufficient_quota error, or a 402
+                    # payment_required-class response — permanent until a human adds
+                    # billing/credits). Markers here are deliberately specific
+                    # multi-word/structured phrases, not the bare word "quota", mirroring
+                    # the is_rate_shaped_413 pattern below: a real OpenAI insufficient_quota
+                    # error reads "You exceeded your current quota, please check your plan
+                    # and billing details ... 'type': 'insufficient_quota' ... 'code':
+                    # 'insufficient_quota'"; a real 402 payment-required error (logged by
+                    # this project's own LiveProbeAgent) reads "Payment required to access
+                    # this resource ... 'type': 'payment_required_error' ... 'code':
+                    # 'payment_required'". Neither of those should ever start a cooldown —
+                    # cooldowns mean "try again later," which is wrong when the fix is a
+                    # human adding billing, not waiting.
+                    #
+                    # Deliberately NOT included as a standalone marker: the generic
+                    # "check your plan and billing details" sentence. Both OpenAI and
+                    # Gemini attach that exact boilerplate to effectively all quota-style
+                    # 429s — including ordinary renewing per-minute/per-day limits, not
+                    # just genuinely exhausted billing — so alone it is not a reliable
+                    # permanent-vs-transient signal and would overcorrect. It's only
+                    # trustworthy combined with a structured code/type field
+                    # ("insufficient_quota") or an actual 402 status, both handled below.
+                    is_permanent_quota_error = (
+                        "insufficient_quota" in lowered_err_early
+                        or "payment_required" in lowered_err_early
+                        or ("402" in err_str and "quota" in lowered_err_early)
+                    )
+                    if is_permanent_quota_error:
+                        self.logger.error(
+                            "[%s] Permanent quota/billing exhaustion (not a renewing rate "
+                            "limit) — skipping retries for this provider, no cooldown.",
+                            provider.upper()
+                        )
+                        break
 
                     if self._is_rate_limit_error(err_str):
                         cooldown = self._start_provider_cooldown(provider)
@@ -222,10 +413,48 @@ class BaseAgent(ABC):
                         )
                         break
 
-                    # Permanent errors — retrying won't help, move to next provider immediately
+                    # Permanent errors — retrying won't help, move to next provider immediately.
+                    # A 413 is NOT always permanent: Groq's TPM (tokens-per-minute) ceiling
+                    # also surfaces as 413, and TPM limits are transient (they clear on
+                    # their own) — treating every 413 as permanent meant the very next call
+                    # in the same run hit the identical TPM wall and repeated the wasted
+                    # attempt. Only a genuinely oversized single request (chunking is the
+                    # real fix, not retry) stays classified as permanent; a 413 whose
+                    # message names a per-minute/rate ceiling is rate-limit-shaped and
+                    # routed through the same cooldown path as a real 429.
+                    lowered_err = err_str.lower()
                     is_auth_error = "401" in err_str or "403" in err_str or "invalid_api_key" in err_str or "Incorrect API key" in err_str
-                    is_size_error = "413" in err_str or "context_length_exceeded" in err_str or ("tokens" in err_str and "reduce" in err_str)
-                    if is_auth_error or is_size_error:
+                    has_413 = "413" in err_str
+                    is_context_length_error = "context_length_exceeded" in lowered_err or "maximum context length" in lowered_err
+                    # NOTE: markers are deliberately specific multi-word phrases, not a
+                    # bare "rate" substring — "rate" alone false-positives on ordinary
+                    # English words like "generate", "accurate", "separate", "moderate"
+                    # that show up in genuinely permanent oversized-request messages
+                    # (e.g. "request too large to generate a response"). A false match
+                    # here would put a healthy provider into a bogus cooldown that then
+                    # gets persisted to SQLite, so a cold-started process would honor a
+                    # cooldown that was never real.
+                    is_rate_shaped_413 = has_413 and not is_context_length_error and any(
+                        marker in lowered_err for marker in (
+                            "tokens per minute", "tpm", "rate limit", "per minute", "requests per"
+                        )
+                    )
+
+                    if is_rate_shaped_413:
+                        cooldown = self._start_provider_cooldown(provider)
+                        self.logger.error(
+                            "[%s] 413 is rate-limit-shaped (TPM/rate ceiling) — entering "
+                            "%.0fs cooldown, skipping remaining retries for this provider.",
+                            provider.upper(), cooldown
+                        )
+                        break
+
+                    is_permanent_size_error = (
+                        is_context_length_error
+                        or (has_413 and not is_rate_shaped_413)
+                        or ("tokens" in lowered_err and "reduce" in lowered_err)
+                    )
+                    if is_auth_error or is_permanent_size_error:
                         self.logger.error("[%s] Permanent error (auth/size) — skipping retries for this provider.", provider.upper())
                         break
                     if attempt < max_retries - 1:

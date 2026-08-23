@@ -30,7 +30,9 @@ class Config:
     RESEARCHERS_MAP_PATH = BASE_DIR / "researchers_map.json"
     SCHOLAR_STATE_PATH = BASE_DIR / "scholar_state.json"
     OVERLEAF_STATE_PATH = BASE_DIR / "overleaf_state.json"
-    OVERLEAF_USER_DATA_DIR: str = str(BASE_DIR / "playwright_state" / "overleaf_profile")
+    # Run-lock file (fcntl.flock) preventing two concurrent main.py invocations
+    # (e.g. a scheduled run overlapping a still-running one) from racing.
+    RUN_LOCK_PATH = BASE_DIR / "run.lock"
     
     # ==========================================
     # 3. LLM Configuration (Groq)
@@ -50,7 +52,42 @@ class Config:
     
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL_NAME = "gpt-4o-mini"
-    
+
+    # NVIDIA NIM — live-verified end-to-end (2026-08-21) with a real authenticated
+    # chat.completions call through the production BaseAgent._ask_provider('nvidia_nim',
+    # ...) path (see tests/live/test_llm_providers_live.py). Model id and base URL
+    # below are exactly what was called and returned a real 200 response ("PONG"),
+    # so both are confirmed correct as-is — no change needed.
+    #
+    # Context window: CONFIRMED — 1,000,000 tokens (native), per NVIDIA's own
+    # developer blog: "native 1M-token context window that gives agents long-term
+    # memory for aligned, high-accuracy reasoning" —
+    # https://developer.nvidia.com/blog/introducing-nemotron-3-super-an-open-hybrid-mamba-transformer-moe-for-agentic-reasoning/
+    # (checked live 2026-08-21; note some third-party hosts cap the *usable* window
+    # lower for their own VRAM/deployment reasons — this 1M figure is NVIDIA's own
+    # stated native limit for the model, which is what applies on NVIDIA's own
+    # build.nvidia.com-hosted NIM endpoint used here).
+    #
+    # Rate limits: NOT CONFIRMED — the live response above returned no
+    # x-ratelimit-*/rate-limit-shaped headers at all (inspected the raw HTTP
+    # response via the OpenAI SDK's `.with_raw_response`, not just the parsed
+    # object: only access-control-expose-headers, connection, content-type, date,
+    # nvcf-reqid, nvcf-status, transfer-encoding, vary were present — no quota/
+    # remaining/reset headers). NVIDIA has no official published numeric free-tier
+    # RPM limit for build.nvidia.com; an NVIDIA forum moderator (not NVIDIA's own
+    # documentation) states only that the limit "is dependent on model, use-case
+    # and the amount of current overall traffic" with no fixed number
+    # (https://forums.developer.nvidia.com/t/clarity-on-nim-api-free-tier-rate-limit-increases/369624,
+    # checked live 2026-08-21). A commonly-cited unofficial community baseline is
+    # ~40 requests/minute per API key across all models, but this is NOT an
+    # NVIDIA-documented SLA and was not observed in this session's response
+    # headers — do not hardcode a numeric NVIDIA_NIM_RATE_LIMIT_RPM from this until
+    # an authoritative number is obtained (e.g. from the account dashboard at
+    # build.nvidia.com, which was not checked this session).
+    NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY")
+    NVIDIA_NIM_MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b"
+    NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
     LLM_MAX_RETRIES = 3
     LLM_TIMEOUT_SECONDS = 30
     # How long a provider is skipped after returning a rate-limit error, shared across

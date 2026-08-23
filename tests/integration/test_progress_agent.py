@@ -88,3 +88,33 @@ class TestProgressTrackingAgent:
             )
             # Should not crash
             agent.run()
+
+    def test_analyze_delta_alerts_admin_on_waterfall_exhaustion(self, progress_agent, mock_notifier, sample_project_name):
+        """When ask_llm raises RuntimeError (full waterfall exhausted), analyze_delta
+        must still return the degraded-output placeholder (unchanged behavior) AND
+        send exactly one admin alert for the project."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
+            feedback, suggestions = progress_agent.analyze_delta("some delta text", sample_project_name)
+
+        assert "unable to generate feedback" in feedback
+        assert "unable to generate feedback" in suggestions
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert sample_project_name in kwargs["subject"]
+
+    def test_analyze_delta_dedups_alert_for_same_project(self, progress_agent, mock_notifier, sample_project_name):
+        """Two waterfall-exhaustion failures for the SAME project in one run produce
+        only one admin alert."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+            progress_agent.analyze_delta("delta 1", sample_project_name)
+            progress_agent.analyze_delta("delta 2", sample_project_name)
+
+        mock_notifier.send_admin_alert.assert_called_once()
+
+    def test_analyze_delta_alerts_separately_for_different_projects(self, progress_agent, mock_notifier):
+        """Waterfall-exhaustion failures for DIFFERENT projects each get their own alert."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+            progress_agent.analyze_delta("delta", "ProjectA")
+            progress_agent.analyze_delta("delta", "ProjectB")
+
+        assert mock_notifier.send_admin_alert.call_count == 2

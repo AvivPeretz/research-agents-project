@@ -34,6 +34,12 @@ class LiteratureResearchAgent(BaseAgent):
         self.db = db
         self.logger.info("LiteratureResearchAgent initialized with %d projects.", len(self.projects))
 
+    # _alert_waterfall_exhausted and its instance-level dedup guard
+    # (_waterfall_exhausted_alerted) now live on BaseAgent — promoted there once
+    # ProgressTrackingAgent and ResearchEnhancementAgent needed the identical
+    # per-project-per-run alert-on-waterfall-exhaustion pattern. Behavior for this
+    # agent is unchanged: same dedup key (project_name), same guarded call sites below.
+
     def _read_project_text(self, project_name: str) -> str:
         """Reads all .tex files for the project and returns a structure-aware sample."""
         project_dir = os.path.join(Config.OVERLEAF_DIR, project_name)
@@ -128,6 +134,7 @@ class LiteratureResearchAgent(BaseAgent):
             return project_name, project_name + " method"
         except RuntimeError as e:
             self.logger.error("LLM failed to generate keywords: %s", str(e))
+            self._alert_waterfall_exhausted("keyword extraction", project_name)
             return project_name, project_name + " method"
 
     def _filter_relevant_papers(self, project_name: str, text: str, papers: list) -> list:
@@ -229,7 +236,11 @@ class LiteratureResearchAgent(BaseAgent):
         except ValidationError as e:
             self.logger.error("Pydantic Schema Validation Failed! LLM hallucinated bad structure: %s", str(e))
             return fallback_data
-        except (RuntimeError, ValueError, json.JSONDecodeError) as e:
+        except RuntimeError as e:
+            self.logger.error("Failed to parse or extract JSON from LLM: %s", str(e))
+            self._alert_waterfall_exhausted("literature summarization", project)
+            return fallback_data
+        except (ValueError, json.JSONDecodeError) as e:
             self.logger.error("Failed to parse or extract JSON from LLM: %s", str(e))
             return fallback_data
 
@@ -261,7 +272,7 @@ class LiteratureResearchAgent(BaseAgent):
                     all_papers.append(paper)
 
         all_papers = self._filter_relevant_papers(project, text, all_papers)
-        all_papers = all_papers[:15]
+        all_papers = all_papers[:Config.MAX_LITERATURE_PAPERS]
 
         if not all_papers:
             self.logger.warning(
@@ -355,7 +366,7 @@ class LiteratureResearchAgent(BaseAgent):
 
     def run(self):
         self.logger.info("Starting the literature research cycle.")
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=getattr(Config, 'LITERATURE_MAX_WORKERS', 4)) as executor:
             futures = {executor.submit(self._process_project, p): p for p in self.projects}
             for future in as_completed(futures):
                 project = futures[future]

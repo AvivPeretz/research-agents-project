@@ -12,15 +12,28 @@ from utils.database_manager import DatabaseManager
 
 
 @pytest.fixture(autouse=True)
-def _reset_llm_provider_cooldowns():
+def _reset_llm_provider_cooldowns(tmp_path, monkeypatch):
     """BaseAgent._provider_cooldowns is a class-level dict shared across every agent
     instance/subclass in the process (by design — see base_agent.py) so a real 429
     protects the whole pipeline run. In tests that same sharing would leak state
-    between unrelated test cases, so reset it before and after every test."""
+    between unrelated test cases, so reset it before and after every test.
+
+    Also resets/isolates the cross-run SQLite cooldown persistence added alongside the
+    in-memory dict: BaseAgent._shared_db_manager is a lazily-created, class-level
+    DatabaseManager (same "shared for the process" rationale as _provider_cooldowns).
+    Left unpatched, the first test to trigger a cooldown would create/write a real
+    system.db under the actual research_library/ directory and could leak a fake
+    cooldown into a real future run. Config.LIBRARY_DIR is redirected to a per-test
+    tmp_path (same pattern as the db_in_memory fixture below) so any lazily-created
+    DatabaseManager this test triggers is fully isolated."""
     from agents.base_agent import BaseAgent
+    from config import Config
+    monkeypatch.setattr(Config, "LIBRARY_DIR", str(tmp_path))
     BaseAgent._provider_cooldowns.clear()
+    BaseAgent._shared_db_manager = None
     yield
     BaseAgent._provider_cooldowns.clear()
+    BaseAgent._shared_db_manager = None
 
 
 @pytest.fixture

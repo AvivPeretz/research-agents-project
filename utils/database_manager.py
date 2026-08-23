@@ -83,6 +83,12 @@ class DatabaseManager:
                 delta_char_count INTEGER,
                 FOREIGN KEY(project_name) REFERENCES project_state(project_name)
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS llm_provider_cooldowns (
+                provider TEXT PRIMARY KEY,
+                cooldown_until TIMESTAMP
+            );
             """
         ]
         try:
@@ -103,6 +109,39 @@ class DatabaseManager:
             self.logger.info("Database tables verified/created successfully.")
         except sqlite3.Error as e:
             self.logger.error("Failed to create/upgrade tables: %s", str(e))
+
+    # ==========================================
+    # LLM PROVIDER COOLDOWN METHODS (For BaseAgent cross-run circuit breaker)
+    # ==========================================
+    def get_all_cooldowns(self) -> dict:
+        """Returns {provider: cooldown_until_unix_ts} for every persisted cooldown.
+        Used at BaseAgent.__init__ (cold start) so a fresh process doesn't rediscover
+        a rate limit an earlier process already found."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT provider, cooldown_until FROM llm_provider_cooldowns")
+                return {row['provider']: row['cooldown_until'] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            self.logger.error("Failed to load LLM provider cooldowns: %s", str(e))
+            return {}
+
+    def set_cooldown(self, provider: str, cooldown_until: float):
+        """Upserts the cooldown-expiry timestamp (unix epoch seconds) for *provider*."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO llm_provider_cooldowns (provider, cooldown_until)
+                    VALUES (?, ?)
+                    ON CONFLICT(provider) DO UPDATE SET cooldown_until = excluded.cooldown_until
+                    """,
+                    (provider, cooldown_until)
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            self.logger.error("Failed to persist LLM provider cooldown for '%s': %s", provider, str(e))
 
     # ==========================================
     # SYNC REGISTRY METHODS (For DataIngestion)

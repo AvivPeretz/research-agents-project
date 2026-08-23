@@ -116,7 +116,6 @@ class TestDataIngestionAgent:
         os.makedirs(downloads_dir, exist_ok=True)
 
         monkeypatch.setattr(Config, "OVERLEAF_DIR", downloads_dir)
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", str(tmp_path / "profile"))
         monkeypatch.setattr(Config, "OVERLEAF_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "SCHOLAR_STATE_PATH", Path(state_file))
         monkeypatch.setattr(Config, "PLAYWRIGHT_HEADLESS", True)
@@ -146,7 +145,6 @@ class TestDataIngestionAgent:
     def test_db_none_aborts_and_returns_empty_list(self, mock_notifier, monkeypatch):
         """sync_all_projects() returns [] immediately when db is None."""
         monkeypatch.setattr(Config, "OVERLEAF_DIR", "/tmp/_dia_test_downloads")
-        monkeypatch.setattr(Config, "OVERLEAF_USER_DATA_DIR", "/tmp/_dia_test_profile")
         a = DataIngestionAgent(db=None, notifier=mock_notifier)
         result = a.sync_all_projects()
         assert result == []
@@ -424,6 +422,36 @@ class TestDataIngestionAgent:
 
         assert "Successful Project" in result
         assert "Failing Project" not in result
+
+    # TEST — FIX 4d: outer-loop exception (outside the per-project try) must be
+    # logged via self.logger.error and alerted via self.notifier.send_admin_alert,
+    # not silently swallowed by a bare `print`.
+    def test_outer_loop_exception_logs_and_alerts_admin(self, agent, caplog):
+        """An exception raised outside the per-project try (e.g. while pre-fetching
+        known_last_modified via db.get_all_last_modified) must be reported through
+        self.logger.error(...) and self.notifier.send_admin_alert(...), not just
+        printed to stdout."""
+        self._populate_profile(agent._profile_dir)
+
+        row = _make_project_row("Some Project", "/project/sp1", "Some Project 1 day ago")
+        mock_pw, mock_context, mock_page = _make_playwright_mocks()
+        _page_rows_locator(mock_page, [row])
+
+        # get_all_last_modified is called once, right after the row-scan, and is
+        # strictly outside the per-project try/except block further down.
+        agent._mock_db.get_all_last_modified.side_effect = RuntimeError(
+            "Simulated DB failure outside the per-project try"
+        )
+
+        import logging
+        with caplog.at_level(logging.ERROR, logger="DataIngestionAgent"), \
+             patch("ingestion.data_ingestion_agent.sync_playwright", mock_pw), \
+             patch("ingestion.data_ingestion_agent.time.sleep"):
+            result = agent.sync_all_projects()
+
+        assert result == []
+        agent.notifier.send_admin_alert.assert_called_once()
+        assert any("Simulated DB failure" in rec.message for rec in caplog.records)
 
     def test_zip_download_recovers_from_transient_failure(self, agent):
         """A ZIP download that fails once (e.g. a network blip) and succeeds on retry

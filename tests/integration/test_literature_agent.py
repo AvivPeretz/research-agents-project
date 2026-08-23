@@ -246,3 +246,57 @@ This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
 
         assert "xxxxxxxxxx" * 500 not in payload_prompt  # the raw 5000-char abstract must not survive intact
         assert "…" in payload_prompt  # truncation marker present
+
+    def test_run_respects_configured_max_workers(self, mock_notifier, sample_project_name, monkeypatch):
+        """Config.LITERATURE_MAX_WORKERS must actually control ThreadPoolExecutor's
+        concurrency, matching the pattern already used in ProgressTrackingAgent."""
+        from config import Config
+
+        monkeypatch.setattr(Config, "LITERATURE_MAX_WORKERS", 7)
+
+        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON), \
+             patch("agents.literature_research_agent.ThreadPoolExecutor") as mock_executor_cls:
+            # Make the mocked executor behave enough like the real one to not crash run().
+            mock_executor_cls.return_value.__enter__.return_value.submit.return_value = MagicMock()
+            mock_executor_cls.return_value.__exit__.return_value = False
+
+            with patch("agents.literature_research_agent.as_completed", return_value=[]):
+                agent = LiteratureResearchAgent(active_projects=[sample_project_name], notifier=mock_notifier)
+                agent.run()
+
+        mock_executor_cls.assert_called_once_with(max_workers=7)
+
+    def test_process_project_caps_papers_at_configured_max(self, mock_notifier, sample_project_name, monkeypatch):
+        """Config.MAX_LITERATURE_PAPERS must actually cap the number of papers carried
+        forward, not the hardcoded literal 15."""
+        from config import Config
+
+        monkeypatch.setattr(Config, "MAX_LITERATURE_PAPERS", 3)
+
+        many_papers = [
+            {"title": f"Paper {i}", "abstract": "abstract text", "year": "2024",
+             "citationCount": "1", "venue": "V", "link": "http://example.com"}
+            for i in range(10)
+        ]
+
+        captured = {}
+
+        def fake_filter_relevant(project, text, papers):
+            captured["count_before_cap"] = len(papers)
+            return papers
+
+        def fake_enrich(papers):
+            captured["count_after_cap"] = len(papers)
+            return papers
+
+        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON), \
+             patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=many_papers), \
+             patch("utils.literature_fetcher.LiteratureFetcher.enrich_with_openalex", side_effect=fake_enrich), \
+             patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Sample research text"), \
+             patch.object(LiteratureResearchAgent, "_filter_relevant_papers", side_effect=fake_filter_relevant):
+
+            agent = LiteratureResearchAgent(active_projects=[sample_project_name], notifier=mock_notifier)
+            agent.run()
+
+        assert captured["count_before_cap"] > 3
+        assert captured["count_after_cap"] == 3

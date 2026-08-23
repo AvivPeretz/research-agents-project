@@ -280,6 +280,7 @@ class ResearchEnhancementAgent(BaseAgent):
             return tasks
         except RuntimeError as e:
             self.logger.error("LLM Generation failed: %s", str(e))
+            self._alert_waterfall_exhausted("Stanford task-list generation", project_name)
             return "⚠️ *System Note: The AI assistant was unable to generate actionable tasks at this time due to a temporary connection issue. Please review the raw feedback manually.*"
 
     def _load_related_papers_from_csv(self, project_name: str) -> str:
@@ -519,6 +520,7 @@ avoid vague tasks like "improve the writing."
             review_content = self.ask_llm(prompt)
         except RuntimeError as e:
             self.logger.error("Internal review LLM call failed for %s: %s", project_name, str(e))
+            self._alert_waterfall_exhausted("internal peer review", project_name)
             return False
 
         # Step 6: Save to same path Stanford would use
