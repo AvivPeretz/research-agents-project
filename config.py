@@ -48,8 +48,68 @@ class Config:
     LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", LLM_MODEL_NAME)
     
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    # gemini-1.5-flash is retired (confirmed 2026-08-21 by calling the live
+    # models.list endpoint with a real GEMINI_API_KEY — it is absent from the current
+    # catalog). gemini-2.5-flash was confirmed present in that same live models.list
+    # call AND confirmed working with a live generate_content("Say OK") test call made
+    # during this session. Stable (non-preview) 2.5-generation model — same
+    # speed/cost tier as the old 1.5-flash it replaces.
     GEMINI_MODEL_NAME = "gemini-2.5-flash"
-    
+
+    # Gemma 4 — live-verified end-to-end (2026-08-23) via a real
+    # client.models.generate_content(...) call using the SAME genai.Client and the
+    # SAME GEMINI_API_KEY as the Gemini fallback above (no separate API key/scope
+    # needed; models.list() confirms both Gemma 4 variants are served from the same
+    # catalog as gemini-2.5-flash).
+    #
+    # Two candidates were both confirmed live and callable this session:
+    #   - models/gemma-4-26b-a4b-it (MoE, ~26B total/4B active params)
+    #   - models/gemma-4-31b-it (dense 31B)
+    # Chose gemma-4-26b-a4b-it as the default: it returned a real "OK" to
+    # generate_content("Say OK") same as the 31b variant, both report identical
+    # input/output token limits (262,144 / 32,768 via models.list()), and the MoE
+    # architecture gives near-31B quality at a fraction of the compute/latency —
+    # appropriate for a waterfall fallback tier where speed matters and this tier
+    # is already past the primary (Groq) and Fallback 1 (Gemini) positions.
+    #
+    # Structured JSON output: CONFIRMED working (2026-08-23) — a real
+    # generate_content call with
+    # config=types.GenerateContentConfig(response_mime_type="application/json")
+    # against a prompt shaped like domain.schemas.LiteratureReport returned valid
+    # JSON that LiteratureReport.model_validate_json() parsed successfully with no
+    # errors. Uses the identical GenerateContentConfig mechanism as the plain
+    # Gemini fallback — no Gemma-specific config needed.
+    #
+    # Context window in practice: CONFIRMED — a real ~15,000-char manuscript-style
+    # excerpt (LaTeX-shaped repeated text, same order of magnitude as
+    # utils.overleaf_connector.extract_representative_sample output) was accepted
+    # and summarized without a context-length error. This is well under the
+    # 262,144-input-token catalog limit, so it does not prove that ceiling, only
+    # that realistic-sized payloads from this codebase work.
+    #
+    # Rate limits: NOT CONFIRMED with an authoritative number. The real response
+    # from this session exposed no rate-limit-shaped HTTP headers at all (checked
+    # via response.sdk_http_response.headers — only x-gemini-service-tier,
+    # content-type, vary, content-encoding, date, server, and generic security/
+    # transport headers were present; no x-ratelimit-*/quota/remaining/reset
+    # headers). Google's official rate-limits page
+    # (https://ai.google.dev/gemini-api/docs/rate-limits, checked live 2026-08-23)
+    # covers only Gemini-branded models and does not list Gemma models at all —
+    # it defers to the per-account AI Studio dashboard (aistudio.google.com/
+    # rate-limit), which requires an authenticated browser session and was not
+    # checked this session. The Gemma model-card docs page
+    # (https://ai.google.dev/gemma/docs/core, checked live 2026-08-23) also has no
+    # rate-limit section. The only Gemma-4-specific numbers found anywhere were
+    # from an UNOFFICIAL community forum post
+    # (https://discuss.ai.google.dev/t/gemma-4-token-limit/175091, checked live
+    # 2026-08-23), reporting a recent change to ~16K TPM and ~14K RPD — this is a
+    # user complaint on Google's own discussion forum, NOT an official Google
+    # announcement or documentation page, and should not be hardcoded as an SLA.
+    # Do not hardcode a numeric GEMMA_RATE_LIMIT_* constant from this until an
+    # authoritative source (official docs or the account's own AI Studio
+    # dashboard) is checked.
+    GEMMA_MODEL_NAME = "models/gemma-4-26b-a4b-it"
+
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL_NAME = "gpt-4o-mini"
 

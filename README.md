@@ -157,10 +157,11 @@ exponential-backoff retry logic, and rotating file logging.
 ### Infrastructure
 **`BaseAgent`** (`agents/base_agent.py`) — abstract base class for all LLM agents.
 
-- **Multi-LLM Waterfall**: tries Groq (primary) → Gemini (fallback 1) → NVIDIA NIM
-  (fallback 2) → OpenAI (fallback 3). Each provider gets up to 3 retries with
-  exponential backoff before the waterfall advances. Permanent auth/context-size
-  errors skip retries immediately.
+- **Multi-LLM Waterfall**: tries Groq (primary) → Gemini (fallback 1) → Gemma 4
+  (fallback 2) → NVIDIA NIM (fallback 3) → OpenAI (fallback 4). Each provider gets
+  up to 3 retries with exponential backoff before the waterfall advances. Permanent
+  auth/context-size errors skip retries immediately. Gemma 4 reuses the same
+  `genai.Client`/`GEMINI_API_KEY` as the Gemini fallback — no separate key needed.
 - Raises `RuntimeError` when all providers are exhausted — never returns `None` silently.
 - Sets up a `RotatingFileHandler` (5 MB limit, 3 backups) plus `StreamHandler` for each
   agent, writing to `logs/<AgentName>.log`.
@@ -190,7 +191,7 @@ exits cleanly instead of racing it. See [How to Run](#how-to-run).
 | Layer | Technology |
 |---|---|
 | Language | Python 3.10–3.13 |
-| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-2.5-flash`), NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`), OpenAI (`gpt-4o-mini`) — waterfall order, verified from `agents/base_agent.py`; expect this roster to keep changing as providers are evaluated |
+| LLM providers | Groq (`openai/gpt-oss-120b`), Gemini (`gemini-2.5-flash`), Gemma 4 (`models/gemma-4-26b-a4b-it`, reuses the Gemini key), NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`), OpenAI (`gpt-4o-mini`) — waterfall order, verified from `agents/base_agent.py`; expect this roster to keep changing as providers are evaluated |
 | LLM contracts | Pydantic v2 |
 | Browser automation | Playwright (Chromium) |
 | Literature search | Semantic Scholar API → SerpAPI → scholarly |
@@ -217,7 +218,8 @@ exits cleanly instead of racing it. See [How to Run](#how-to-run).
 
 Gemini, NVIDIA NIM, and OpenAI API keys are **optional**. They activate as automatic
 LLM fallbacks when Groq is unavailable. The system runs correctly with only Groq
-configured.
+configured. Gemma 4 does not need its own key — it activates automatically
+whenever `GEMINI_API_KEY` is set, reusing the same Gemini client/credential.
 
 ---
 
@@ -548,8 +550,8 @@ yet built, and from what's blocked on a decision outside engineering.
 
 **Implemented and verified (real code, real test coverage):**
 - All six agents described in [Architecture](#architecture), orchestrated by `main.py`.
-- The four-provider LLM waterfall (Groq → Gemini → NVIDIA NIM → OpenAI), including
-  shared/persisted cooldowns and permanent-vs-transient error classification.
+- The five-provider LLM waterfall (Groq → Gemini → Gemma 4 → NVIDIA NIM → OpenAI),
+  including shared/persisted cooldowns and permanent-vs-transient error classification.
 - The `fcntl`-based run-lock preventing overlapping `main.py` invocations.
 - 400 passing tests across unit, integration, crash/resilience, DB, idempotency, and
   stress suites (verified by running the suite in this session — see
@@ -640,10 +642,11 @@ mitigates this, but cross-agent parallelism is not implemented.
   text + rolling CSV data; activated automatically as fallback when Stanford pipeline fails.
 - [x] **Three-tier literature search** — Semantic Scholar → SerpAPI → scholarly, with
   OpenAlex enrichment and LLM relevance filtering.
-- [x] **Multi-LLM waterfall** — Groq → Gemini → NVIDIA NIM → OpenAI with per-provider
-  exponential backoff, shared/persisted cooldowns, and permanent-error classification.
-  The provider roster has changed twice already (a Cerebras integration was added and
-  fully removed after a live billing failure) — treat this order as subject to further
-  change as providers are evaluated, not as a fixed architecture decision.
+- [x] **Multi-LLM waterfall** — Groq → Gemini → Gemma 4 → NVIDIA NIM → OpenAI with
+  per-provider exponential backoff, shared/persisted cooldowns, and permanent-error
+  classification. The provider roster has changed several times already (a Cerebras
+  integration was added and fully removed after a live billing failure; Gemma 4 was
+  added 2026-08-23, reusing the existing Gemini key) — treat this order as subject to
+  further change as providers are evaluated, not as a fixed architecture decision.
 - [x] **Run-lock** — `fcntl`-based lock in `main.py` preventing overlapping scheduled
   invocations from racing each other.

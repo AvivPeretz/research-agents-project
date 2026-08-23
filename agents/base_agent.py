@@ -19,7 +19,7 @@ class BaseAgent(ABC):
     Abstract base class for all agents in the project.
     Provides common functionality like logging and LLM integration.
     Features a Multi-LLM Waterfall strategy
-    (Groq -> Gemini -> NVIDIA NIM -> OpenAI) with built-in retries.
+    (Groq -> Gemini -> Gemma 4 -> NVIDIA NIM -> OpenAI) with built-in retries.
     """
 
     # Class-level (shared across every agent instance/subclass in this process) so that
@@ -157,8 +157,8 @@ class BaseAgent(ABC):
     def _setup_llm(self):
         """
         Initialize connections to LLM providers.
-        Sets up Groq as Primary, Gemini as Fallback 1, NVIDIA NIM as Fallback 2,
-        and OpenAI as Fallback 3 (last resort).
+        Sets up Groq as Primary, Gemini as Fallback 1, Gemma 4 as Fallback 2,
+        NVIDIA NIM as Fallback 3, and OpenAI as Fallback 4 (last resort).
         """
         # 1. Setup Groq (Primary - MUST EXIST)
         groq_key = Config.GROQ_API_KEY
@@ -180,35 +180,51 @@ class BaseAgent(ABC):
             except Exception as e:
                 self.logger.warning("Failed to configure Gemini Fallback: %s", str(e))
 
-        # 3. Setup NVIDIA NIM (Fallback 2) — also OpenAI-compatible.
+        # 3. Setup Gemma 4 (Fallback 2) — reuses the SAME genai.Client/GEMINI_API_KEY
+        # as Gemini above (live-verified 2026-08-23, see config.py's GEMMA_MODEL_NAME
+        # comment block for the full verification detail: no separate key/scope
+        # needed). Deliberately gated on gemini_available rather than re-checking
+        # gemini_key/re-instantiating a client: Gemma 4 and Gemini are the same
+        # provider account/credential, just different model ids, so there is nothing
+        # for a Gemma-specific setup branch to independently succeed or fail at that
+        # the Gemini setup above didn't already determine.
+        self.gemma_available = False
+        if self.gemini_available:
+            self.gemma_model_name = getattr(Config, 'GEMMA_MODEL_NAME', 'models/gemma-4-26b-a4b-it')
+            self.gemma_available = True
+            self.logger.info("Fallback 2 (Gemma 4) configured successfully.")
+
+        # 4. Setup NVIDIA NIM (Fallback 3) — also OpenAI-compatible.
         self.nvidia_nim_available = False
         nvidia_nim_key = getattr(Config, 'NVIDIA_NIM_API_KEY', None)
         if nvidia_nim_key:
             try:
                 self.nvidia_nim_client = OpenAI(api_key=nvidia_nim_key, base_url=Config.NVIDIA_NIM_BASE_URL)
                 self.nvidia_nim_available = True
-                self.logger.info("Fallback 2 (NVIDIA NIM) configured successfully.")
+                self.logger.info("Fallback 3 (NVIDIA NIM) configured successfully.")
             except Exception as e:
                 self.logger.warning("Failed to configure NVIDIA NIM Fallback: %s", str(e))
 
-        # 4. Setup OpenAI (Fallback 3 — last resort)
+        # 5. Setup OpenAI (Fallback 4 — last resort)
         self.openai_available = False
         openai_key = getattr(Config, 'OPENAI_API_KEY', None)
         if openai_key:
             try:
                 self.openai_client = OpenAI(api_key=openai_key)
                 self.openai_available = True
-                self.logger.info("Fallback 3 (OpenAI) configured successfully.")
+                self.logger.info("Fallback 4 (OpenAI) configured successfully.")
             except Exception as e:
                 self.logger.warning("Failed to configure OpenAI Fallback: %s", str(e))
 
         # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call.
-        # Order: Groq (primary) -> Gemini -> NVIDIA NIM -> OpenAI (last resort, kept
-        # intact despite currently failing with insufficient_quota — an external
-        # billing issue, not a code defect).
+        # Order: Groq (primary) -> Gemini -> Gemma 4 -> NVIDIA NIM -> OpenAI (last
+        # resort, kept intact despite currently failing with insufficient_quota — an
+        # external billing issue, not a code defect).
         self._providers_waterfall = ["groq"]
         if self.gemini_available:
             self._providers_waterfall.append("gemini")
+        if self.gemma_available:
+            self._providers_waterfall.append("gemma")
         if self.nvidia_nim_available:
             self._providers_waterfall.append("nvidia_nim")
         if self.openai_available:
@@ -220,12 +236,23 @@ class BaseAgent(ABC):
         model_override, when given, is only honored for Groq (the primary provider) — it
         exists so lightweight extraction calls (keyword generation, relevance filtering)
         can use a cheaper/faster model while synthesis calls keep the configured default.
-        Gemini, NVIDIA NIM, and OpenAI are all fallbacks, not the primary
+        Gemini, Gemma 4, NVIDIA NIM, and OpenAI are all fallbacks, not the primary
         cost driver, so each of them always uses its own single configured model
-        (Config.GEMINI_MODEL_NAME / NVIDIA_NIM_MODEL_NAME / OPENAI_MODEL_NAME)
-        regardless of model_override — the parameter is silently ignored for all
-        three, exactly as it always was for Gemini/OpenAI before NVIDIA NIM was
-        added to the waterfall.
+        (Config.GEMINI_MODEL_NAME / GEMMA_MODEL_NAME / NVIDIA_NIM_MODEL_NAME /
+        OPENAI_MODEL_NAME) regardless of model_override — the parameter is silently
+        ignored for all four, exactly as it always was for Gemini/OpenAI before
+        NVIDIA NIM (and now Gemma 4) were added to the waterfall.
+
+        Gemma 4 reuses the exact same `elif provider_name == "gemini":`-shaped branch
+        as plain Gemini (same genai.Client instance, same
+        `.models.generate_content(model=..., contents=...)` call shape, same `.text`
+        response attribute) rather than getting its own code path — live verification
+        this session (see config.py's GEMMA_MODEL_NAME comment) found no behavioral
+        difference to justify a separate branch: no different config object was
+        needed for structured JSON output (same `response_mime_type="application/json"`
+        GenerateContentConfig worked for both), and the response object has the
+        identical `.text` shape. The only difference is which model id string is
+        passed in.
         """
         if provider_name == "groq":
             chat_completion = self.groq_client.chat.completions.create(
@@ -243,7 +270,20 @@ class BaseAgent(ABC):
                 contents=prompt,
             )
             return response.text
-            
+
+        elif provider_name == "gemma":
+            # Deliberately reuses self.gemini_client (same genai.Client / same
+            # GEMINI_API_KEY) — only the model id differs from the "gemini" branch
+            # above. See this method's docstring for why this doesn't need its own
+            # SDK code path.
+            if not getattr(self, 'gemma_available', False):
+                raise ValueError("Gemma 4 is not configured.")
+            response = self.gemini_client.models.generate_content(
+                model=self.gemma_model_name,
+                contents=prompt,
+            )
+            return response.text
+
         elif provider_name == "nvidia_nim":
             if not getattr(self, 'nvidia_nim_available', False):
                 raise ValueError("NVIDIA NIM is not configured.")
@@ -269,12 +309,13 @@ class BaseAgent(ABC):
 
     @staticmethod
     def _is_rate_limit_error(err_str: str) -> bool:
-        """Recognizes rate-limit signals across all four waterfall providers'
+        """Recognizes rate-limit signals across all five waterfall providers'
         differently-shaped error strings (HTTP 429, provider-specific quota wording).
-        Groq, Gemini, and OpenAI have their own distinct wordings; NVIDIA NIM goes
-        through the OpenAI SDK (OpenAI-compatible API) so its errors are typically
-        OpenAI-shaped, but the marker list below is deliberately provider-agnostic
-        rather than enumerating each SDK's exact format."""
+        Groq, Gemini, Gemma 4, and OpenAI have their own distinct wordings (Gemma 4
+        shares Gemini's error shape, since it goes through the same genai.Client);
+        NVIDIA NIM goes through the OpenAI SDK (OpenAI-compatible API) so its errors
+        are typically OpenAI-shaped, but the marker list below is deliberately
+        provider-agnostic rather than enumerating each SDK's exact format."""
         lowered = err_str.lower()
         return any(marker in lowered for marker in (
             "429", "rate limit", "rate_limit", "quota", "resource_exhausted", "too many requests"
@@ -319,8 +360,8 @@ class BaseAgent(ABC):
     def ask_llm(self, prompt: str, model_override: str = None) -> str:
         """
         Sends a prompt using a Multi-LLM Waterfall strategy.
-        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> NVIDIA NIM ->
-        OpenAI) if available.
+        Attempts Primary (Groq). Fails over to Fallbacks (Gemini -> Gemma 4 ->
+        NVIDIA NIM -> OpenAI) if available.
         A provider that returns a rate-limit error is put into a shared cooldown and
         skipped (by this agent and every other agent in the process) until it expires,
         instead of being retried with generic backoff or re-discovered independently by
@@ -328,7 +369,7 @@ class BaseAgent(ABC):
 
         model_override lets a caller use a cheaper/faster Groq model for lightweight
         extraction work (see Config.LLM_EXTRACTION_MODEL_NAME) while synthesis calls
-        keep the default. Ignored for the Gemini, NVIDIA NIM, and OpenAI
+        keep the default. Ignored for the Gemini, Gemma 4, NVIDIA NIM, and OpenAI
         fallbacks — each of those always uses its own single configured model.
         """
         max_retries = Config.LLM_MAX_RETRIES

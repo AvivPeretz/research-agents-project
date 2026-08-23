@@ -21,6 +21,7 @@ def _make_stub_agent():
     agent.logger = MagicMock()
     agent.groq_client = MagicMock()
     agent.gemini_available = False
+    agent.gemma_available = False
     agent.nvidia_nim_available = False
     agent.openai_available = False
     agent._providers_waterfall = ["groq"]
@@ -315,12 +316,86 @@ class TestNewProviders:
         _, kwargs = agent.nvidia_nim_client.chat.completions.create.call_args
         assert kwargs["model"] == Config.NVIDIA_NIM_MODEL_NAME
 
-    def test_full_waterfall_order_groq_gemini_nvidia_openai(self):
-        """Exercises the full 4-tier waterfall in order when every provider is
-        configured and every provider but the last fails."""
+    def _agent_with_gemma(self):
+        """Gemma 4 shares the Gemini genai.Client — only the model id differs, so the
+        stub wires gemini_client and lets the side_effect discriminate on model."""
+        from config import Config
         agent = _make_stub_agent()
         agent.gemini_available = True
         agent.gemini_model_name = "gemini-2.5-flash"
+        agent.gemma_available = True
+        agent.gemma_model_name = Config.GEMMA_MODEL_NAME
+        agent.gemini_client = MagicMock()
+        agent._providers_waterfall = ["groq", "gemini", "gemma"]
+
+        def _generate(model=None, contents=None, **kwargs):
+            if "gemma" in str(model):
+                resp = MagicMock()
+                resp.text = "gemma response"
+                return resp
+            raise Exception("Gemini down")
+
+        agent.gemini_client.models.generate_content.side_effect = _generate
+        return agent
+
+    def test_gemini_fails_falls_over_to_gemma(self):
+        agent = self._agent_with_gemma()
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+
+        with patch("agents.base_agent.time.sleep"):
+            result = agent.ask_llm("prompt")
+
+        assert result == "gemma response"
+
+    def test_gemma_uses_configured_model_on_the_gemini_client(self):
+        from config import Config
+        agent = self._agent_with_gemma()
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+
+        with patch("agents.base_agent.time.sleep"):
+            agent.ask_llm("prompt")
+
+        models_used = [
+            call.kwargs["model"]
+            for call in agent.gemini_client.models.generate_content.call_args_list
+        ]
+        # Gemini is retried before the waterfall advances, so it appears N times;
+        # what matters is that the final call routed to the configured Gemma model
+        # on the same shared genai.Client, and that Gemma never used Gemini's id.
+        assert models_used[-1] == Config.GEMMA_MODEL_NAME
+        assert set(models_used[:-1]) == {Config.GEMINI_MODEL_NAME}
+
+    def test_gemma_permanent_failure_falls_through_to_nvidia_nim(self):
+        """A Gemma-specific failure (e.g. 403 on that model only, while the shared
+        Gemini credential is otherwise fine) must advance the waterfall like any
+        other provider failure — not abort the run."""
+        agent = self._agent_with_gemma()
+        agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
+        agent.gemini_client.models.generate_content.side_effect = Exception(
+            "403 PERMISSION_DENIED: model not available"
+        )
+        agent.nvidia_nim_available = True
+        agent.nvidia_nim_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "nim response"
+        agent.nvidia_nim_client.chat.completions.create.return_value = mock_resp
+        agent._providers_waterfall = ["groq", "gemini", "gemma", "nvidia_nim"]
+
+        with patch("agents.base_agent.time.sleep"):
+            result = agent.ask_llm("prompt")
+
+        assert result == "nim response"
+
+    def test_full_waterfall_order_groq_gemini_gemma_nvidia_openai(self):
+        """Exercises the full 5-tier waterfall in order when every provider is
+        configured and every provider but the last fails."""
+        from config import Config
+        agent = _make_stub_agent()
+        agent.gemini_available = True
+        agent.gemini_model_name = "gemini-2.5-flash"
+        agent.gemma_available = True
+        agent.gemma_model_name = Config.GEMMA_MODEL_NAME
         agent.gemini_client = MagicMock()
         agent.gemini_client.models.generate_content.side_effect = Exception("Gemini down")
 
@@ -335,7 +410,7 @@ class TestNewProviders:
         mock_resp.choices[0].message.content = "openai last resort"
         agent.openai_client.chat.completions.create.return_value = mock_resp
 
-        agent._providers_waterfall = ["groq", "gemini", "nvidia_nim", "openai"]
+        agent._providers_waterfall = ["groq", "gemini", "gemma", "nvidia_nim", "openai"]
         agent.groq_client.chat.completions.create.side_effect = Exception("Groq down")
 
         with patch("agents.base_agent.time.sleep"):
