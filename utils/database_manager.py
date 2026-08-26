@@ -89,6 +89,15 @@ class DatabaseManager:
                 provider TEXT PRIMARY KEY,
                 cooldown_until TIMESTAMP
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS stanford_review_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_name TEXT NOT NULL,
+                review_text TEXT NOT NULL,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_name) REFERENCES project_state(project_name)
+            );
             """
         ]
         try:
@@ -142,6 +151,50 @@ class DatabaseManager:
                 conn.commit()
         except sqlite3.Error as e:
             self.logger.error("Failed to persist LLM provider cooldown for '%s': %s", provider, str(e))
+
+    # ==========================================
+    # STANFORD REVIEW HISTORY (For ResearchEnhancementAgent review-cycle comparison)
+    # ==========================================
+    def get_latest_stanford_review(self, project_name: str) -> str:
+        """Returns the most recently saved Stanford review text for this project, or
+        None if no review has ever been saved (first review cycle, or DB history
+        predates this table). Call this BEFORE save_stanford_review() for the new
+        review — it deliberately does not know about a review that hasn't been saved
+        yet, so 'previous review' always means a genuinely earlier cycle."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT review_text FROM stanford_review_history
+                    WHERE project_name = ?
+                    ORDER BY fetched_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (project_name,)
+                )
+                row = cursor.fetchone()
+                return row['review_text'] if row else None
+        except sqlite3.Error as e:
+            self.logger.error("Failed to fetch latest Stanford review for '%s': %s", project_name, str(e))
+            return None
+
+    def save_stanford_review(self, project_name: str, review_text: str) -> bool:
+        """Appends a new row to the Stanford review history (never overwrites —
+        review-cycle comparison needs every prior cycle, not just the latest).
+        Returns True on success, False on failure."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO stanford_review_history (project_name, review_text) VALUES (?, ?)",
+                    (project_name, review_text)
+                )
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            self.logger.error("Failed to save Stanford review history for '%s': %s", project_name, str(e))
+            return False
 
     # ==========================================
     # SYNC REGISTRY METHODS (For DataIngestion)

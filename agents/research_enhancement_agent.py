@@ -241,41 +241,103 @@ class ResearchEnhancementAgent(BaseAgent):
         print(f"   ✅ Review ready! (Length: {len(data['content'])} characters)")
         return data["content"]
 
-    def _generate_actionable_tasks(self, project_name: str, review_text: str) -> str:
-        """Phase 2c: Uses Groq to parse the review and generate tasks with deadlines."""
+    def _generate_actionable_tasks(self, project_name: str, review_text: str, previous_review_text: str = None) -> str:
+        """Phase 2c: Uses the LLM to turn Stanford's raw review into a prioritized,
+        student-facing document — not a forwarded dump of the raw review.
+
+        Amit's feedback (department head, primary output stakeholder) on this
+        specifically: (1) the review needs to be tiered by severity/importance, not a
+        flat list, and (2) it should read as something you'd hand directly to the
+        student author, not an internal engineering/PM task table. Both are addressed
+        in the REQUIRED OUTPUT FORMAT below.
+
+        previous_review_text, when provided (a manuscript can go through multiple
+        Stanford review cycles — see DatabaseManager.get_latest_stanford_review), adds
+        a review-cycle comparison section: which previously-raised points appear to
+        have been addressed in the new review. This is a comparison of REVIEW TEXT
+        across Stanford cycles, not a manuscript diff — conceptually similar to
+        ProgressTrackingAgent's delta-tracking but a genuinely different comparison
+        (review-to-review, not text-to-text), so it isn't shared code with that agent.
+        """
         if not review_text or str(review_text).strip() == "":
             self.logger.error("Empty review text provided for task generation.")
             return None
-            
+
         print("   🧠 Sending Stanford review to LLM for task generation & novelty check...")
+
+        comparison_block = ""
+        if previous_review_text and str(previous_review_text).strip():
+            comparison_block = f"""
+        === PREVIOUS STANFORD REVIEW (from an earlier review cycle for this same project) ===
+        {previous_review_text}
+        === END PREVIOUS REVIEW ===
+
+        This manuscript has been reviewed by Stanford before. Compare the CURRENT review
+        (below) against the PREVIOUS one above and include a "## Progress Since Last Review"
+        section (see REQUIRED OUTPUT FORMAT) that says, for each point raised in the
+        previous review, whether it appears to have been addressed, partially addressed,
+        or not addressed — based only on whether the current review still raises it,
+        raises it more mildly, or no longer mentions it. Do not guess about the
+        manuscript itself; judge only from what the two review texts say.
+        """
+
         prompt = f"""
-        You are a rigorous Academic Research Manager. You have received an external peer-review from Stanford for the project '{project_name}'.
-        
-        Here is the raw review text:
+        You are an academic writing coach preparing peer-review feedback for a
+        research student to read and act on directly. You have received an external
+        peer-review from Stanford (paperreview.ai) for the project '{project_name}'.
+        {comparison_block}
+        Here is the CURRENT raw review text:
         ---
         {review_text}
         ---
-        
-        Please read the entire review carefully and provide a structured Markdown response containing:
-        1. **Novelty & Innovation Check**: Summarize what the reviewer thought about the paper's innovation.
-        2. **Actionable Task List**: Extract specific critiques and turn them into a practical, numbered To-Do list. 
-           For EACH task, you MUST provide:
-           - **Task Description**: What specifically needs to be fixed or added. Avoid heavy LaTeX blocks if standard text/Unicode can explain it cleanly.
-           - **Estimated Effort**: Analyze the complexity of the task (e.g., "Requires writing a new mathematical proof", "Simple typo correction", "Running new simulations"). Estimate the actual working time required (e.g., "~15 hours of focused work", "~2 hours").
-           - **Recommended Deadline**: Suggest a specific deadline within the next 30-day sprint based on the effort required.
+
+        Read the entire review carefully and produce a Markdown document formatted for
+        a student — clear, encouraging, organized with headers, no internal
+        engineering/PM jargon. Use EXACTLY this structure:
+
+        ## Novelty & Innovation
+        2-4 sentences summarizing what the reviewer thought about the paper's
+        originality and contribution, written to the student directly.
+        {"## Progress Since Last Review" if previous_review_text and str(previous_review_text).strip() else ""}
+        {"For each point the previous review raised: state it briefly, then say Addressed / Partially Addressed / Not Addressed, with one sentence of evidence from the current review's text." if previous_review_text and str(previous_review_text).strip() else ""}
+
+        ## 🔴 Critical — Must Address Before Resubmission
+        Numbered list. Issues that block acceptance: missing evaluation, unsupported
+        claims, fundamental methodology gaps, missing baselines. Only include a genuine
+        blocker here — do not inflate minor notes into this tier.
+
+        ## 🟡 Important — Strengthens the Paper Significantly
+        Numbered list. Real weaknesses that should be fixed but wouldn't alone block
+        acceptance: missing related work, unclear methodology sections, insufficient
+        ablations.
+
+        ## 🟢 Minor — Polish & Cleanup
+        Numbered list. Typos, formatting, missing citations, small clarity fixes.
+
+        For EVERY task in all three tiers above, provide on the same or next line:
+        - **What to do**: specific and concrete — avoid heavy LaTeX blocks if plain
+          text/Unicode explains it cleanly.
+        - **Estimated effort**: a real time estimate (e.g., "~2 hours", "~15 hours").
+        - **Suggested deadline**: a specific day within the next 30-day sprint,
+          scaled to effort (quick fixes first, heavy experimental work later).
+
+        Assign each task to a tier based on what the REVIEW ITSELF says about its
+        severity/impact on the paper's claims — do not default everything to one tier.
+        If the review does not clearly justify any Critical-tier issue, it is fine for
+        that section to be short or say "No blocking issues identified."
         """
-        
+
         try:
             tasks = self.ask_llm(prompt)
-            
+
             safe_name = project_name.replace(" ", "_")
             save_dir = os.path.join(Config.LIBRARY_DIR, "project_enhancement", safe_name)
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, "stanford_tasks.md")
-            
+
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(tasks)
-                
+
             print(f"   ✅ Tasks generated and saved to {save_path}")
             return tasks
         except RuntimeError as e:
@@ -671,9 +733,19 @@ avoid vague tasks like "improve the writing."
             print("⏳ Project is waiting for review. Checking paperreview.ai (Phase 2)...")
             review_text = self._fetch_review_from_stanford(token)
             if review_text:
-                tasks = self._generate_actionable_tasks(project, review_text)
+                # Fetch whatever the most recent PRIOR review cycle was (if any) before
+                # saving this one, so "previous" always means a genuinely earlier cycle.
+                previous_review_text = self.db.get_latest_stanford_review(project) if self.db else None
+                tasks = self._generate_actionable_tasks(project, review_text, previous_review_text=previous_review_text)
                 if tasks is not None and tasks.strip():
                     self._update_stanford_state(project, "REVIEW_COMPLETED")
+                    if self.db:
+                        saved = self.db.save_stanford_review(project, review_text)
+                        if not saved:
+                            self.logger.warning(
+                                "Failed to save Stanford review history for '%s' — the next "
+                                "review cycle's comparison will be missing this cycle.", project
+                            )
                     print("✅ Phase 2 complete. Tasks generated and DB state updated to REVIEW_COMPLETED.")
                     self.logger.info("Sending Stanford task list email for %s...", project)
                     self.notifier.send_stanford_tasks(

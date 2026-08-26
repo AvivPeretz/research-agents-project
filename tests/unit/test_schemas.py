@@ -24,13 +24,18 @@ class TestPaperDataSchema:
         assert paper.paper_name == "Test Paper"
 
     def test_paper_data_defaults_to_na(self):
-        """Asserts that optional fields default to 'N/A' or '' when not provided."""
+        """Asserts that every optional field defaults to 'N/A' when not provided.
+        how_complicated/can_control previously defaulted to '' (inconsistent with
+        every other field) — changed to 'N/A' as part of fixing the prompt/schema
+        key-drift bug that left both fields blank in 100% of real CSV rows (see
+        domain/schemas.py's comment on these two fields for the full story)."""
         data = {"paper_name": "Only Name"}
         paper = PaperData(**data)
         assert paper.paper_name == "Only Name"
         assert paper.data_type == "N/A"
         assert paper.reproducible == "N/A"
-        assert paper.how_complicated == ""
+        assert paper.how_complicated == "N/A"
+        assert paper.can_control == "N/A"
         assert paper.privacy_issues == "N/A"
 
     def test_paper_data_invalid_reproducible(self):

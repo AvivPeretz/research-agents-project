@@ -7,19 +7,21 @@ import pytest
 from agents.progress_tracking_agent import ProgressTrackingAgent
 
 
+@pytest.fixture
+def progress_agent(db_in_memory, mock_notifier, sample_project_name, temp_project_dir, monkeypatch):
+    """Create a ProgressTrackingAgent with mocked dependencies. Module-level (not
+    class-scoped) so every test class in this file can use it."""
+    monkeypatch.setenv("OVERLEAF_PROJECTS_DIR", str(temp_project_dir.parent))
+    agent = ProgressTrackingAgent(
+        overleaf_projects=[sample_project_name],
+        db=db_in_memory,
+        notifier=mock_notifier,
+    )
+    return agent
+
+
 class TestProgressTrackingAgent:
     """Integration tests for ProgressTrackingAgent functionality."""
-
-    @pytest.fixture
-    def progress_agent(self, db_in_memory, mock_notifier, sample_project_name, temp_project_dir, monkeypatch):
-        """Create a ProgressTrackingAgent with mocked dependencies."""
-        monkeypatch.setenv("OVERLEAF_PROJECTS_DIR", str(temp_project_dir.parent))
-        agent = ProgressTrackingAgent(
-            overleaf_projects=[sample_project_name],
-            db=db_in_memory,
-            notifier=mock_notifier,
-        )
-        return agent
 
     def test_get_last_seen_text_returns_none_for_new_project(self, progress_agent, db_in_memory, sample_project_name):
         """Asserts that get_last_seen_text returns empty string for new project."""
@@ -35,7 +37,10 @@ class TestProgressTrackingAgent:
 
     def test_check_text_changes_first_run_returns_has_changes_true(self, progress_agent, sample_project_name):
         """Asserts that on first run with no prior state, has_changes is True."""
-        with patch.object(progress_agent.connector, "read_all_tex_files", return_value="New content"):
+        # check_text_changes reads via read_all_tex_files_raw (not read_all_tex_files)
+        # so _strip_editorial_annotations can run on raw text before LaTeX cleaning —
+        # see ProgressTrackingAgent._strip_editorial_annotations.
+        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value="New content"):
             result = progress_agent.check_text_changes(sample_project_name)
             assert result["has_changes"] is True
 
@@ -51,7 +56,7 @@ class TestProgressTrackingAgent:
         """Asserts that delta contains new content when text changes."""
         old_text = "Original content"
         new_text = "Original content\nNew addition here"
-        with patch.object(progress_agent.connector, "read_all_tex_files", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 result = progress_agent.check_text_changes(sample_project_name)
                 assert result["has_changes"] is True
@@ -73,7 +78,7 @@ class TestProgressTrackingAgent:
         old_text = "Original"
         new_text = "Original\nNew content added here which is long enough to exceed the fifty character minimum threshold."
 
-        with patch.object(progress_agent.connector, "read_all_tex_files", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 progress_agent.run()
                 mock_notifier.send_progress_feedback.assert_called()
@@ -118,3 +123,106 @@ class TestProgressTrackingAgent:
             progress_agent.analyze_delta("delta", "ProjectB")
 
         assert mock_notifier.send_admin_alert.call_count == 2
+
+
+class TestEditorialAnnotationStripping:
+    """Amit's feedback: \\hl{...} inline reviewer/editorial notes (e.g. `\\hl{A: this
+    is a lab, let try to think on different name}` in PQTrace's actual manuscript)
+    must never be treated as real manuscript content during delta analysis."""
+
+    def test_strip_editorial_annotations_removes_hl_command_and_content(self):
+        raw = r"Recording Module \hl{A: this is a lab, let try to think on different name} handles capture."
+        result = ProgressTrackingAgent._strip_editorial_annotations(raw)
+        assert "\\hl" not in result
+        assert "this is a lab" not in result
+        assert "Recording Module" in result
+        assert "handles capture" in result
+
+    def test_strip_editorial_annotations_handles_nested_braces(self):
+        """Matches the \\chen{...} macro's expansion shape (\\hl{\\textbf{Chen:} ...}) —
+        currently unused in the tracked manuscripts, but the regex must not undercount
+        closing braces if it ever is."""
+        raw = r"Some text \hl{\textbf{Chen:} please expand this section} more text."
+        result = ProgressTrackingAgent._strip_editorial_annotations(raw)
+        assert "\\hl" not in result
+        assert "Chen" not in result
+        assert "please expand" not in result
+        assert "Some text" in result
+        assert "more text" in result
+
+    def test_strip_editorial_annotations_removes_multiple_instances(self):
+        raw = r"\hl{note one} body text \hl{note two} more body"
+        result = ProgressTrackingAgent._strip_editorial_annotations(raw)
+        assert "note one" not in result
+        assert "note two" not in result
+        assert "body text" in result
+        assert "more body" in result
+
+    def test_strip_editorial_annotations_noop_on_empty_or_none(self):
+        assert ProgressTrackingAgent._strip_editorial_annotations("") == ""
+        assert ProgressTrackingAgent._strip_editorial_annotations(None) is None
+
+    def test_strip_editorial_annotations_noop_when_no_annotations_present(self):
+        raw = "Plain manuscript text with no annotations at all."
+        assert ProgressTrackingAgent._strip_editorial_annotations(raw) == raw
+
+    def test_check_text_changes_excludes_hl_annotation_from_delta(self, progress_agent, sample_project_name):
+        """End-to-end: an \\hl{...} note added alongside real new text must not appear
+        in the delta that gets fed to the LLM, while the real new text still does."""
+        old_text = "Introduction paragraph."
+        new_raw = (
+            "Introduction paragraph.\n"
+            r"New real sentence about the methodology. \hl{A: reviewer note, ignore this}"
+        )
+        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_raw):
+            with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
+                result = progress_agent.check_text_changes(sample_project_name)
+
+        assert result["has_changes"] is True
+        delta = result["delta_text"]
+        assert "New real sentence about the methodology" in delta
+        assert "reviewer note" not in delta
+        assert "\\hl" not in delta
+
+
+class TestLocatedRecommendations:
+    """Amit's feedback: recommendations must cite a precise, actionable location in
+    the new text, not a general summary a student can't act on directly."""
+
+    def test_number_delta_lines_prefixes_each_nonblank_line(self):
+        delta = "First new line\n\nSecond new line\nThird new line"
+        result = ProgressTrackingAgent._number_delta_lines(delta)
+        assert result == "[1] First new line\n[2] Second new line\n[3] Third new line"
+
+    def test_number_delta_lines_empty_input(self):
+        assert ProgressTrackingAgent._number_delta_lines("") == ""
+
+    def test_number_delta_lines_survives_truncation(self):
+        """_process_project truncates delta_text to Config.MAX_DELTA_CHARS BEFORE
+        calling analyze_delta — numbering must be computed from whatever text
+        analyze_delta actually receives, so it stays correct on long deltas that get
+        truncated, not just short ones."""
+        long_delta = "\n".join(f"Line number {i} of a long delta" for i in range(1, 501))
+        truncated = long_delta[:200] + "\n\n[... truncated ...]"
+        result = ProgressTrackingAgent._number_delta_lines(truncated)
+        # Every non-blank line of the (already truncated) input got a marker, in order.
+        lines = [l for l in truncated.splitlines() if l.strip()]
+        expected = "\n".join(f"[{i+1}] {l}" for i, l in enumerate(lines))
+        assert result == expected
+
+    def test_analyze_delta_prompt_includes_numbered_lines_and_location_instruction(self, progress_agent, sample_project_name):
+        """The prompt actually sent to the LLM must contain the numbered delta and
+        instruct the model to cite a marker + verbatim quote per suggestion — this is
+        what makes the fix 'reliable and explicit' rather than incidental."""
+        captured = {}
+
+        def _capture_prompt(prompt, *args, **kwargs):
+            captured["prompt"] = prompt
+            return "### FEEDBACK\nGood.\n### SUGGESTIONS\n- [1] \"first line text\": clarify this."
+
+        with patch.object(progress_agent, "ask_llm", side_effect=_capture_prompt):
+            progress_agent.analyze_delta("first line text\nsecond line text", sample_project_name)
+
+        assert "[1] first line text" in captured["prompt"]
+        assert "[2] second line text" in captured["prompt"]
+        assert "verbatim quote" in captured["prompt"]

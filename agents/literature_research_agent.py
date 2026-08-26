@@ -165,7 +165,27 @@ class LiteratureResearchAgent(BaseAgent):
             if dropped:
                 self.logger.info("Relevance filter dropped %d off-topic papers for %s.", dropped, project_name)
             return filtered if filtered else papers  # never return empty if filter misfires
+        except RuntimeError as e:
+            # Full LLM waterfall exhausted — this used to be caught by the bare
+            # `except Exception` below and silently fall through to "using all
+            # papers" with only a WARNING log entry nobody watches. Confirmed in
+            # production logs (2026-08-19) that this exact path fired for BOTH real
+            # test projects (PQTrace, Udi Aharon PhD Book v2) during the run whose
+            # output Amit reviewed — directly explaining the "irrelevant papers"
+            # complaint: the relevance filter wasn't imperfect, it never ran at all
+            # that cycle. There's no better fallback available (relevance filtering
+            # genuinely requires an LLM call, so still returning all papers unfiltered
+            # is correct — the fix is making the failure visible, not inventing a
+            # substitute filter), so this now alerts like every other waterfall-
+            # exhaustion site in this codebase instead of failing silently.
+            self.logger.error("Relevance filter failed for %s: %s. Using all papers.", project_name, str(e))
+            self._alert_waterfall_exhausted("literature relevance filtering", project_name)
+            return papers
         except Exception as e:
+            # Non-waterfall failure (e.g. an unexpected response-parsing edge case).
+            # No admin alert here — unlike waterfall exhaustion this isn't necessarily
+            # a systemic issue worth paging on every occurrence — but still degrades
+            # to unfiltered results rather than dropping papers outright.
             self.logger.warning("Relevance filter failed for %s: %s. Using all papers.", project_name, str(e))
             return papers
 
@@ -201,22 +221,29 @@ class LiteratureResearchAgent(BaseAgent):
                     "source": "Use the 'venue' from the data (e.g., 'IEEE Transactions...' or 'N/A')",
                     "year_published": "Use the 'year' from the data",
                     "types of available data": "Describe data type based on abstract. IF this is a Theoretical/Mathematical paper, explicitly write 'Theoretical Paper - No Dataset'",
-                    "number of samples": "e.g., 20000. IF theoretical, write 'N/A (Theoretical)'",
-                    "number of features": "e.g., 14. IF theoretical, write 'N/A (Theoretical)'",
-                    "number of classes": "e.g., 5. IF theoretical, write 'N/A (Theoretical)'",
-                    "location": "e.g., In-lab testbed. IF theoretical, write 'N/A (Theoretical)'",
-                    "for how long": "e.g., 3 weeks (or N/A)",
+                    "number of samples": "e.g., 20000. If the abstract/data does not report this, write EXACTLY 'N/A (Not available at source)' — do not guess a number. IF theoretical, write 'N/A (Theoretical)'",
+                    "number of features": "e.g., 14. If not reported at the source, write EXACTLY 'N/A (Not available at source)'. IF theoretical, write 'N/A (Theoretical)'",
+                    "number of classes": "e.g., 5. If not reported at the source, write EXACTLY 'N/A (Not available at source)'. IF theoretical, write 'N/A (Theoretical)'",
+                    "location": "e.g., In-lab testbed. If not reported at the source, write EXACTLY 'N/A (Not available at source)'. IF theoretical, write 'N/A (Theoretical)'",
+                    "for how long": "e.g., 3 weeks. If not reported at the source, write EXACTLY 'N/A (Not available at source)'",
+                    "data representation": "e.g., Tabular CSV, Time-series, Images, Raw packet captures. If not reported at the source, write EXACTLY 'N/A (Not available at source)'. IF theoretical, write 'N/A (Theoretical)'",
                     "reproducible": "Must be EXACTLY 'Yes', 'No', or 'N/A'",
-                    "complexity": "Must be EXACTLY 'High', 'Moderate', 'Low', or 'N/A'",
+                    "how complicated is it?": "Must be EXACTLY 'High', 'Moderate', 'Low', or 'N/A'",
                     "is there privacy issues?": "Must be EXACTLY 'Yes', 'No', 'Minimal', 'High', or 'N/A'",
-                    "can i control the application collected": "Must be EXACTLY 'Yes', 'No', or 'N/A'"
+                    "can i control the application collected?": "Must be EXACTLY 'Yes', 'No', or 'N/A'"
                 }}
             ]
         }}
         Important constraints:
-        1. Keep the EXACT JSON keys as defined above.
-        2. Obey the strict EXACTLY string match rules for dropdown fields (like reproducible, complexity).
+        1. Keep the EXACT JSON keys as defined above — they map 1:1 to fixed output
+           columns; a renamed or missing key means that column is silently blank for
+           this paper, not an error you'll see.
+        2. Obey the strict EXACTLY string match rules for dropdown fields (like reproducible, "how complicated is it?").
         3. ESCAPE ALL STRINGS properly. Do NOT use markdown blocks like ```json.
+        4. NEVER invent/guess a numeric or factual value that isn't actually supported
+           by the abstract or provided data. When genuinely unknown, use the EXACT
+           string 'N/A (Not available at source)' as instructed per-field above, so
+           readers can tell "the source didn't report this" apart from a data problem.
         """
         
         try:

@@ -28,8 +28,18 @@ class PaperData(BaseModel):
         default="N/A", alias="is there privacy issues?"
     )
     data_representation: str = Field(default="N/A", alias="data representation")
-    how_complicated: str = Field(default="", alias="how complicated is it?")
-    can_control: str = Field(default="", alias="can i control the application collected?")
+    # Prompt key/schema alias previously drifted out of sync for these two fields
+    # (agents/literature_research_agent.py's process_results_with_llm asked the LLM
+    # for "complexity" and "can i control the application collected" — no trailing
+    # "?" — neither of which matched the aliases below, so Pydantic silently applied
+    # these defaults on every single paper regardless of source-data richness;
+    # confirmed via both real projects' rolling CSVs, 19/19 and 12/12 rows blank).
+    # The prompt now requests the exact alias strings below. Defaults changed from
+    # "" to "N/A" to match every other field's default and to fail more legibly
+    # (a blank cell reads as broken; "N/A" reads as "not provided") if a similar
+    # key-drift regression ever happens again.
+    how_complicated: str = Field(default="N/A", alias="how complicated is it?")
+    can_control: str = Field(default="N/A", alias="can i control the application collected?")
     
     # Allow population by either the variable name or the alias
     model_config = ConfigDict(populate_by_name=True)

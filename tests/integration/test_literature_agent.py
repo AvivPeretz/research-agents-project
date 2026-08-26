@@ -146,6 +146,51 @@ class TestLiteratureResearchAgent:
         _, kwargs = mock_ask.call_args
         assert kwargs.get("model_override") == Config.LLM_EXTRACTION_MODEL_NAME
 
+    def test_filter_relevant_papers_alerts_admin_on_waterfall_exhaustion(
+        self, literature_agent, mock_notifier, sample_project_name
+    ):
+        """Amit's feedback: irrelevant papers reached the output because a full LLM
+        waterfall exhaustion during relevance filtering fell back to 'use all papers'
+        SILENTLY (confirmed in production logs for both real test projects on
+        2026-08-19). This must now alert an admin, matching every other waterfall-
+        exhaustion site in this codebase, while still degrading to unfiltered papers
+        (there is no other reasonable fallback when the LLM itself is unavailable)."""
+        papers = [{"title": "Paper A", "snippet": "..."}, {"title": "Paper B", "snippet": "..."}]
+        with patch.object(literature_agent, "ask_llm", side_effect=RuntimeError("All providers exhausted")):
+            result = literature_agent._filter_relevant_papers(sample_project_name, "project text", papers)
+
+        assert result == papers  # still degrades to unfiltered, not empty
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert sample_project_name in kwargs["subject"]
+
+    def test_filter_relevant_papers_no_alert_on_non_waterfall_error(
+        self, literature_agent, mock_notifier, sample_project_name
+    ):
+        """A non-waterfall failure (e.g. an unexpected parsing edge case) still
+        degrades to unfiltered papers, but does NOT page an admin — only a full
+        waterfall exhaustion does, since that's the systemic failure mode."""
+        papers = [{"title": "Paper A", "snippet": "..."}]
+        with patch.object(literature_agent, "ask_llm", side_effect=ValueError("unexpected")):
+            result = literature_agent._filter_relevant_papers(sample_project_name, "project text", papers)
+
+        assert result == papers
+        mock_notifier.send_admin_alert.assert_not_called()
+
+    def test_filter_relevant_papers_dedups_alert_for_same_project(
+        self, literature_agent, mock_notifier, sample_project_name
+    ):
+        """Two waterfall-exhaustion failures for the SAME project in one run produce
+        only one admin alert (shared BaseAgent dedup guard, same as every other
+        waterfall-exhaustion call site)."""
+        papers = [{"title": "Paper A", "snippet": "..."}]
+        with patch.object(literature_agent, "ask_llm", side_effect=RuntimeError("exhausted")):
+            literature_agent._filter_relevant_papers(sample_project_name, "text", papers)
+            literature_agent._filter_relevant_papers(sample_project_name, "text", papers)
+
+        mock_notifier.send_admin_alert.assert_called_once()
+
+
     def test_process_results_with_llm_returns_valid_dict(self, literature_agent, sample_project_name):
         """Asserts that process_results_with_llm returns dict with 'summary' and 'papers' keys."""
         with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
@@ -300,3 +345,110 @@ This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
 
         assert captured["count_before_cap"] > 3
         assert captured["count_after_cap"] == 3
+
+
+class TestPaperMetadataKeyAlignment:
+    """Amit's feedback: the generated CSV's per-paper metadata was very sparse. Two
+    of the fields ("how complicated is it?" and "can i control the application
+    collected?") were blank in 100% of rows across BOTH real test projects' actual
+    rolling CSVs — not because the source data was unavailable, but because the LLM
+    prompt asked for JSON keys ("complexity", and "can i control the application
+    collected" with no trailing "?") that didn't match domain.schemas.PaperData's
+    aliases, so Pydantic silently applied the (previously blank) field defaults on
+    every single paper regardless of what the LLM actually knew."""
+
+    @pytest.fixture
+    def literature_agent(self, mock_notifier, sample_project_name):
+        """Same construction as TestLiteratureResearchAgent.literature_agent — this
+        class needs its own copy since pytest fixtures aren't inherited across
+        sibling test classes."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
+            with patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=MOCK_SEMANTIC_SCHOLAR_RESULTS):
+                agent = LiteratureResearchAgent(
+                    active_projects=[sample_project_name],
+                    notifier=mock_notifier,
+                )
+                yield agent
+
+    def test_prompt_requests_keys_matching_the_schema_aliases(self, literature_agent, sample_project_name):
+        """The exact JSON keys asked for in the prompt must match
+        domain.schemas.PaperData's aliases byte-for-byte, or Pydantic will never
+        populate them from the LLM's response."""
+        from domain.schemas import PaperData
+
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return '{"summary": "' + ("x" * 60) + '", "papers": []}'
+
+        with patch.object(literature_agent, "ask_llm", side_effect=_capture):
+            literature_agent.process_results_with_llm(sample_project_name, "kw", [{"title": "t"}])
+
+        prompt = captured["prompt"]
+        for name, field_info in PaperData.model_fields.items():
+            # PaperData has model_config = ConfigDict(populate_by_name=True), so a
+            # prompt key matching EITHER the alias (e.g. "year published") OR the
+            # bare field name (e.g. "year_published") populates the field correctly
+            # — the prompt legitimately mixes both forms (paper_name, year_published
+            # use the field-name form; most others use the alias form). Only a key
+            # matching NEITHER is the drift bug this test guards against.
+            candidates = {f'"{name}"'}
+            if field_info.alias:
+                candidates.add(f'"{field_info.alias}"')
+            assert any(c in prompt for c in candidates), (
+                f"prompt uses neither the field name nor the alias for {name!r} "
+                f"(tried {candidates}) — Pydantic will never populate this field"
+            )
+        # The two keys that previously drifted must be the EXACT alias strings,
+        # not the old mismatched ones.
+        assert '"how complicated is it?"' in prompt
+        assert '"complexity"' not in prompt
+        assert '"can i control the application collected?"' in prompt
+        # old key (no trailing "?") must not appear as a JSON key of its own
+        assert '"can i control the application collected"' not in prompt.replace(
+            '"can i control the application collected?"', ""
+        )
+
+    def test_paper_data_defaults_to_na_not_blank_for_previously_drifted_fields(self):
+        """Even if a future prompt/schema drift happens again, the default for every
+        field (including these two) should read as 'not provided' (N/A), not as a
+        truly blank cell that looks like a malfunction."""
+        from domain.schemas import PaperData
+
+        paper = PaperData(**{"paper name": "Some Paper"})
+        assert paper.how_complicated == "N/A"
+        assert paper.can_control == "N/A"
+
+    def test_paper_data_populates_from_corrected_alias_keys(self):
+        """End-to-end: JSON using the corrected (schema-matching) keys actually
+        populates the fields — this is what was broken before the key fix."""
+        from domain.schemas import PaperData
+
+        paper = PaperData(**{
+            "paper name": "Some Paper",
+            "how complicated is it?": "High",
+            "can i control the application collected?": "Yes",
+        })
+        assert paper.how_complicated == "High"
+        assert paper.can_control == "Yes"
+
+    def test_prompt_instructs_explicit_not_available_marker_instead_of_fabrication(
+        self, literature_agent, sample_project_name
+    ):
+        """Presentation fix: genuinely-unavailable source fields must be marked
+        explicitly ('N/A (Not available at source)') rather than left blank or
+        guessed — this is a clarity change, not a relaxation of the no-fabrication
+        rule (the instruction explicitly forbids guessing)."""
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return '{"summary": "' + ("x" * 60) + '", "papers": []}'
+
+        with patch.object(literature_agent, "ask_llm", side_effect=_capture):
+            literature_agent.process_results_with_llm(sample_project_name, "kw", [{"title": "t"}])
+
+        prompt = captured["prompt"]
+        assert "N/A (Not available at source)" in prompt
+        assert "NEVER invent" in prompt or "never invent" in prompt.lower()

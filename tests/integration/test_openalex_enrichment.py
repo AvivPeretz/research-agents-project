@@ -210,10 +210,13 @@ class TestDataRepresentationColumn:
         assert paper.data_representation == "graph"
 
     def test_paper_data_empty_columns_are_empty_string(self):
-        """how_complicated and can_control default to empty string when not provided."""
+        """how_complicated and can_control default to 'N/A' when not provided (changed
+        from '' — see domain/schemas.py's comment on these two fields: the previous ''
+        default combined with a prompt/schema key mismatch left these two columns
+        blank in 100% of rows across both real test projects' CSVs)."""
         paper = PaperData()
-        assert paper.how_complicated == ""
-        assert paper.can_control == ""
+        assert paper.how_complicated == "N/A"
+        assert paper.can_control == "N/A"
 
 
 # ---------------------------------------------------------------------------

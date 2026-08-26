@@ -56,6 +56,44 @@ class ProgressTrackingAgent(BaseAgent):
         except Exception as e:
             self.logger.error("Failed to save current text state to DB for %s: %s", project, str(e))
 
+    # Informal editorial/reviewer annotations researchers leave inline as notes to
+    # themselves or collaborators — not manuscript content. \hl{...} (the soul/xcolor
+    # "highlight" command) is the only such convention actually present in this
+    # codebase's real tracked manuscripts (verified by scanning every .tex file in
+    # both live test projects, PQTrace and Udi Aharon's PhD book, for this and several
+    # other common informal-annotation commands — \todo, \comment, \note, \marginpar,
+    # \reviewer, \sout, \textcolor{red}{...} etc. — none of which appear anywhere in
+    # either project; only \hl{...} does, e.g. `\hl{A: this is a lab, let try to think
+    # on different name}`). PQTrace also defines an unused `\chen{...}` macro that
+    # expands to `\hl{\textbf{Chen:} #1}` — it is never actually invoked in the current
+    # manuscript, so stripping raw \hl{...} covers every real instance today; if
+    # `\chen{...}` (or a similar wrapper macro) ever comes into use without expanding
+    # through \hl first, this list would need revisiting.
+    #
+    # Must run on the RAW .tex source, BEFORE OverleafConnector.clean_latex_text()
+    # runs: clean_latex_text() unwraps `\hl{...}` down to its bare inner text (the
+    # same generic pass it uses for \textbf, \emph, etc.), so by the time cleaned text
+    # exists the annotation is byte-for-byte indistinguishable from real manuscript
+    # prose and can no longer be identified or removed.
+    #
+    # Bounded one-level brace nesting (matches the pattern already used by
+    # OverleafConnector._HEADING_RE) so `\hl{\textbf{Chen:} ...}`-style nested content
+    # is handled correctly and the regex doesn't undercount closing braces.
+    _EDITORIAL_ANNOTATION_RE = re.compile(
+        r'\\hl\{((?:[^{}]|\{[^{}]*\})*)\}',
+        re.DOTALL
+    )
+
+    @classmethod
+    def _strip_editorial_annotations(cls, raw_text: str) -> str:
+        """Removes informal reviewer/editorial notes (see _EDITORIAL_ANNOTATION_RE)
+        from raw LaTeX source so they're never treated as new manuscript content
+        during delta analysis. A no-op (returns input unchanged) if raw_text is
+        empty or contains no such annotations."""
+        if not raw_text:
+            return raw_text
+        return cls._EDITORIAL_ANNOTATION_RE.sub('', raw_text)
+
     @staticmethod
     def _normalize_lines(text: str) -> list:
         """Collapse internal whitespace per line so LaTeX reflow doesn't trigger false deltas."""
@@ -78,10 +116,17 @@ class ProgressTrackingAgent(BaseAgent):
         Reads the actual text, compares it to DB memory, and extracts the Delta.
         """
         self.logger.info("Reading text from local Drop Folder for project: %s", project)
-        
+
         project_path = os.path.join(self.connector.base_storage_path, project)
-        current_text = self.connector.read_all_tex_files(project_path)
-        
+        # Deliberately not self.connector.read_all_tex_files() — editorial annotations
+        # (see _strip_editorial_annotations) must be stripped from the RAW source
+        # before OverleafConnector.clean_latex_text() unwraps them into indistinguishable
+        # plain text. This reproduces read_all_tex_files()'s own raw-then-clean sequence
+        # with the strip step inserted in between.
+        raw_text = self.connector.read_all_tex_files_raw(project_path)
+        raw_text = self._strip_editorial_annotations(raw_text)
+        current_text = self.connector.clean_latex_text(raw_text) if raw_text else ""
+
         if not current_text:
             self.logger.warning("No text found for %s.", project)
             return {"has_changes": False, "delta_text": ""}
@@ -103,6 +148,29 @@ class ProgressTrackingAgent(BaseAgent):
             
         return {"has_changes": True, "delta_text": delta_text}
 
+    @staticmethod
+    def _number_delta_lines(delta_text: str) -> str:
+        """Prefixes every non-blank line of the delta with a stable `[N]` marker before
+        it's shown to the LLM, so recommendations can cite a precise location instead
+        of a general summary. Deliberately computed from whatever delta_text is passed
+        in — including an already-truncated delta (_process_project truncates to
+        Config.MAX_DELTA_CHARS BEFORE calling analyze_delta) — so numbering always
+        matches exactly what the LLM actually sees, regardless of how long the original
+        delta was. `[N]` is delta-relative (line N of the new-additions excerpt in this
+        analysis), not an absolute line number in the source .tex file: the diff this
+        agent runs is against LaTeX-cleaned, whitespace-normalized text (see
+        _normalize_lines), which has no stable mapping back to raw source line numbers
+        — a delta-relative marker plus a verbatim quote (see analyze_delta's prompt) is
+        the most precise anchor available without redesigning the diff engine itself."""
+        numbered = []
+        n = 0
+        for line in delta_text.splitlines():
+            if not line.strip():
+                continue
+            n += 1
+            numbered.append(f"[{n}] {line}")
+        return "\n".join(numbered)
+
     def analyze_delta(self, delta_text: str, project: str = None) -> tuple:
         """Single LLM call returning (feedback, suggestions) — halves token usage vs two separate calls.
 
@@ -110,9 +178,12 @@ class ProgressTrackingAgent(BaseAgent):
         (see BaseAgent._alert_waterfall_exhausted) — it does not affect the prompt or the
         degraded-output return value on failure."""
         self.logger.info("Analyzing Delta (single LLM call for feedback + suggestions)...")
+        numbered_delta = self._number_delta_lines(delta_text)
         prompt = f"""
-        You are an expert academic reviewer and editor. Review the following NEW ADDITIONS or MODIFICATIONS to a research paper:
-        ---\n{delta_text}\n---
+        You are an expert academic reviewer and editor. Review the following NEW ADDITIONS or MODIFICATIONS to a research paper.
+        Each line below is prefixed with a bracketed marker like [12] — this is that
+        line's reference number for this review only, not a page or manuscript line number.
+        ---\n{numbered_delta}\n---
 
         Provide your response in EXACTLY this format (keep the headers):
 
@@ -120,7 +191,15 @@ class ProgressTrackingAgent(BaseAgent):
         A brief, constructive critique of these new changes regarding academic tone, clarity, and depth. Do not rewrite the text.
 
         ### SUGGESTIONS
-        2-3 bullet points suggesting concrete improvements to phrasing and flow. Explain what should be changed and why, but do not rewrite.
+        2-3 bullet points suggesting concrete, LOCATED improvements to phrasing and flow —
+        not general statements. For EACH bullet, you MUST:
+        1. Start with the exact marker of the line it refers to, e.g. "[12]".
+        2. Immediately follow it with a short verbatim quote (5-15 words) copied exactly
+           from that line, so the student can find it with a text search.
+        3. Then explain what should be changed and why. Do not rewrite the text.
+        Format each bullet EXACTLY as: - [N] "verbatim quoted phrase": explanation.
+        If a suggestion genuinely applies to the passage as a whole rather than one
+        line, cite the marker of its first line.
         """
         _error = "⚠️ *System Note: The AI assistant was unable to generate feedback at this time due to a temporary connection issue.*"
         try:

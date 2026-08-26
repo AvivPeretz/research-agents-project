@@ -111,3 +111,168 @@ class TestResearchEnhancementAgent:
             enhancement_agent._generate_actionable_tasks(project_name="ProjectB", review_text="review")
 
         assert mock_notifier.send_admin_alert.call_count == 2
+
+
+class TestStanfordReviewTieringAndFormat:
+    """Amit's feedback: the Stanford review output must be tiered by severity/
+    importance and formatted as a document suitable to hand directly to the student
+    author — not a flat pass-through of the raw review."""
+
+    @pytest.fixture
+    def enhancement_agent(self, db_in_memory, mock_notifier, sample_project_name):
+        agent = ResearchEnhancementAgent(
+            overleaf_projects=[sample_project_name],
+            db=db_in_memory,
+            notifier=mock_notifier,
+        )
+        return agent
+
+    def test_prompt_requires_severity_tiers(self, enhancement_agent, sample_project_name):
+        """The prompt sent to the LLM must require Critical/Important/Minor tiers,
+        not a flat numbered list."""
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return "## Novelty & Innovation\nGood.\n## 🔴 Critical\n1. Fix X.\n## 🟡 Important\n1. Fix Y.\n## 🟢 Minor\n1. Fix Z."
+
+        with patch.object(enhancement_agent, "ask_llm", side_effect=_capture):
+            enhancement_agent._generate_actionable_tasks(sample_project_name, "raw stanford review text")
+
+        prompt = captured["prompt"]
+        assert "Critical" in prompt
+        assert "Important" in prompt
+        assert "Minor" in prompt
+
+    def test_prompt_frames_output_for_student_not_internal_dump(self, enhancement_agent, sample_project_name):
+        """The prompt must explicitly frame the output as student-facing, not an
+        internal engineering/PM task table (the old prompt said 'Academic Research
+        Manager' producing a 'Task Description/Estimated Effort/Recommended Deadline'
+        table — internal-reader framing)."""
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return "## Novelty & Innovation\nGood."
+
+        with patch.object(enhancement_agent, "ask_llm", side_effect=_capture):
+            enhancement_agent._generate_actionable_tasks(sample_project_name, "raw stanford review text")
+
+        prompt = captured["prompt"].lower()
+        assert "student" in prompt
+
+    def test_generate_actionable_tasks_still_returns_llm_output_unchanged_shape(
+        self, enhancement_agent, sample_project_name
+    ):
+        """The return value and save-to-disk behavior are unchanged — this is a
+        prompt-only redesign, not a schema/parsing change downstream."""
+        with patch.object(enhancement_agent, "ask_llm", return_value="## Novelty & Innovation\nGood."):
+            result = enhancement_agent._generate_actionable_tasks(sample_project_name, "raw review")
+        assert result == "## Novelty & Innovation\nGood."
+
+
+class TestStanfordReviewCycleComparison:
+    """Amit's feedback: compare a new Stanford review against the previous one for
+    the same project and surface whether previously-raised points were addressed."""
+
+    @pytest.fixture
+    def enhancement_agent(self, db_in_memory, mock_notifier, sample_project_name):
+        agent = ResearchEnhancementAgent(
+            overleaf_projects=[sample_project_name],
+            db=db_in_memory,
+            notifier=mock_notifier,
+        )
+        return agent
+
+    def test_no_previous_review_omits_comparison_section(self, enhancement_agent, sample_project_name):
+        """First review cycle (no previous_review_text) must NOT ask for a comparison
+        section — there's nothing to compare against yet."""
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return "## Novelty & Innovation\nGood."
+
+        with patch.object(enhancement_agent, "ask_llm", side_effect=_capture):
+            enhancement_agent._generate_actionable_tasks(sample_project_name, "current review", previous_review_text=None)
+
+        assert "Progress Since Last Review" not in captured["prompt"]
+        assert "PREVIOUS STANFORD REVIEW" not in captured["prompt"]
+
+    def test_previous_review_triggers_comparison_section(self, enhancement_agent, sample_project_name):
+        """Second+ review cycle (previous_review_text provided) must include both the
+        previous review text and instructions to compare against it."""
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return "## Novelty & Innovation\nGood.\n## Progress Since Last Review\n..."
+
+        with patch.object(enhancement_agent, "ask_llm", side_effect=_capture):
+            enhancement_agent._generate_actionable_tasks(
+                sample_project_name, "current review text", previous_review_text="OLD review text: missing baselines"
+            )
+
+        prompt = captured["prompt"]
+        assert "Progress Since Last Review" in prompt
+        assert "OLD review text: missing baselines" in prompt
+
+    def test_process_project_reads_previous_review_before_saving_new_one(
+        self, enhancement_agent, db_in_memory, sample_project_name, mock_notifier
+    ):
+        """End-to-end: on a second review cycle, the PREVIOUS review (already in DB)
+        is passed to task generation, and the NEW review gets appended to history
+        afterward — not before, so 'previous' never means the review being processed."""
+        from datetime import datetime
+
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        db_in_memory.save_stanford_review(sample_project_name, "FIRST review cycle text")
+        db_in_memory.update_project_state(
+            sample_project_name,
+            stanford_status="WAITING_FOR_REVIEW",
+            stanford_token="tok_123",
+            last_upload_time=datetime.now().isoformat(),  # recent, so the 48h-stuck alert path doesn't fire
+        )
+
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return "## Novelty & Innovation\nGood."
+
+        with patch.object(enhancement_agent, "_fetch_review_from_stanford", return_value="SECOND review cycle text"), \
+             patch.object(enhancement_agent, "ask_llm", side_effect=_capture):
+            enhancement_agent._process_project(sample_project_name)
+
+        assert "FIRST review cycle text" in captured["prompt"]
+        # The new review must now be the latest in history (appended, not overwritten).
+        assert db_in_memory.get_latest_stanford_review(sample_project_name) == "SECOND review cycle text"
+
+    def test_database_manager_review_history_is_append_only(self, db_in_memory, sample_project_name):
+        """save_stanford_review appends; get_latest_stanford_review always returns the
+        most recently saved row, and earlier cycles are never overwritten or lost."""
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        assert db_in_memory.get_latest_stanford_review(sample_project_name) is None
+
+        db_in_memory.save_stanford_review(sample_project_name, "cycle 1 text")
+        assert db_in_memory.get_latest_stanford_review(sample_project_name) == "cycle 1 text"
+
+        db_in_memory.save_stanford_review(sample_project_name, "cycle 2 text")
+        assert db_in_memory.get_latest_stanford_review(sample_project_name) == "cycle 2 text"
+
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM stanford_review_history WHERE project_name = ?",
+                (sample_project_name,)
+            )
+            assert cursor.fetchone()[0] == 2  # both cycles preserved, not overwritten
+
+    def test_get_latest_stanford_review_scoped_per_project(self, db_in_memory):
+        """Review history for one project must never leak into another project's
+        comparison."""
+        db_in_memory.save_stanford_review("ProjectA", "A's review")
+        db_in_memory.save_stanford_review("ProjectB", "B's review")
+
+        assert db_in_memory.get_latest_stanford_review("ProjectA") == "A's review"
+        assert db_in_memory.get_latest_stanford_review("ProjectB") == "B's review"
