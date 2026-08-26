@@ -56,44 +56,6 @@ class ProgressTrackingAgent(BaseAgent):
         except Exception as e:
             self.logger.error("Failed to save current text state to DB for %s: %s", project, str(e))
 
-    # Informal editorial/reviewer annotations researchers leave inline as notes to
-    # themselves or collaborators — not manuscript content. \hl{...} (the soul/xcolor
-    # "highlight" command) is the only such convention actually present in this
-    # codebase's real tracked manuscripts (verified by scanning every .tex file in
-    # both live test projects, PQTrace and Udi Aharon's PhD book, for this and several
-    # other common informal-annotation commands — \todo, \comment, \note, \marginpar,
-    # \reviewer, \sout, \textcolor{red}{...} etc. — none of which appear anywhere in
-    # either project; only \hl{...} does, e.g. `\hl{A: this is a lab, let try to think
-    # on different name}`). PQTrace also defines an unused `\chen{...}` macro that
-    # expands to `\hl{\textbf{Chen:} #1}` — it is never actually invoked in the current
-    # manuscript, so stripping raw \hl{...} covers every real instance today; if
-    # `\chen{...}` (or a similar wrapper macro) ever comes into use without expanding
-    # through \hl first, this list would need revisiting.
-    #
-    # Must run on the RAW .tex source, BEFORE OverleafConnector.clean_latex_text()
-    # runs: clean_latex_text() unwraps `\hl{...}` down to its bare inner text (the
-    # same generic pass it uses for \textbf, \emph, etc.), so by the time cleaned text
-    # exists the annotation is byte-for-byte indistinguishable from real manuscript
-    # prose and can no longer be identified or removed.
-    #
-    # Bounded one-level brace nesting (matches the pattern already used by
-    # OverleafConnector._HEADING_RE) so `\hl{\textbf{Chen:} ...}`-style nested content
-    # is handled correctly and the regex doesn't undercount closing braces.
-    _EDITORIAL_ANNOTATION_RE = re.compile(
-        r'\\hl\{((?:[^{}]|\{[^{}]*\})*)\}',
-        re.DOTALL
-    )
-
-    @classmethod
-    def _strip_editorial_annotations(cls, raw_text: str) -> str:
-        """Removes informal reviewer/editorial notes (see _EDITORIAL_ANNOTATION_RE)
-        from raw LaTeX source so they're never treated as new manuscript content
-        during delta analysis. A no-op (returns input unchanged) if raw_text is
-        empty or contains no such annotations."""
-        if not raw_text:
-            return raw_text
-        return cls._EDITORIAL_ANNOTATION_RE.sub('', raw_text)
-
     @staticmethod
     def _normalize_lines(text: str) -> list:
         """Collapse internal whitespace per line so LaTeX reflow doesn't trigger false deltas."""
@@ -119,12 +81,15 @@ class ProgressTrackingAgent(BaseAgent):
 
         project_path = os.path.join(self.connector.base_storage_path, project)
         # Deliberately not self.connector.read_all_tex_files() — editorial annotations
-        # (see _strip_editorial_annotations) must be stripped from the RAW source
-        # before OverleafConnector.clean_latex_text() unwraps them into indistinguishable
-        # plain text. This reproduces read_all_tex_files()'s own raw-then-clean sequence
-        # with the strip step inserted in between.
+        # (see OverleafConnector.strip_editorial_annotations()'s docstring) must be
+        # stripped from the RAW source before OverleafConnector.clean_latex_text()
+        # unwraps them into indistinguishable plain text. This reproduces
+        # read_all_tex_files()'s own raw-then-clean sequence with the strip step
+        # inserted in between. The strip logic itself now lives on OverleafConnector
+        # (shared with LiteratureResearchAgent and ResearchEnhancementAgent, which
+        # need the identical protection) rather than duplicated here.
         raw_text = self.connector.read_all_tex_files_raw(project_path)
-        raw_text = self._strip_editorial_annotations(raw_text)
+        raw_text = self.connector.strip_editorial_annotations(raw_text)
         current_text = self.connector.clean_latex_text(raw_text) if raw_text else ""
 
         if not current_text:

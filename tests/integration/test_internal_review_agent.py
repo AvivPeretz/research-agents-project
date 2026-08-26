@@ -427,6 +427,52 @@ class TestInternalReviewAgent:
         assert "Related Paper" in prompt
 
     # ------------------------------------------------------------------
+    # 15. test_severity_tier_vocabulary_matches_stanford_path
+    # ------------------------------------------------------------------
+    def test_internal_review_action_plan_uses_critical_important_minor_tiers(self, enhancement_agent):
+        """The internal-review fallback's Action Plan must use the SAME severity-tier
+        vocabulary as the Stanford-review path (_generate_actionable_tasks) — Critical
+        / Important / Minor with matching emoji markers — rather than its previous,
+        different High/Medium/Low scheme. A student should see a consistent structure
+        regardless of which pipeline produced their review."""
+        prompt = enhancement_agent._build_internal_review_prompt(
+            project_name="Test Project",
+            paper_text="Some manuscript text.",
+            related_papers_str="",
+        )
+
+        assert "🔴 Critical" in prompt
+        assert "🟡 Important" in prompt
+        assert "🟢 Minor" in prompt
+        # The old vocabulary must be gone, not just supplemented.
+        assert "High / Medium / Low" not in prompt
+        assert "**Priority**" not in prompt
+
+    def test_both_review_paths_use_identical_tier_markers(self, enhancement_agent):
+        """Direct side-by-side comparison: the Stanford path's prompt
+        (_generate_actionable_tasks) and the internal-review path's prompt
+        (_build_internal_review_prompt) must use the exact same three tier header
+        strings, not just similar-sounding ones."""
+        internal_prompt = enhancement_agent._build_internal_review_prompt(
+            project_name="Test Project", paper_text="text", related_papers_str=""
+        )
+
+        captured = {}
+
+        def _capture(prompt, *a, **kw):
+            captured["prompt"] = prompt
+            return "## Novelty & Innovation\nGood."
+
+        with patch.object(enhancement_agent, "ask_llm", side_effect=_capture):
+            enhancement_agent._generate_actionable_tasks("Test Project", "raw stanford review")
+
+        stanford_prompt = captured["prompt"]
+
+        for tier_header in ("🔴 Critical", "🟡 Important", "🟢 Minor"):
+            assert tier_header in internal_prompt, f"internal-review prompt missing {tier_header!r}"
+            assert tier_header in stanford_prompt, f"Stanford-path prompt missing {tier_header!r}"
+
+    # ------------------------------------------------------------------
     # 13. test_appendix_content_excluded_from_review_prompt
     # ------------------------------------------------------------------
     def test_appendix_content_excluded_from_review_prompt(
@@ -456,3 +502,46 @@ class TestInternalReviewAgent:
         assert len(captured_prompts) == 1
         assert "UNIQUE_APPENDIX_MARKER_TEXT" not in captured_prompts[0]
         assert "real conclusion of the paper" in captured_prompts[0]
+
+    # ------------------------------------------------------------------
+    # 14. test_internal_review_excludes_hl_editorial_annotations
+    # ------------------------------------------------------------------
+    def test_internal_review_excludes_hl_editorial_annotations(
+        self, enhancement_agent, db_in_memory, sample_project_name, tmp_path, monkeypatch
+    ):
+        """Amit's feedback originally targeted ProgressTrackingAgent specifically, but
+        the same leakage affects this agent's internal-review fallback: an \\hl{...}
+        editorial note left in the manuscript must not be sent to the LLM as if it
+        were real content to review. Uses the REAL (unmocked) OverleafConnector via a
+        real .tex file on disk, so this exercises the actual
+        read_all_tex_files_split() -> strip_editorial_annotations() path, not a mock
+        that would hide a regression here."""
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "test@example.com")
+
+        project_dir = tmp_path / sample_project_name
+        project_dir.mkdir()
+        real_sentence = "This is a real sentence about the core methodology used in the paper. "
+        doc = (
+            r"\section{Methodology} "
+            + (real_sentence * 60)  # well over MINIMUM_REVIEW_LENGTH
+            + r"\hl{A: reviewer note, please double check this whole section before submission}"
+        )
+        (project_dir / "main.tex").write_text(doc)
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        captured_prompts = []
+
+        def _capture_ask_llm(prompt):
+            captured_prompts.append(prompt)
+            return "## Summary\nReview.\n\n## Action Plan\n1. Fix by 2026-05-15.\n"
+
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=_capture_ask_llm):
+            result = enhancement_agent._run_internal_review(sample_project_name)
+
+        assert result is True
+        assert len(captured_prompts) == 1
+        assert "core methodology" in captured_prompts[0]
+        assert "reviewer note" not in captured_prompts[0]
+        assert "\\hl" not in captured_prompts[0]

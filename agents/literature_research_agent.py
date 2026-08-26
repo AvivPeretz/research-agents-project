@@ -47,6 +47,13 @@ class LiteratureResearchAgent(BaseAgent):
         if not raw_text:
             self.logger.warning("No valid LaTeX text extracted for project: %s", project_name)
             return ""
+        # Strip informal editorial/reviewer notes (e.g. \hl{...}) before this text
+        # feeds keyword extraction — otherwise a collaborator's inline comment (not
+        # manuscript content) can pollute the search queries this agent generates.
+        # Must happen on raw text, before extract_representative_sample()'s internal
+        # clean_latex_text() calls unwrap \hl{...} into indistinguishable plain text
+        # — see OverleafConnector.strip_editorial_annotations()'s docstring.
+        raw_text = self.connector.strip_editorial_annotations(raw_text)
         max_chars = getattr(Config, 'MAX_PROJECT_TEXT_CHARS', 4000)
         sample = self.connector.extract_representative_sample(raw_text, max_chars)
         if len(raw_text) > max_chars:

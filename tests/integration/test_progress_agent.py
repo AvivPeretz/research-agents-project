@@ -38,8 +38,8 @@ class TestProgressTrackingAgent:
     def test_check_text_changes_first_run_returns_has_changes_true(self, progress_agent, sample_project_name):
         """Asserts that on first run with no prior state, has_changes is True."""
         # check_text_changes reads via read_all_tex_files_raw (not read_all_tex_files)
-        # so _strip_editorial_annotations can run on raw text before LaTeX cleaning —
-        # see ProgressTrackingAgent._strip_editorial_annotations.
+        # so OverleafConnector.strip_editorial_annotations() can run on raw text
+        # before LaTeX cleaning — see that method's docstring.
         with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value="New content"):
             result = progress_agent.check_text_changes(sample_project_name)
             assert result["has_changes"] is True
@@ -128,43 +128,16 @@ class TestProgressTrackingAgent:
 class TestEditorialAnnotationStripping:
     """Amit's feedback: \\hl{...} inline reviewer/editorial notes (e.g. `\\hl{A: this
     is a lab, let try to think on different name}` in PQTrace's actual manuscript)
-    must never be treated as real manuscript content during delta analysis."""
+    must never be treated as real manuscript content during delta analysis.
 
-    def test_strip_editorial_annotations_removes_hl_command_and_content(self):
-        raw = r"Recording Module \hl{A: this is a lab, let try to think on different name} handles capture."
-        result = ProgressTrackingAgent._strip_editorial_annotations(raw)
-        assert "\\hl" not in result
-        assert "this is a lab" not in result
-        assert "Recording Module" in result
-        assert "handles capture" in result
-
-    def test_strip_editorial_annotations_handles_nested_braces(self):
-        """Matches the \\chen{...} macro's expansion shape (\\hl{\\textbf{Chen:} ...}) —
-        currently unused in the tracked manuscripts, but the regex must not undercount
-        closing braces if it ever is."""
-        raw = r"Some text \hl{\textbf{Chen:} please expand this section} more text."
-        result = ProgressTrackingAgent._strip_editorial_annotations(raw)
-        assert "\\hl" not in result
-        assert "Chen" not in result
-        assert "please expand" not in result
-        assert "Some text" in result
-        assert "more text" in result
-
-    def test_strip_editorial_annotations_removes_multiple_instances(self):
-        raw = r"\hl{note one} body text \hl{note two} more body"
-        result = ProgressTrackingAgent._strip_editorial_annotations(raw)
-        assert "note one" not in result
-        assert "note two" not in result
-        assert "body text" in result
-        assert "more body" in result
-
-    def test_strip_editorial_annotations_noop_on_empty_or_none(self):
-        assert ProgressTrackingAgent._strip_editorial_annotations("") == ""
-        assert ProgressTrackingAgent._strip_editorial_annotations(None) is None
-
-    def test_strip_editorial_annotations_noop_when_no_annotations_present(self):
-        raw = "Plain manuscript text with no annotations at all."
-        assert ProgressTrackingAgent._strip_editorial_annotations(raw) == raw
+    The isolated unit tests for the stripping regex itself now live in
+    tests/unit/test_overleaf_connector.py — the logic moved to
+    OverleafConnector.strip_editorial_annotations() (shared with
+    LiteratureResearchAgent and ResearchEnhancementAgent, which need the identical
+    protection) so it's no longer implemented on ProgressTrackingAgent. This class
+    keeps only the end-to-end test below, which exercises the real (unmocked)
+    connector delegation and confirms ProgressTrackingAgent's own behavior is
+    unaffected by that move."""
 
     def test_check_text_changes_excludes_hl_annotation_from_delta(self, progress_agent, sample_project_name):
         """End-to-end: an \\hl{...} note added alongside real new text must not appear

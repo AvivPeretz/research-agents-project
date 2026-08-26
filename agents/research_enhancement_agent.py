@@ -526,15 +526,34 @@ context provided above explicitly.)
 
 ## Action Plan for Research Team
 
-Based on the review above, generate a prioritized, actionable task list \
-for the research team. For EACH task provide:
+Organize the actionable task list into the SAME three severity tiers used across
+this system's peer-review output (Stanford-sourced reviews use this identical
+scheme), so a research team sees a consistent structure regardless of whether their
+review came from Stanford or this internal fallback. Use EXACTLY this structure:
+
+### 🔴 Critical — Must Address Before Resubmission
+Numbered list. Issues that block acceptance: missing evaluation, unsupported
+claims, fundamental methodology gaps, missing baselines. Only include a genuine
+blocker here — do not inflate minor notes into this tier.
+
+### 🟡 Important — Strengthens the Paper Significantly
+Numbered list. Real weaknesses that should be fixed but wouldn't alone block
+acceptance: missing related work, unclear methodology sections, insufficient
+ablations.
+
+### 🟢 Minor — Polish & Cleanup
+Numbered list. Typos, formatting, missing citations, small clarity fixes.
+
+For EVERY task in all three tiers, provide:
 - **Task**: What specifically needs to be fixed or added
 - **Effort Estimate**: Actual working time (e.g., "~3 hours", "~1 day")
 - **Deadline**: Specific date within the next 30 days from today ({today_str})
-- **Priority**: High / Medium / Low
 
-Format as a numbered markdown list. Be concrete and surgical — \
-avoid vague tasks like "improve the writing."
+Assign each task to a tier based on what the REVIEW ABOVE actually shows about its
+severity/impact on the paper's claims — do not default everything to one tier. Be
+concrete and surgical — avoid vague tasks like "improve the writing." If the review
+does not clearly justify any Critical-tier issue, it is fine for that section to be
+short or say "No blocking issues identified."
 """
 
     def _run_internal_review(self, project_name: str) -> bool:

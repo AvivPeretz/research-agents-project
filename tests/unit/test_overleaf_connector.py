@@ -177,7 +177,14 @@ class TestReadAllTexFilesSplit:
 
         assert "normal short paper" in body
         assert appendix == ""
-        # Must be identical to the non-split method when there's nothing to split.
+        # Must be identical to the non-split method when there's nothing to split —
+        # true here because the fixture text contains no \hl{...} annotations.
+        # read_all_tex_files_split() additionally strips editorial annotations
+        # (unlike read_all_tex_files(), which dashboard.py also uses for a human-
+        # facing view where that isn't necessarily wanted — see
+        # OverleafConnector.strip_editorial_annotations()'s docstring), so the two
+        # would differ if the source contained any \hl{...} — covered separately in
+        # TestReadAllTexFilesSplitStripsEditorialAnnotations below.
         assert body == connector.read_all_tex_files(str(tmp_path))
 
     def test_empty_project_returns_two_empty_strings(self, tmp_path):
@@ -362,3 +369,125 @@ Regular introduction content follows here.
         sample = connector.extract_representative_sample(doc, max_chars=4000)
         occurrences = sample.count("This unique abstract sentence about federated learning appears only once")
         assert occurrences == 1
+
+
+class TestStripEditorialAnnotations:
+    """Amit's feedback (ProgressTrackingAgent): \\hl{...} inline reviewer/editorial
+    notes (e.g. `\\hl{A: this is a lab, let try to think on different name}` in
+    PQTrace's actual manuscript) must never be treated as real manuscript content.
+
+    This logic was originally implemented directly on ProgressTrackingAgent, then
+    moved here (shared via OverleafConnector) once LiteratureResearchAgent's keyword
+    extraction and ResearchEnhancementAgent's internal-review fallback were confirmed
+    to need the identical protection — see strip_editorial_annotations()'s docstring
+    for the full reasoning, including why this was NOT folded into clean_latex_text()
+    itself (dashboard.py's human-facing manuscript-diff view also goes through
+    clean_latex_text(), where stripping isn't necessarily wanted)."""
+
+    def test_removes_hl_command_and_content(self):
+        connector = OverleafConnector()
+        raw = r"Recording Module \hl{A: this is a lab, let try to think on different name} handles capture."
+        result = connector.strip_editorial_annotations(raw)
+        assert "\\hl" not in result
+        assert "this is a lab" not in result
+        assert "Recording Module" in result
+        assert "handles capture" in result
+
+    def test_handles_nested_braces(self):
+        """Matches the \\chen{...} macro's expansion shape (\\hl{\\textbf{Chen:} ...}) —
+        currently unused in the tracked manuscripts, but the regex must not undercount
+        closing braces if it ever is."""
+        connector = OverleafConnector()
+        raw = r"Some text \hl{\textbf{Chen:} please expand this section} more text."
+        result = connector.strip_editorial_annotations(raw)
+        assert "\\hl" not in result
+        assert "Chen" not in result
+        assert "please expand" not in result
+        assert "Some text" in result
+        assert "more text" in result
+
+    def test_removes_multiple_instances(self):
+        connector = OverleafConnector()
+        raw = r"\hl{note one} body text \hl{note two} more body"
+        result = connector.strip_editorial_annotations(raw)
+        assert "note one" not in result
+        assert "note two" not in result
+        assert "body text" in result
+        assert "more body" in result
+
+    def test_noop_on_empty_or_none(self):
+        connector = OverleafConnector()
+        assert connector.strip_editorial_annotations("") == ""
+        assert connector.strip_editorial_annotations(None) is None
+
+    def test_noop_when_no_annotations_present(self):
+        connector = OverleafConnector()
+        raw = "Plain manuscript text with no annotations at all."
+        assert connector.strip_editorial_annotations(raw) == raw
+
+    def test_idempotent_when_applied_twice(self):
+        """ProgressTrackingAgent, LiteratureResearchAgent, and
+        ResearchEnhancementAgent each apply this once on their own read path — but
+        nothing should break if a future refactor ever caused it to run twice on the
+        same text (e.g. via a shared helper called from two layers)."""
+        connector = OverleafConnector()
+        raw = r"Text \hl{note} more text."
+        once = connector.strip_editorial_annotations(raw)
+        twice = connector.strip_editorial_annotations(once)
+        assert once == twice
+
+
+class TestReadAllTexFilesSplitStripsEditorialAnnotations:
+    """ResearchEnhancementAgent's internal peer-review fallback reads manuscript text
+    via read_all_tex_files_split() — this is its only production caller, so editorial
+    annotations are stripped inside that method by default (see its docstring for why
+    this default was safe to change there specifically, unlike read_all_tex_files())."""
+
+    def test_hl_annotation_excluded_from_body(self, tmp_path):
+        (tmp_path / "main.tex").write_text(
+            r"""
+            \section{Introduction}
+            Real manuscript sentence about the methodology.
+            \hl{A: reviewer note, please double check this claim}
+            """
+        )
+        connector = OverleafConnector()
+        body, appendix = connector.read_all_tex_files_split(str(tmp_path))
+
+        assert "Real manuscript sentence about the methodology" in body
+        assert "reviewer note" not in body
+        assert "\\hl" not in body
+
+    def test_hl_annotation_excluded_from_appendix(self, tmp_path):
+        (tmp_path / "main.tex").write_text(
+            r"""
+            \section{Introduction} Real intro text.
+            \appendix
+            \section{Proof} Real proof content.
+            \hl{B: this proof needs another pass}
+            """
+        )
+        connector = OverleafConnector()
+        body, appendix = connector.read_all_tex_files_split(str(tmp_path))
+
+        assert "Real proof content" in appendix
+        assert "this proof needs another pass" not in appendix
+        assert "\\hl" not in appendix
+
+
+class TestReadAllTexFilesDoesNotStripEditorialAnnotations:
+    """read_all_tex_files() (used by dashboard.py's human-facing manuscript-diff
+    view, among others) deliberately does NOT strip \\hl{...} — an operator reviewing
+    what changed in a manuscript may want to see a collaborator's inline note. Only
+    the LLM-facing read paths (read_all_tex_files_split(), and the explicit
+    strip_editorial_annotations() calls in LiteratureResearchAgent/
+    ProgressTrackingAgent) strip them."""
+
+    def test_hl_annotation_survives_in_plain_read_all_tex_files(self, tmp_path):
+        (tmp_path / "main.tex").write_text(
+            r"Real sentence. \hl{A: operator should still see this note}"
+        )
+        connector = OverleafConnector()
+        result = connector.read_all_tex_files(str(tmp_path))
+
+        assert "operator should still see this note" in result

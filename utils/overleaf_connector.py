@@ -23,6 +23,57 @@ class OverleafConnector:
             ch.setFormatter(formatter)
             self.logger.addHandler(ch)
 
+    # Informal editorial/reviewer annotations researchers leave inline as notes to
+    # themselves or collaborators — not manuscript content. \hl{...} (the soul/xcolor
+    # "highlight" command) is the only such convention actually present in this
+    # codebase's real tracked manuscripts (re-verified by scanning every .tex file in
+    # both live test projects, PQTrace and Udi Aharon's PhD book, for this and several
+    # other common informal-annotation commands — \todo, \comment, \note, \marginpar,
+    # \reviewer, \sout, \textcolor{red}{...}, \fixme, \XXX, \TODO — none of which
+    # appear anywhere in either project; only \hl{...} does, e.g. `\hl{A: this is a
+    # lab, let try to think on different name}`). PQTrace also defines an unused
+    # `\chen{...}` macro that expands to `\hl{\textbf{Chen:} #1}` — it is never
+    # actually invoked in the current manuscript, so stripping raw \hl{...} covers
+    # every real instance today; if `\chen{...}` (or a similar wrapper macro) ever
+    # comes into use without expanding through \hl first, this would need revisiting.
+    #
+    # Shared here (moved from ProgressTrackingAgent, which was the first consumer to
+    # need it) so LiteratureResearchAgent's keyword extraction and
+    # ResearchEnhancementAgent's internal-review fallback get the same protection
+    # instead of duplicating the regex three times. Deliberately NOT folded into
+    # clean_latex_text() itself: clean_latex_text() is also the default path for
+    # dashboard.py's human-facing "Tex Changes" view, where an operator reviewing
+    # what changed in a manuscript may actually want to SEE a collaborator's inline
+    # note (e.g. "Chen: please expand this section") — that's a different, legitimate
+    # use case this session wasn't asked to change. strip_editorial_annotations() is
+    # an explicit, opt-in step each LLM-facing caller applies to raw text BEFORE
+    # cleaning, not a change to clean_latex_text()'s own default behavior.
+    #
+    # Must run on RAW .tex source, BEFORE clean_latex_text(): clean_latex_text()
+    # unwraps `\hl{...}` down to its bare inner text (the same generic pass it uses
+    # for \textbf, \emph, etc.), so by the time cleaned text exists the annotation is
+    # byte-for-byte indistinguishable from real manuscript prose and can no longer be
+    # identified or removed.
+    #
+    # Bounded one-level brace nesting so `\hl{\textbf{Chen:} ...}`-style nested
+    # content is handled correctly and the regex doesn't undercount closing braces
+    # (matches the same pattern _HEADING_RE below already uses for this reason).
+    _EDITORIAL_ANNOTATION_RE = re.compile(
+        r'\\hl\{((?:[^{}]|\{[^{}]*\})*)\}',
+        re.DOTALL
+    )
+
+    def strip_editorial_annotations(self, raw_text: str) -> str:
+        """Removes informal reviewer/editorial notes (see _EDITORIAL_ANNOTATION_RE)
+        from raw LaTeX source so they're never treated as real manuscript content by
+        an LLM-facing consumer. A no-op (returns input unchanged) if raw_text is
+        empty or contains no such annotations. Callers must apply this to RAW text,
+        before calling clean_latex_text() (directly or via another method that calls
+        it internally) — see the comment on _EDITORIAL_ANNOTATION_RE above."""
+        if not raw_text:
+            return raw_text
+        return self._EDITORIAL_ANNOTATION_RE.sub('', raw_text)
+
     def clean_latex_text(self, raw_tex: str) -> str:
         """
         Cleans basic LaTeX formatting commands from the text to make it readable for the LLM.
@@ -165,6 +216,15 @@ class OverleafConnector:
         raw_text = self.read_all_tex_files_raw(project_path)
         if not raw_text:
             return "", ""
+
+        # This method's only production caller (ResearchEnhancementAgent's internal
+        # peer-review fallback) is LLM-facing, so editorial annotations (\hl{...})
+        # are stripped here by default — unlike read_all_tex_files() above, which
+        # dashboard.py also uses for a human-facing manuscript-diff view where
+        # stripping isn't necessarily wanted (see strip_editorial_annotations()'s
+        # docstring for the full reasoning). Safe to change this method's default
+        # specifically because it has exactly one production consumer.
+        raw_text = self.strip_editorial_annotations(raw_text)
 
         match = self._APPENDIX_MARKER_RE.search(raw_text)
         if not match:

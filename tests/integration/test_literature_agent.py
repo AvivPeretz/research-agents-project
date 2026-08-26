@@ -260,6 +260,30 @@ This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
         assert "ZEBRA_MARKER_TOKEN" in result
         assert len(result) <= Config.MAX_PROJECT_TEXT_CHARS
 
+    def test_read_project_text_excludes_hl_editorial_annotations(
+        self, literature_agent, sample_project_name, tmp_path, monkeypatch
+    ):
+        """Amit's feedback originally targeted ProgressTrackingAgent specifically, but
+        the same leakage affects this agent: an \\hl{...} editorial note (e.g. a
+        collaborator's inline comment) left in the manuscript must not pollute the
+        text used for keyword extraction — it isn't real manuscript content."""
+        from config import Config
+
+        project_dir = tmp_path / sample_project_name
+        project_dir.mkdir()
+        doc = (
+            r"\section{Introduction} Real sentence about the core methodology used. "
+            r"\hl{A: reviewer note, please rewrite this paragraph before submission}"
+        )
+        (project_dir / "main.tex").write_text(doc)
+        monkeypatch.setattr(Config, "OVERLEAF_DIR", str(tmp_path))
+
+        result = literature_agent._read_project_text(sample_project_name)
+
+        assert "Real sentence about the core methodology" in result
+        assert "reviewer note" not in result
+        assert "\\hl" not in result
+
     def test_process_project_truncates_abstracts_before_final_llm_call(self, mock_notifier, sample_project_name):
         """Asserts the JSON payload sent to the final LLM call has abstracts capped, not the raw 5000+ chars."""
         from tests.fixtures.mock_responses import VALID_LITERATURE_JSON
