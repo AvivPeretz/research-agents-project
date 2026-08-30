@@ -1,5 +1,6 @@
 """Integration tests for ProgressTrackingAgent."""
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -184,14 +185,18 @@ class TestLocatedRecommendations:
         assert result == expected
 
     def test_analyze_delta_prompt_includes_numbered_lines_and_location_instruction(self, progress_agent, sample_project_name):
-        """The prompt actually sent to the LLM must contain the numbered delta and
-        instruct the model to cite a marker + verbatim quote per suggestion — this is
-        what makes the fix 'reliable and explicit' rather than incidental."""
+        """The prompt actually sent to the LLM must contain the numbered delta (for the
+        model's own internal reference) and instruct it to weave a verbatim quote into
+        a connected narrative sentence per suggestion, never to surface a bare marker."""
         captured = {}
 
         def _capture_prompt(prompt, *args, **kwargs):
             captured["prompt"] = prompt
-            return "### FEEDBACK\nGood.\n### SUGGESTIONS\n- [1] \"first line text\": clarify this."
+            return (
+                "### FEEDBACK\nGood.\n### SUGGESTIONS\n"
+                "- In the sentence about X, the phrase is unclear (near: \"first line "
+                "text\"); consider rewording it."
+            )
 
         with patch.object(progress_agent, "ask_llm", side_effect=_capture_prompt):
             progress_agent.analyze_delta("first line text\nsecond line text", sample_project_name)
@@ -199,3 +204,62 @@ class TestLocatedRecommendations:
         assert "[1] first line text" in captured["prompt"]
         assert "[2] second line text" in captured["prompt"]
         assert "verbatim quote" in captured["prompt"]
+        # The model must be told never to surface a bare [N] marker to the reader.
+        assert "Never" in captured["prompt"] or "never" in captured["prompt"]
+
+    def test_analyze_delta_returns_connected_narrative_suggestion_unaltered(self, progress_agent, sample_project_name):
+        """When the LLM complies with the new format (a single connected sentence with
+        a location description and an inline quote, no bracket marker), analyze_delta
+        must pass it through as the readable narrative it already is — no bare '[N]'
+        marker should appear anywhere in the final suggestions text."""
+        narrative = (
+            "### FEEDBACK\nSolid additions.\n### SUGGESTIONS\n"
+            "- In the paragraph discussing the recording pipeline, the placeholder "
+            "word \"yellow\" appears where real content should be (near: \"yellow\"); "
+            "replace it with the intended text.\n"
+            "- In the sentence introducing quantum computing's threat to cryptography "
+            "(near: \"significant long-term threat to widely deployed public-key "
+            "cryptographic systems\"), the sentence bundles multiple ideas; consider "
+            "splitting it into two shorter sentences."
+        )
+        with patch.object(progress_agent, "ask_llm", return_value=narrative):
+            feedback, suggestions = progress_agent.analyze_delta("some delta", sample_project_name)
+
+        assert "Solid additions" in feedback
+        assert not re.search(r'\[\d+\]', suggestions), (
+            "final suggestions must never contain a bare [N] marker"
+        )
+        # Real located detail must survive — this must not regress to vague generality.
+        assert "recording pipeline" in suggestions
+        assert "yellow" in suggestions
+        assert "In the" in suggestions  # each item opens with a plain-language location
+
+    def test_analyze_delta_strips_leaked_bracket_marker_defensively(self, progress_agent, sample_project_name):
+        """If the LLM regresses to the old citation-then-comment format (a bare '[N]'
+        marker prefixing the bullet, exactly the pattern Amit flagged as meaningless),
+        analyze_delta must strip the marker before the text reaches the student —
+        defense-in-depth beyond the prompt instruction alone."""
+        old_style_response = (
+            "### FEEDBACK\nFine.\n### SUGGESTIONS\n"
+            "- [1] \"yellow\": appears to be a stray placeholder; remove it.\n"
+            "- [35] \"Figure~fig:SnifferSync\": the LaTeX reference is malformed."
+        )
+        with patch.object(progress_agent, "ask_llm", return_value=old_style_response):
+            _, suggestions = progress_agent.analyze_delta("some delta", sample_project_name)
+
+        assert not re.search(r'\[\d+\]', suggestions), (
+            "a leaked bare [N] marker must be stripped defensively"
+        )
+        # The rest of the located content (the quote, the explanation) must survive.
+        assert "yellow" in suggestions
+        assert "Figure~fig:SnifferSync" in suggestions
+
+    def test_strip_leading_markers_removes_bracket_prefix(self):
+        text = '- [1] "yellow": remove it.\n- [35] "Figure~fig:SnifferSync": malformed.'
+        result = ProgressTrackingAgent._strip_leading_markers(text)
+        assert result == '- "yellow": remove it.\n- "Figure~fig:SnifferSync": malformed.'
+
+    def test_strip_leading_markers_leaves_narrative_bullets_untouched(self):
+        text = '- In the sentence about X, the wording is unclear (near: "X").'
+        result = ProgressTrackingAgent._strip_leading_markers(text)
+        assert result == text

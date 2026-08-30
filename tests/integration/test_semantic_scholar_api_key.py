@@ -240,10 +240,13 @@ class TestRunIncludesOpenAlexResults:
                     with patch.object(
                         agent.fetcher, "enrich_with_openalex", return_value=serpapi_papers
                     ):
-                        with patch(
-                            "agents.base_agent.BaseAgent.ask_llm",
-                            return_value=VALID_LITERATURE_JSON,
+                        with patch.object(
+                            agent, "_filter_dead_links", side_effect=lambda project, papers: papers
                         ):
-                            agent.run()
+                            with patch(
+                                "agents.base_agent.BaseAgent.ask_llm",
+                                return_value=VALID_LITERATURE_JSON,
+                            ):
+                                agent.run()
 
         mock_notifier.send_literature_update.assert_called_once()

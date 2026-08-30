@@ -31,27 +31,17 @@ class TestCsvMissingLogsWarning:
                 notifier=mock_notifier,
             )
 
-        with patch.object(agent, "_read_project_text", return_value="sample research text"):
-            with patch.object(agent.fetcher, "search", return_value=[sample_paper]):
-                with patch.object(agent.fetcher, "fetch_from_openalex", return_value=[]):
-                    with patch.object(
-                        agent.fetcher, "enrich_with_openalex", return_value=[sample_paper]
-                    ):
-                        with patch.object(agent.library, "save_literature_summary"):
-                            with patch.object(
-                                agent.library, "append_to_project_literature_table"
-                            ):
-                                with patch.object(
-                                    BaseAgent, "ask_llm", return_value=VALID_LITERATURE_JSON
-                                ):
-                                    with patch(
-                                        "agents.literature_research_agent.os.path.exists",
-                                        return_value=False,
-                                    ):
-                                        with patch.object(
-                                            agent.logger, "warning"
-                                        ) as mock_warn:
-                                            agent.run()
+        with patch.object(agent, "_read_project_text", return_value="sample research text"), \
+             patch.object(agent.fetcher, "search", return_value=[sample_paper]), \
+             patch.object(agent.fetcher, "fetch_from_openalex", return_value=[]), \
+             patch.object(agent.fetcher, "enrich_with_openalex", return_value=[sample_paper]), \
+             patch.object(agent, "_filter_dead_links", side_effect=lambda project, papers: papers), \
+             patch.object(agent.library, "save_literature_summary"), \
+             patch.object(agent.library, "append_to_project_literature_table"), \
+             patch.object(BaseAgent, "ask_llm", return_value=VALID_LITERATURE_JSON), \
+             patch("agents.literature_research_agent.os.path.exists", return_value=False), \
+             patch.object(agent.logger, "warning") as mock_warn:
+            agent.run()
 
         warning_templates = [call.args[0] for call in mock_warn.call_args_list]
         assert any("Rolling CSV" in t for t in warning_templates), (

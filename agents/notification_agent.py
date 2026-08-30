@@ -173,19 +173,32 @@ class NotificationAgent(BaseAgent):
             self.logger.error("Failed to dispatch progress feedback email for project: %s", project_name)
 
     def send_stanford_tasks(self, project_name: str, md_content: str):
-        """Formats and sends the Monthly Stanford Review & Task List email."""
+        """Formats and sends the Monthly Stanford Review & Task List email.
+
+        Uses the 'tables' extension when converting Markdown to HTML: both the
+        Stanford-review task list (_generate_actionable_tasks) and the internal-review
+        fallback (_run_internal_review, which also calls this same method) format
+        their tiered task breakdown as Markdown pipe tables. Python-Markdown's core
+        renderer does NOT parse pipe-table syntax without this extension enabled — it
+        was leaving raw '| ... | ... |' text as a literal paragraph in the sent email,
+        while the identical Markdown rendered correctly as a table anywhere else (the
+        saved .md file, GitHub, an editor preview). This was confirmed directly from
+        today's production stanford_tasks.md output for both PQTrace and Udi Aharon's
+        book. No new dependency: 'tables' ships as a built-in extension of the
+        `markdown` package already in use here.
+        """
         recipient = self.get_researcher_email(project_name)
         msg = EmailMessage()
         msg['Subject'] = f"🎯 Monthly Action Plan: Stanford Peer-Review for {project_name}"
         msg['From'] = f"Research Enhancement Agent 🤖 <{self.sender_email}>"
         msg['To'] = recipient
 
-        html_body = markdown.markdown(md_content)
-        
+        html_body = markdown.markdown(md_content, extensions=['tables'])
+
         email_html = f"""
         <!DOCTYPE html>
         <html>
-        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #8e44ad; }}</style></head>
+        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #8e44ad; }} table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }} th, td {{ border: 1px solid #ddd; padding: 8px 10px; text-align: left; vertical-align: top; }} th {{ background-color: #f4ecf7; }}</style></head>
         <body>
             <div class="container">
                 <h2 style="color: #8e44ad;">Hello Researcher,</h2>

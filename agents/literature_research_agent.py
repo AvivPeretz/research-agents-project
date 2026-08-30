@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import ValidationError
 from domain.schemas import LiteratureReport
 import re
+import requests
+from urllib.parse import urlparse
 # Import the centralized configuration
 from config import Config
 from agents.base_agent import BaseAgent
@@ -15,6 +17,15 @@ from agents.notification_agent import NotificationAgent
 from utils.literature_fetcher import LiteratureFetcher
 from utils.overleaf_connector import OverleafConnector
 from utils.token_budget import truncate_paper_abstracts
+
+class RelevanceFilterExhausted(Exception):
+    """Raised by _filter_relevant_papers when the LLM relevance filter itself
+    waterfall-exhausts (all providers unavailable). Distinct from a normal
+    RuntimeError so _process_project can tell "filtering failed, do not
+    proceed with unfiltered data" apart from any other RuntimeError that might
+    otherwise be caught generically elsewhere in the call chain."""
+    pass
+
 
 class LiteratureResearchAgent(BaseAgent):
     """
@@ -173,21 +184,32 @@ class LiteratureResearchAgent(BaseAgent):
                 self.logger.info("Relevance filter dropped %d off-topic papers for %s.", dropped, project_name)
             return filtered if filtered else papers  # never return empty if filter misfires
         except RuntimeError as e:
-            # Full LLM waterfall exhausted — this used to be caught by the bare
+            # Full LLM waterfall exhausted. This used to be caught by the bare
             # `except Exception` below and silently fall through to "using all
             # papers" with only a WARNING log entry nobody watches. Confirmed in
             # production logs (2026-08-19) that this exact path fired for BOTH real
             # test projects (PQTrace, Udi Aharon PhD Book v2) during the run whose
             # output Amit reviewed — directly explaining the "irrelevant papers"
             # complaint: the relevance filter wasn't imperfect, it never ran at all
-            # that cycle. There's no better fallback available (relevance filtering
-            # genuinely requires an LLM call, so still returning all papers unfiltered
-            # is correct — the fix is making the failure visible, not inventing a
-            # substitute filter), so this now alerts like every other waterfall-
-            # exhaustion site in this codebase instead of failing silently.
-            self.logger.error("Relevance filter failed for %s: %s. Using all papers.", project_name, str(e))
+            # that cycle.
+            #
+            # An admin alert now fires here (as with every other waterfall-exhaustion
+            # site in this codebase), but alerting alone isn't enough: silently
+            # degrading to the full UNFILTERED paper list still let obviously
+            # off-topic papers reach the CSV/email that cycle even after the alert
+            # was added. Since relevance filtering genuinely requires an LLM call
+            # (there's no substitute filter to fall back to), the only safe behavior
+            # when it's unavailable is to skip this project's literature update for
+            # the cycle entirely — same as the "all search sources failed" case
+            # below — rather than proceed with data known to be unfiltered. Signal
+            # this back to the caller via a distinguishable exception so
+            # _process_project can skip the CSV write and email send.
+            self.logger.error(
+                "Relevance filter failed for %s: %s. Skipping this project's literature "
+                "update for this cycle (no unfiltered fallback).", project_name, str(e)
+            )
             self._alert_waterfall_exhausted("literature relevance filtering", project_name)
-            return papers
+            raise RelevanceFilterExhausted(str(e)) from e
         except Exception as e:
             # Non-waterfall failure (e.g. an unexpected response-parsing edge case).
             # No admin alert here — unlike waterfall exhaustion this isn't necessarily
@@ -195,6 +217,143 @@ class LiteratureResearchAgent(BaseAgent):
             # to unfiltered results rather than dropping papers outright.
             self.logger.warning("Relevance filter failed for %s: %s. Using all papers.", project_name, str(e))
             return papers
+
+    # ==========================================
+    # Part C: standing link-validity filter
+    # ==========================================
+    # Root-caused a real dead/garbled link (a Google Books row titled "with
+    # Post-quantum Cryptography" — a truncated scrape fragment of an unrelated
+    # ARES 2026 proceedings book, PQTrace 2026-08-27 run) reaching the CSV/email
+    # despite the relevance filter running successfully that cycle: relevance
+    # judged on title/snippet text alone, which says nothing about whether the
+    # link behind it actually resolves to real content. This is therefore a
+    # separate, permanent validation layer — not a substitute for the relevance
+    # filter above, and not conditional on it having failed.
+    _LINK_CHECK_TIMEOUT_SECONDS = 12
+    _LINK_CHECK_MIN_CONTENT_CHARS = 200
+    _LINK_CHECK_MAX_WORKERS = 3
+    _LINK_CHECK_USER_AGENT = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    # Loose "this is an error/parked/boilerplate page, not a real paper page"
+    # signal. Deliberately not exhaustive NLP — a defensible heuristic in the
+    # style already used elsewhere in this codebase (e.g. the keyword-preamble
+    # detection above): catch the obvious cases, don't try to be perfect.
+    _LINK_CHECK_BOILERPLATE_MARKERS = (
+        "page not found", "404 not found", "410 gone", "content not available",
+        "no longer available", "could not be found", "resource not found",
+        "domain is for sale", "buy this domain",
+    )
+    # Domains whose paper pages are known, trusted, client-rendered SPAs that
+    # legitimately return a 2xx with an empty/near-empty body to a plain scripted
+    # request (confirmed live: a real, valid semanticscholar.org/paper/<id> URL
+    # returns HTTP 202 with a 0-byte body to requests.get() — the page only
+    # renders content client-side via JS, it never server-renders HTML). Since
+    # Semantic Scholar is this agent's PRIMARY search source (see
+    # utils/literature_fetcher.py), applying the body-content check to it as
+    # written would exclude nearly every paper this pipeline finds through its
+    # default path — defeating the filter's purpose rather than protecting it.
+    # These domains are structurally trusted (they're the source API's own
+    # canonical paper URLs, not third-party scrape targets), so a bare 2xx status
+    # is treated as sufficient for them; the content-sniffing check still applies
+    # to every other domain.
+    _LINK_CHECK_SPA_TRUSTED_DOMAINS = ("semanticscholar.org",)
+
+    def _paper_link_is_valid(self, paper: dict) -> bool:
+        """Real HTTP check for a single paper's link. Fail-closed: any exception,
+        timeout, non-2xx final status, or a thin/boilerplate-looking body excludes
+        the paper rather than risk crashing the whole agent run over one bad or
+        slow link. Known limitation (see literature_research_agent tests/report):
+        some legitimate publisher domains front real papers with a bot-challenge
+        page (e.g. Cloudflare "Just a moment...") that also returns a non-2xx
+        status to a plain scripted request — this filter will exclude those too,
+        the same trade-off explicitly specified for this check (status+content
+        must both pass), not a bug in the implementation. See
+        _LINK_CHECK_SPA_TRUSTED_DOMAINS above for the one deliberate exception to
+        the content check, and why it exists."""
+        url = (paper.get("link") or paper.get("url") or "").strip()
+        title = paper.get("title", "?")
+        if not url:
+            self.logger.warning("Link-validity check: paper '%s' has no link; excluding.", title)
+            return False
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": self._LINK_CHECK_USER_AGENT},
+                timeout=self._LINK_CHECK_TIMEOUT_SECONDS,
+                allow_redirects=True,
+            )
+        except requests.exceptions.RequestException as e:
+            self.logger.warning("Link-validity check failed for '%s' (%s): %s", title, url, e)
+            return False
+
+        if not (200 <= response.status_code < 300):
+            self.logger.warning(
+                "Link-validity check: '%s' returned status %d; excluding.", title, response.status_code
+            )
+            return False
+
+        hostname = (urlparse(url).hostname or "").lower()
+        is_trusted_spa = any(
+            hostname == d or hostname.endswith("." + d) for d in self._LINK_CHECK_SPA_TRUSTED_DOMAINS
+        )
+        if is_trusted_spa:
+            return True
+
+        body = response.text or ""
+        if len(body) < self._LINK_CHECK_MIN_CONTENT_CHARS:
+            self.logger.warning(
+                "Link-validity check: '%s' body too short (%d chars); excluding.", title, len(body)
+            )
+            return False
+
+        lower_body = body.lower()
+        if any(marker in lower_body for marker in self._LINK_CHECK_BOILERPLATE_MARKERS):
+            self.logger.warning(
+                "Link-validity check: '%s' looks like an error/parked page; excluding.", title
+            )
+            return False
+
+        return True
+
+    def _filter_dead_links(self, project: str, papers: list) -> list:
+        """Drops papers whose link fails the real HTTP validity check above.
+        Runs the per-paper checks in a small thread pool (consistent with this
+        codebase's existing ThreadPoolExecutor usage for per-project parallelism)
+        so Config.MAX_LITERATURE_PAPERS worth of sequential 12s-timeout requests
+        can't make a single project's cycle unreasonably slow."""
+        if not papers:
+            return papers
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=self._LINK_CHECK_MAX_WORKERS) as executor:
+            future_to_idx = {
+                executor.submit(self._paper_link_is_valid, p): i for i, p in enumerate(papers)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    # Defense in depth: _paper_link_is_valid already catches
+                    # RequestException internally, but never let any other
+                    # unexpected error from a single paper's check take down
+                    # the whole project's literature run.
+                    self.logger.warning(
+                        "Unexpected error during link-validity check for '%s': %s. Excluding.",
+                        papers[idx].get("title", "?"), e
+                    )
+                    results[idx] = False
+
+        kept = [p for i, p in enumerate(papers) if results.get(i)]
+        dropped = len(papers) - len(kept)
+        if dropped:
+            self.logger.info(
+                "Link-validity filter dropped %d paper(s) with dead/invalid links for %s.",
+                dropped, project
+            )
+        return kept
 
     def process_results_with_llm(self, project: str, keywords: str, scholar_data: list) -> dict:
         """Feeds the scraped data to the LLM and validates the output strictly against Pydantic schemas."""
@@ -305,7 +464,27 @@ class LiteratureResearchAgent(BaseAgent):
                     seen_titles.add(title)
                     all_papers.append(paper)
 
-        all_papers = self._filter_relevant_papers(project, text, all_papers)
+        try:
+            all_papers = self._filter_relevant_papers(project, text, all_papers)
+        except RelevanceFilterExhausted:
+            # The relevance filter itself waterfall-exhausted (admin already alerted
+            # inside _filter_relevant_papers). Proceeding here would mean writing
+            # unfiltered/unvetted papers to the CSV and emailing them out — exactly
+            # the silent-degradation gap this exception exists to close. Skip this
+            # project's literature update entirely for this cycle, same pattern as
+            # the "all search sources failed" branch below.
+            self.logger.error(
+                "Skipping literature update for project '%s' this cycle: relevance "
+                "filter unavailable (LLM waterfall exhausted).", project
+            )
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="FAILURE",
+                    finished_at=datetime.now().isoformat()
+                )
+            return
         all_papers = all_papers[:Config.MAX_LITERATURE_PAPERS]
 
         if not all_papers:
@@ -335,6 +514,22 @@ class LiteratureResearchAgent(BaseAgent):
 
         if not all_papers:
             self.logger.warning("No data fetched for %s. Skipping LLM processing.", project)
+            if self.db:
+                self.db.log_agent_run(
+                    agent_name=self.agent_name,
+                    project_name=project,
+                    status="SUCCESS",
+                    finished_at=datetime.now().isoformat()
+                )
+            return
+
+        all_papers = self._filter_dead_links(project, all_papers)
+
+        if not all_papers:
+            self.logger.warning(
+                "All papers for %s were excluded by the link-validity check. Skipping LLM processing.",
+                project
+            )
             if self.db:
                 self.db.log_agent_run(
                     agent_name=self.agent_name,

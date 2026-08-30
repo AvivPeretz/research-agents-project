@@ -136,18 +136,50 @@ class ProgressTrackingAgent(BaseAgent):
             numbered.append(f"[{n}] {line}")
         return "\n".join(numbered)
 
+    @staticmethod
+    def _strip_leading_markers(text: str) -> str:
+        """Defense-in-depth: if the LLM regresses to prefixing a bullet with a bare
+        `[N]` reference marker (the exact pattern Amit flagged as meaningless to a
+        reader who never sees the numbered source list — see analyze_delta's
+        docstring), strip it rather than let it reach the student. This runs
+        regardless of prompt compliance, so a location marker with zero narrative
+        value can never leak into the email/saved feedback even if the model ignores
+        the "never show [N]" instruction below."""
+        cleaned_lines = []
+        for line in text.splitlines():
+            cleaned_lines.append(re.sub(r'^(\s*-?\s*)\[\d+\]\s*', r'\1', line))
+        return "\n".join(cleaned_lines)
+
     def analyze_delta(self, delta_text: str, project: str = None) -> tuple:
         """Single LLM call returning (feedback, suggestions) — halves token usage vs two separate calls.
 
         project is used only to key the waterfall-exhaustion admin alert on RuntimeError
         (see BaseAgent._alert_waterfall_exhausted) — it does not affect the prompt or the
-        degraded-output return value on failure."""
+        degraded-output return value on failure.
+
+        Recommendation format: each suggestion must read as ONE connected narrative
+        sentence — "In the sentence about X, <issue>; <fix>. (near: "<quote>")" — not
+        the earlier citation-then-comment format of a bare "[N]" marker followed by a
+        detached quote and explanation. That earlier format is what a real student
+        recipient (Amit, the department head reviewing PQTrace's actual output) called
+        "disconnected from context": a `[N]` marker means nothing to a reader who never
+        sees a numbered source list, and a short quote alone (e.g. a single stray word
+        like "yellow") can't anchor context by itself. The numbered `[N]` lines are
+        still shown to the LLM below — they remain useful so the model has a stable,
+        unambiguous way to identify exactly which line it means internally — but the
+        model is explicitly told never to surface a bare marker in its output; the
+        location must instead be described in its own words from surrounding context,
+        with the verbatim quote woven in as supporting, checkable evidence rather than
+        a citation prefix. _strip_leading_markers is a defensive backstop for the same
+        goal in case the model doesn't comply."""
         self.logger.info("Analyzing Delta (single LLM call for feedback + suggestions)...")
         numbered_delta = self._number_delta_lines(delta_text)
         prompt = f"""
         You are an expert academic reviewer and editor. Review the following NEW ADDITIONS or MODIFICATIONS to a research paper.
-        Each line below is prefixed with a bracketed marker like [12] — this is that
-        line's reference number for this review only, not a page or manuscript line number.
+        Each line below is prefixed with a bracketed marker like [12] purely so YOU can
+        keep track of exactly which line you mean — it is NOT a page or manuscript line
+        number, and the student reading your feedback will NEVER see this numbered
+        list. Never print a "[N]" token in your response.
         ---\n{numbered_delta}\n---
 
         Provide your response in EXACTLY this format (keep the headers):
@@ -157,14 +189,23 @@ class ProgressTrackingAgent(BaseAgent):
 
         ### SUGGESTIONS
         2-3 bullet points suggesting concrete, LOCATED improvements to phrasing and flow —
-        not general statements. For EACH bullet, you MUST:
-        1. Start with the exact marker of the line it refers to, e.g. "[12]".
-        2. Immediately follow it with a short verbatim quote (5-15 words) copied exactly
-           from that line, so the student can find it with a text search.
-        3. Then explain what should be changed and why. Do not rewrite the text.
-        Format each bullet EXACTLY as: - [N] "verbatim quoted phrase": explanation.
-        If a suggestion genuinely applies to the passage as a whole rather than one
-        line, cite the marker of its first line.
+        not general statements. Each bullet must read as ONE connected, self-contained
+        sentence (or two short sentences) that a non-specialist could follow without
+        cross-referencing anything else. For EACH bullet:
+        1. Open by describing WHERE the issue is, in your own words, drawn from the
+           surrounding context you were shown — e.g. "In the sentence introducing
+           quantum computing's threat to cryptography..." or "In the paragraph
+           describing the synchronization protocol...". Never open with a bare "[N]"
+           marker or line number — it is meaningless to the reader.
+        2. Within that same sentence, weave in a short verbatim quote (5-15 words)
+           copied exactly from that spot, as supporting evidence — e.g. "...(near:
+           \"the development of practical quantum computing...\")..." — so the student
+           can confirm the exact location with a text search. Do not put the quote
+           first, as a prefix; it must read as evidence inside the sentence.
+        3. In that same connected sentence or the one right after it, state the
+           specific issue and what to do about it. Do not rewrite the text yourself.
+        Do NOT split the location, the quote, and the explanation into separate,
+        disconnected parts. Format each bullet as: "- <connected narrative sentence(s)>".
         """
         _error = "⚠️ *System Note: The AI assistant was unable to generate feedback at this time due to a temporary connection issue.*"
         try:
@@ -176,6 +217,7 @@ class ProgressTrackingAgent(BaseAgent):
             else:
                 feedback = response.strip()
                 suggestions = ""
+            suggestions = self._strip_leading_markers(suggestions)
             print(f"\n📝 Focused Feedback on new changes:\n{feedback}\n")
             print(f"\n💡 Targeted Suggestions on new changes:\n{suggestions}\n")
             return feedback, suggestions

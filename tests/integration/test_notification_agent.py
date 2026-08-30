@@ -1,6 +1,7 @@
 """Integration tests for NotificationAgent."""
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -144,3 +145,80 @@ class TestNotificationAgent:
                 md_content="Summary",
                 csv_path="/nonexistent/path/test.csv",
             )
+
+
+class TestSendStanfordTasksTableRendering:
+    """Regression coverage for a production bug: Markdown pipe tables in the
+    Stanford tasks/action-plan content (from both ResearchEnhancementAgent's
+    Stanford-review path and its internal-review fallback, which both call
+    send_stanford_tasks) were rendered as raw unparsed '| ... |' text in the sent
+    email, because markdown.markdown() was called without the 'tables' extension —
+    the core Python-Markdown renderer does not parse pipe-table syntax by default.
+    The .md file saved to disk was unaffected (Markdown viewers parse it fine);
+    only the HTML email body was broken. Confirmed live on 2026-08-27 production
+    output for both PQTrace and Udi Aharon's book."""
+
+    MARKDOWN_WITH_TABLE = (
+        "## \U0001F534 Critical\n\n"
+        "| # | Issue | What to do | Estimated effort | Suggested deadline |\n"
+        "|---|---|---|---|---|\n"
+        "| 1 | Missing baseline | Run comparison | ~4h | Day 5 |\n"
+    )
+
+    @pytest.fixture
+    def notification_agent(self, db_in_memory):
+        return NotificationAgent(db=db_in_memory)
+
+    def _captured_html(self, notification_agent, md_content):
+        """Sends send_stanford_tasks with _dispatch_email mocked, and returns the
+        HTML alternative body that would have gone out as the email."""
+        with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
+            mock_dispatch.return_value = True
+            notification_agent.send_stanford_tasks(project_name="Test", md_content=md_content)
+            assert mock_dispatch.called
+            msg = mock_dispatch.call_args[0][0]
+            html_part = msg.get_body(preferencelist=("html",))
+            assert html_part is not None
+            return html_part.get_content()
+
+    def test_pipe_table_renders_as_html_table_not_raw_pipes(self, notification_agent):
+        """The core bug: a Markdown pipe table must become a real <table>, and the
+        raw '| ... | ... |' syntax must not survive verbatim into the email body."""
+        html = self._captured_html(notification_agent, self.MARKDOWN_WITH_TABLE)
+        assert "<table>" in html
+        assert "<th>" in html and "<td>" in html
+        # The raw pipe-row syntax (e.g. "| 1 | Missing baseline |") must not leak
+        # through unparsed into the rendered HTML body.
+        assert "| 1 | Missing baseline |" not in html
+        assert "|---|---|---|---|---|" not in html
+
+    def test_table_cell_content_is_preserved(self, notification_agent):
+        """Fixing the table's structure must not drop or corrupt its content."""
+        html = self._captured_html(notification_agent, self.MARKDOWN_WITH_TABLE)
+        assert "Missing baseline" in html
+        assert "Run comparison" in html
+        assert "~4h" in html
+        assert "Day 5" in html
+
+    def test_real_pqtrace_stanford_tasks_content_renders_table(self, notification_agent):
+        """End-to-end regression using the actual saved production output from the
+        2026-08-27 PQTrace Stanford review cycle, not a synthetic fixture."""
+        md_path = os.path.join(
+            "research_library", "project_enhancement", "PQTrace", "stanford_tasks.md"
+        )
+        if not os.path.exists(md_path):
+            pytest.skip("Real PQTrace stanford_tasks.md not present in this environment.")
+        with open(md_path, encoding="utf-8") as f:
+            real_md = f.read()
+        html = self._captured_html(notification_agent, real_md)
+        assert html.count("<table>") >= 1
+        assert "| # | Issue |" not in html
+
+    def test_non_table_content_still_renders_normally(self, notification_agent):
+        """The fix must not regress plain (non-table) Markdown content — headers,
+        bold text, and lists must still convert as before."""
+        html = self._captured_html(
+            notification_agent, "## Novelty & Innovation\n\nThis is **bold** text.\n"
+        )
+        assert "<h2>Novelty" in html
+        assert "<strong>bold</strong>" in html

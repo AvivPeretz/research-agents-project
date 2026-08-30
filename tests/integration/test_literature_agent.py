@@ -153,13 +153,18 @@ class TestLiteratureResearchAgent:
         waterfall exhaustion during relevance filtering fell back to 'use all papers'
         SILENTLY (confirmed in production logs for both real test projects on
         2026-08-19). This must now alert an admin, matching every other waterfall-
-        exhaustion site in this codebase, while still degrading to unfiltered papers
-        (there is no other reasonable fallback when the LLM itself is unavailable)."""
+        exhaustion site in this codebase, AND must no longer degrade to unfiltered
+        papers — it must raise RelevanceFilterExhausted so the caller
+        (_process_project) skips this project's update for the cycle entirely
+        instead of writing/emailing unvetted data (the alone-alerting fix still left
+        that gap open)."""
+        from agents.literature_research_agent import RelevanceFilterExhausted
+
         papers = [{"title": "Paper A", "snippet": "..."}, {"title": "Paper B", "snippet": "..."}]
         with patch.object(literature_agent, "ask_llm", side_effect=RuntimeError("All providers exhausted")):
-            result = literature_agent._filter_relevant_papers(sample_project_name, "project text", papers)
+            with pytest.raises(RelevanceFilterExhausted):
+                literature_agent._filter_relevant_papers(sample_project_name, "project text", papers)
 
-        assert result == papers  # still degrades to unfiltered, not empty
         mock_notifier.send_admin_alert.assert_called_once()
         _, kwargs = mock_notifier.send_admin_alert.call_args
         assert sample_project_name in kwargs["subject"]
@@ -183,10 +188,14 @@ class TestLiteratureResearchAgent:
         """Two waterfall-exhaustion failures for the SAME project in one run produce
         only one admin alert (shared BaseAgent dedup guard, same as every other
         waterfall-exhaustion call site)."""
+        from agents.literature_research_agent import RelevanceFilterExhausted
+
         papers = [{"title": "Paper A", "snippet": "..."}]
         with patch.object(literature_agent, "ask_llm", side_effect=RuntimeError("exhausted")):
-            literature_agent._filter_relevant_papers(sample_project_name, "text", papers)
-            literature_agent._filter_relevant_papers(sample_project_name, "text", papers)
+            with pytest.raises(RelevanceFilterExhausted):
+                literature_agent._filter_relevant_papers(sample_project_name, "text", papers)
+            with pytest.raises(RelevanceFilterExhausted):
+                literature_agent._filter_relevant_papers(sample_project_name, "text", papers)
 
         mock_notifier.send_admin_alert.assert_called_once()
 
@@ -223,7 +232,8 @@ class TestLiteratureResearchAgent:
 
     def test_run_calls_notifier_send(self, literature_agent, mock_notifier):
         """Asserts that full run() calls mock_notifier.send_literature_update once."""
-        with patch.object(literature_agent, "_read_project_text", return_value="Sample research text"):
+        with patch.object(literature_agent, "_read_project_text", return_value="Sample research text"), \
+             patch.object(LiteratureResearchAgent, "_filter_dead_links", side_effect=lambda project, papers: papers):
             literature_agent.run()
             mock_notifier.send_literature_update.assert_called()
 
@@ -302,7 +312,8 @@ This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
         with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=fake_ask_llm), \
              patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=long_abstract_papers), \
              patch("utils.literature_fetcher.LiteratureFetcher.enrich_with_openalex", side_effect=lambda papers: papers), \
-             patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Sample research text"):
+             patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Sample research text"), \
+             patch.object(LiteratureResearchAgent, "_filter_dead_links", side_effect=lambda project, papers: papers):
 
             agent = LiteratureResearchAgent(active_projects=[sample_project_name], notifier=mock_notifier)
             agent.run()
@@ -369,6 +380,229 @@ This conclusion mentions a unique marker: ZEBRA_MARKER_TOKEN.
 
         assert captured["count_before_cap"] > 3
         assert captured["count_after_cap"] == 3
+
+    def test_process_project_skips_csv_and_email_on_relevance_filter_exhaustion(
+        self, mock_notifier, sample_project_name
+    ):
+        """Part B fix: when the relevance filter itself waterfall-exhausts
+        (RelevanceFilterExhausted), _process_project must skip the whole update for
+        that cycle — no CSV append, no summary email — not just alert-and-degrade to
+        unfiltered papers. Mirrors the existing 'all search sources failed' pattern
+        (log_agent_run FAILURE, then return)."""
+        from agents.literature_research_agent import RelevanceFilterExhausted
+
+        papers = [{"title": "Paper A", "abstract": "...", "year": "2024",
+                   "citationCount": "1", "venue": "V", "link": "http://example.com"}]
+
+        mock_db = MagicMock()
+
+        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON), \
+             patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=papers), \
+             patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Sample research text"), \
+             patch.object(
+                 LiteratureResearchAgent, "_filter_relevant_papers",
+                 side_effect=RelevanceFilterExhausted("All providers exhausted")
+             ), \
+             patch.object(LiteratureResearchAgent, "process_results_with_llm") as mock_process_llm, \
+             patch("utils.library_manager.LibraryManager.batch_append_to_project_literature_table") as mock_batch_append, \
+             patch("utils.library_manager.LibraryManager.save_literature_summary") as mock_save_summary:
+
+            agent = LiteratureResearchAgent(active_projects=[sample_project_name], notifier=mock_notifier, db=mock_db)
+            agent._process_project(sample_project_name)
+
+        # No downstream processing, no CSV write, no summary file, no email.
+        mock_process_llm.assert_not_called()
+        mock_batch_append.assert_not_called()
+        mock_save_summary.assert_not_called()
+        mock_notifier.send_literature_update.assert_not_called()
+
+        # FAILURE logged the same way the "all search sources failed" branch does.
+        failure_calls = [
+            call for call in mock_db.log_agent_run.call_args_list
+            if call.kwargs.get("status") == "FAILURE"
+        ]
+        assert failure_calls, "Expected a FAILURE status logged via db.log_agent_run"
+
+
+class TestLinkValidityFilter:
+    """Part C: a standing link-validity check applied to all_papers before they
+    reach the CSV/email, independent of and in addition to the relevance filter."""
+
+    @pytest.fixture
+    def literature_agent(self, mock_notifier, sample_project_name):
+        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON):
+            with patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=MOCK_SEMANTIC_SCHOLAR_RESULTS):
+                agent = LiteratureResearchAgent(
+                    active_projects=[sample_project_name],
+                    notifier=mock_notifier,
+                )
+                yield agent
+
+    def _mock_response(self, status_code=200, text="", url="http://example.com/paper"):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.text = text
+        resp.url = url
+        return resp
+
+    def test_dead_link_connection_error_excluded(self, literature_agent, sample_project_name):
+        """A genuinely dead link (connection error) must be excluded, not crash."""
+        import requests as requests_module
+
+        paper = {"title": "Some Real Paper Title", "link": "https://this-domain-does-not-resolve.invalid/paper"}
+
+        with patch.object(
+            requests_module, "get", side_effect=requests_module.exceptions.ConnectionError("refused")
+        ):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == []
+
+    def test_dead_link_404_excluded(self, literature_agent, sample_project_name):
+        """A live server responding 404 must be excluded."""
+        paper = {"title": "Some Real Paper Title", "link": "https://example.com/gone"}
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=404)):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == []
+
+    def test_200_but_empty_content_excluded(self, literature_agent, sample_project_name):
+        """A 200 response with a near-empty/garbage body (e.g. a blank parked page)
+        must still be excluded — status alone is not enough."""
+        paper = {"title": "Some Real Paper Title", "link": "https://example.com/blank"}
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=200, text="ok")):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == []
+
+    def test_200_boilerplate_error_page_excluded(self, literature_agent, sample_project_name):
+        """A 200 response whose body is actually a 'page not found' style error page
+        (some CMSes return 200 for these) must be excluded via the content-signal check."""
+        paper = {"title": "Some Real Paper Title", "link": "https://example.com/soft404"}
+        body = "<html><body>" + ("Sorry, the requested page could not be found. " * 20) + "</body></html>"
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=200, text=body)):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == []
+
+    def test_good_link_kept(self, literature_agent, sample_project_name):
+        """A real, healthy link (200 status, substantial real-looking body) must be kept."""
+        paper = {"title": "Deep Learning for Network Traffic Classification", "link": "https://example.com/real-paper"}
+        body = (
+            "<html><head><title>Deep Learning for Network Traffic Classification</title></head>"
+            "<body><h1>Deep Learning for Network Traffic Classification</h1>"
+            + ("This paper presents a novel approach to network traffic classification. " * 20)
+            + "</body></html>"
+        )
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=200, text=body)):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == [paper]
+
+    def test_missing_link_excluded(self, literature_agent, sample_project_name):
+        """A paper with no link field at all can't be validated, so it's excluded
+        (fail-closed) rather than passed through unverified."""
+        paper = {"title": "No Link Paper"}
+        result = literature_agent._filter_dead_links(sample_project_name, [paper])
+        assert result == []
+
+    def test_mixed_batch_keeps_only_valid_ones_and_preserves_order(self, literature_agent, sample_project_name):
+        """Given a mix of dead and good links, only the good ones survive, in their
+        original relative order (not scrambled by the thread pool)."""
+        good_body = (
+            "<html><body>" + ("Real paper content about a real research topic. " * 20) + "</body></html>"
+        )
+        papers = [
+            {"title": "Paper 1 Good", "link": "https://example.com/1"},
+            {"title": "Paper 2 Dead", "link": "https://example.com/2"},
+            {"title": "Paper 3 Good", "link": "https://example.com/3"},
+        ]
+
+        def fake_get(url, headers=None, timeout=None, allow_redirects=None):
+            if url == "https://example.com/2":
+                return self._mock_response(status_code=404)
+            return self._mock_response(status_code=200, text=good_body)
+
+        with patch("agents.literature_research_agent.requests.get", side_effect=fake_get):
+            result = literature_agent._filter_dead_links(sample_project_name, papers)
+
+        assert [p["title"] for p in result] == ["Paper 1 Good", "Paper 3 Good"]
+
+    def test_process_project_excludes_dead_link_before_csv_write(self, mock_notifier, sample_project_name):
+        """End-to-end: a paper with a dead link must not survive into the papers
+        passed to process_results_with_llm (and therefore not into the CSV)."""
+        papers_from_search = [
+            {"title": "Dead Link Paper", "abstract": "abstract", "year": "2024",
+             "citationCount": "1", "venue": "V", "link": "https://example.com/dead"},
+        ]
+
+        captured = {}
+
+        def fake_process_llm(project, keywords, scholar_data):
+            captured["scholar_data"] = scholar_data
+            return {"summary": "s", "papers": []}
+
+        with patch("agents.base_agent.BaseAgent.ask_llm", return_value=VALID_LITERATURE_JSON), \
+             patch("utils.literature_fetcher.LiteratureFetcher.search", return_value=papers_from_search), \
+             patch("utils.literature_fetcher.LiteratureFetcher.enrich_with_openalex", side_effect=lambda papers: papers), \
+             patch.object(LiteratureResearchAgent, "_read_project_text", return_value="Sample research text"), \
+             patch.object(LiteratureResearchAgent, "process_results_with_llm", side_effect=fake_process_llm), \
+             patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=404)):
+
+            agent = LiteratureResearchAgent(active_projects=[sample_project_name], notifier=mock_notifier)
+            agent.run()
+
+        # process_results_with_llm never got called at all because the only
+        # paper was excluded by the link check before reaching that stage.
+        assert "scholar_data" not in captured
+        mock_notifier.send_literature_update.assert_not_called()
+
+    def test_semanticscholar_org_empty_body_2xx_is_kept_not_excluded(self, literature_agent, sample_project_name):
+        """Regression test for a real production bug found during review: Semantic
+        Scholar (this agent's PRIMARY search source, see utils/literature_fetcher.py)
+        serves its paper pages as a client-rendered SPA that returns a 2xx status
+        with an EMPTY body to a plain scripted request (confirmed live: a real,
+        valid semanticscholar.org/paper/<id> URL returns HTTP 202 with a 0-byte
+        body to requests.get()). Applying the generic body-length content check to
+        this domain would exclude nearly every paper the pipeline finds through its
+        default path, silently defeating the whole literature pipeline. This paper
+        must be KEPT despite the empty body, because semanticscholar.org is a
+        structurally-trusted domain (see _LINK_CHECK_SPA_TRUSTED_DOMAINS)."""
+        paper = {
+            "title": "Analysis and Evaluation of Post-Quantum Cryptography for DNSSEC",
+            "link": "https://www.semanticscholar.org/paper/1089a3f5c8a7844e6acb3ce822390a280d1d4033",
+        }
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=202, text="")):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == [paper]
+
+    def test_semanticscholar_org_dead_status_still_excluded(self, literature_agent, sample_project_name):
+        """The trusted-domain exception only skips the CONTENT check, not the
+        status check — a genuinely broken semanticscholar.org link (non-2xx) must
+        still be excluded like any other domain."""
+        paper = {"title": "Some Paper", "link": "https://www.semanticscholar.org/paper/doesnotexist"}
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=404, text="")):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == []
+
+    def test_non_semanticscholar_empty_body_2xx_still_excluded(self, literature_agent, sample_project_name):
+        """The trusted-domain exception is narrowly scoped to semanticscholar.org —
+        a random other domain returning a 2xx with an empty body is still excluded
+        by the content check, exactly as before this fix."""
+        paper = {"title": "Some Paper", "link": "https://example.com/spa-clone"}
+
+        with patch("agents.literature_research_agent.requests.get", return_value=self._mock_response(status_code=200, text="")):
+            result = literature_agent._filter_dead_links(sample_project_name, [paper])
+
+        assert result == []
 
 
 class TestPaperMetadataKeyAlignment:
