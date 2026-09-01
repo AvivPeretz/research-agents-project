@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from config import Config
 from utils.database_manager import DatabaseManager
 from utils.overleaf_connector import OverleafConnector
+from agents.base_agent import BaseAgent
 
 st.set_page_config(
     page_title="Research Agents",
@@ -761,21 +762,27 @@ elif page == "Config":
     }))
 
     st.subheader("LLM Waterfall Status")
-    _groq_key = getattr(Config, "GROQ_API_KEY", None)
-    _gemini_key = getattr(Config, "GEMINI_API_KEY", None)
-    _openai_key = getattr(Config, "OPENAI_API_KEY", None)
-    _groq_model = getattr(Config, "LLM_MODEL_NAME", "openai/gpt-oss-120b")
-    _gemini_model = getattr(Config, "GEMINI_MODEL_NAME", "gemini-1.5-flash")
-    _openai_model = getattr(Config, "OPENAI_MODEL_NAME", "openai/gpt-4o-mini")
+    # Order comes from BaseAgent.PROVIDER_ORDER — the single source of truth also
+    # used to build the real waterfall in BaseAgent._setup_llm() — instead of a
+    # second, independently-maintained literal here, so this table structurally
+    # cannot drift out of sync with the real waterfall the way it previously did
+    # (it used to omit Gemma 4 and NVIDIA NIM entirely and mislabel OpenAI's
+    # fallback position). Gemma 4 has no separate API key — it's gated purely on
+    # the Gemini key/client (see BaseAgent._setup_llm) — so its "Configured" status
+    # mirrors Gemini's here.
+    _PROVIDER_DISPLAY = {
+        "groq": ("Groq", getattr(Config, "GROQ_API_KEY", None), getattr(Config, "LLM_MODEL_NAME", "openai/gpt-oss-120b")),
+        "gemini": ("Gemini", getattr(Config, "GEMINI_API_KEY", None), getattr(Config, "GEMINI_MODEL_NAME", "gemini-2.5-flash")),
+        "gemma": ("Gemma 4", getattr(Config, "GEMINI_API_KEY", None), getattr(Config, "GEMMA_MODEL_NAME", "models/gemma-4-26b-a4b-it")),
+        "nvidia_nim": ("NVIDIA NIM", getattr(Config, "NVIDIA_NIM_API_KEY", None), getattr(Config, "NVIDIA_NIM_MODEL_NAME", "nvidia/nemotron-3-super-120b-a12b")),
+        "openai": ("OpenAI", getattr(Config, "OPENAI_API_KEY", None), getattr(Config, "OPENAI_MODEL_NAME", "gpt-4o-mini")),
+    }
+    _roles = ["Primary"] + [f"Fallback {i}" for i in range(1, len(BaseAgent.PROVIDER_ORDER))]
     st.table(pd.DataFrame({
-        "Provider": ["Groq", "Gemini", "OpenAI"],
-        "Role": ["Primary", "Fallback 1", "Fallback 2"],
-        "Model": [_groq_model, _gemini_model, _openai_model],
-        "Configured": [
-            "✅" if _groq_key else "❌",
-            "✅" if _gemini_key else "❌",
-            "✅" if _openai_key else "❌",
-        ],
+        "Provider": [_PROVIDER_DISPLAY[p][0] for p in BaseAgent.PROVIDER_ORDER],
+        "Role": _roles,
+        "Model": [_PROVIDER_DISPLAY[p][2] for p in BaseAgent.PROVIDER_ORDER],
+        "Configured": ["✅" if _PROVIDER_DISPLAY[p][1] else "❌" for p in BaseAgent.PROVIDER_ORDER],
     }))
 
 # ─── ANALYTICS ───────────────────────────────────────────────────────────────

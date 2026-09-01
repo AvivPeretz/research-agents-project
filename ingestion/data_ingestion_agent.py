@@ -8,6 +8,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from config import Config
+from utils.playwright_stealth import STEALTH_LAUNCH_ARGS, default_stealth_context_kwargs, human_delay
 
 class DataIngestionAgent:
     """
@@ -29,8 +30,11 @@ class DataIngestionAgent:
             os.makedirs(self.download_dir)
 
     def _human_delay(self, min_ms: int = 800, max_ms: int = 2200):
-        """Pauses for a randomized duration to mimic human interaction timing."""
-        time.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
+        """Pauses for a randomized duration to mimic human interaction timing.
+        Thin wrapper around the shared utils.playwright_stealth.human_delay so
+        every existing self._human_delay(...) call site in this file keeps
+        working unchanged."""
+        human_delay(min_ms, max_ms)
 
     def _human_type(self, page, selector: str, text: str):
         """
@@ -48,32 +52,19 @@ class DataIngestionAgent:
         Creates a hardened browser context with stealth patches applied.
         Uses Config.PLAYWRIGHT_HEADLESS unless explicitly overridden.
         If storage_state is provided, the context is created already authenticated
-        with that saved session instead of a fresh/anonymous one.
+        with that saved session instead of a fresh/anonymous one — this is the ONE
+        Overleaf-session-specific piece of this method and stays entirely local
+        here; only the generic launch args and context fingerprint below come
+        from the shared utils.playwright_stealth module.
         Returns (browser, context, page) as a tuple.
         """
         # Use Config value if not explicitly overridden by caller
         if headless is None:
             headless = Config.PLAYWRIGHT_HEADLESS
 
-        browser = playwright.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ]
-        )
-        context_kwargs = dict(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/135.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-            timezone_id="America/New_York",
-            accept_downloads=accept_downloads,
-        )
+        browser = playwright.chromium.launch(headless=headless, args=STEALTH_LAUNCH_ARGS)
+        context_kwargs = default_stealth_context_kwargs()
+        context_kwargs["accept_downloads"] = accept_downloads
         if storage_state:
             context_kwargs["storage_state"] = storage_state
         context = browser.new_context(**context_kwargs)
@@ -209,27 +200,15 @@ class DataIngestionAgent:
         _need_retry = False
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=Config.PLAYWRIGHT_HEADLESS,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ]
+            # Was its own third, independently-duplicated copy of the same launch
+            # args + context fingerprint _build_stealth_context already builds —
+            # calling that method directly here removes the duplication instead of
+            # just partially sharing it (this call site's storage_state/
+            # accept_downloads values match exactly what _build_stealth_context
+            # already supports).
+            browser, context, page = self._build_stealth_context(
+                p, storage_state=self.state_file, accept_downloads=True
             )
-            context = browser.new_context(
-                storage_state=self.state_file,
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/135.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1440, "height": 900},
-                locale="en-US",
-                timezone_id="America/New_York",
-                accept_downloads=True,
-            )
-            page = context.new_page()
 
             try:
                 print("🌐 Navigating to dashboard...")

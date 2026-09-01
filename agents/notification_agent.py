@@ -100,19 +100,28 @@ class NotificationAgent(BaseAgent):
     # ==========================================
 
     def send_literature_update(self, project_name: str, md_content: str, csv_path: str = None):
-        """Formats and sends the Daily Literature Search email."""
+        """Formats and sends the Daily Literature Search email.
+
+        Uses the 'tables' Markdown extension (see send_stanford_tasks's docstring
+        for the full root-cause explanation of why this matters — Python-Markdown's
+        core renderer does not parse pipe-table syntax without it) so any Markdown
+        table in md_content renders as a real HTML table instead of raw '| ... |'
+        text. Applied here for consistency with send_stanford_tasks even though
+        this agent's content doesn't typically include tables today — it's cheap,
+        has no effect on non-table content, and closes the same latent gap.
+        """
         recipient = self.get_researcher_email(project_name)
         msg = EmailMessage()
         msg['Subject'] = f"📚 Daily Literature Update: {project_name}"
         msg['From'] = f"Literature Search Agent 🤖 <{self.sender_email}>"
         msg['To'] = recipient
 
-        html_body = markdown.markdown(md_content)
-        
+        html_body = markdown.markdown(md_content, extensions=['tables'])
+
         email_html = f"""
         <!DOCTYPE html>
         <html>
-        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #27ae60; }}</style></head>
+        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #27ae60; }} table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }} th, td {{ border: 1px solid #ddd; padding: 8px 10px; text-align: left; vertical-align: top; }} th {{ background-color: #eafaf1; }}</style></head>
         <body>
             <div class="container">
                 <h2 style="color: #27ae60;">Hello Researcher,</h2>
@@ -141,19 +150,23 @@ class NotificationAgent(BaseAgent):
             self.logger.error("Failed to dispatch literature update email for project: %s", project_name)
 
     def send_progress_feedback(self, project_name: str, md_content: str):
-        """Formats and sends the Tri-daily Progress Tracking email."""
+        """Formats and sends the Tri-daily Progress Tracking email.
+
+        Uses the 'tables' Markdown extension — see send_stanford_tasks's docstring
+        for the full explanation of why this matters for any Markdown table content.
+        """
         recipient = self.get_researcher_email(project_name)
         msg = EmailMessage()
         msg['Subject'] = f"📝 Writing Progress Feedback: {project_name}"
         msg['From'] = f"Progress Tracking Agent 🤖 <{self.sender_email}>"
         msg['To'] = recipient
 
-        html_body = markdown.markdown(md_content)
-        
+        html_body = markdown.markdown(md_content, extensions=['tables'])
+
         email_html = f"""
         <!DOCTYPE html>
         <html>
-        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #2980b9; }}</style></head>
+        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #2980b9; }} table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }} th, td {{ border: 1px solid #ddd; padding: 8px 10px; text-align: left; vertical-align: top; }} th {{ background-color: #ebf5fb; }}</style></head>
         <body>
             <div class="container">
                 <h2 style="color: #2980b9;">Hello Researcher,</h2>
@@ -222,19 +235,26 @@ class NotificationAgent(BaseAgent):
         """
         Formats and sends the Weekly Lab Status email directly to a Supervisor.
         Unlike other emails, this groups multiple projects together.
+
+        Uses the 'tables' Markdown extension — SupervisorStatusAgent._format_to_markdown
+        builds a real "| Project | Active Days | ... |" Markdown table, which without
+        this extension renders as raw unparsed pipe-text in the email body (see
+        send_stanford_tasks's docstring for the full root-cause explanation). This
+        was the one remaining NotificationAgent method whose content genuinely,
+        routinely includes a Markdown table, not just a theoretical possibility.
         """
         msg = EmailMessage()
         msg['Subject'] = "📊 Weekly Lab Status Report"
         msg['From'] = f"Supervisor Status Agent 🤖 <{self.sender_email}>"
         msg['To'] = supervisor_email
 
-        html_body = markdown.markdown(md_content)
-        
+        html_body = markdown.markdown(md_content, extensions=['tables'])
+
         # Using a distinct dark orange theme for management reports
         email_html = f"""
         <!DOCTYPE html>
         <html>
-        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #d35400; }}</style></head>
+        <head><style>body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; background-color: #f4f7f6; padding: 20px; }} .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; border-top: 5px solid #d35400; }} table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }} th, td {{ border: 1px solid #ddd; padding: 8px 10px; text-align: left; vertical-align: top; }} th {{ background-color: #fdf2e9; }}</style></head>
         <body>
             <div class="container">
                 <h2 style="color: #d35400;">Hello Supervisor,</h2>

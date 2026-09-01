@@ -13,6 +13,7 @@ from agents.base_agent import BaseAgent
 from utils.library_manager import LibraryManager
 from utils.overleaf_connector import OverleafConnector
 from agents.notification_agent import NotificationAgent
+from utils.playwright_stealth import STEALTH_LAUNCH_ARGS, default_stealth_context_kwargs
 
 MINIMUM_REVIEW_LENGTH = 3000  # characters — papers shorter than this are skipped
 
@@ -141,15 +142,17 @@ class ResearchEnhancementAgent(BaseAgent):
             
         self.logger.info("Initiating Phase 1: Uploading '%s' to paperreview.ai...", project_name)
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=Config.PLAYWRIGHT_HEADLESS,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ]
-            )
-            context = browser.new_context()
+            # Shared, generic stealth launch args + browser fingerprint from
+            # utils.playwright_stealth (same module DataIngestionAgent uses) —
+            # replaces this method's own previously-duplicated copy of the launch
+            # args, and adds a consistent UA/viewport/locale/timezone this call
+            # previously omitted entirely (bare browser.new_context()). Stanford's
+            # paperreview.ai has no login/session/account concept at all (this is
+            # a one-shot, stateless form submission — confirmed by reading this
+            # entire method), so there is no storage_state or auth-specific state
+            # here to keep local; the whole context is safely shareable.
+            browser = p.chromium.launch(headless=Config.PLAYWRIGHT_HEADLESS, args=STEALTH_LAUNCH_ARGS)
+            context = browser.new_context(**default_stealth_context_kwargs())
             page = context.new_page()
             try:
                 print("🌐 Navigating to Stanford PaperReview...")
@@ -341,9 +344,22 @@ class ResearchEnhancementAgent(BaseAgent):
             print(f"   ✅ Tasks generated and saved to {save_path}")
             return tasks
         except RuntimeError as e:
+            # LLM failure policy (see agents/base_agent.py module docstring "LLM
+            # FAILURE POLICY"): signal failure with None, not a placeholder string.
+            # A previous version returned a truthy "unable to generate tasks"
+            # string here, which the caller's `if tasks is not None and
+            # tasks.strip():` guard treated as real success — marking the project
+            # REVIEW_COMPLETED and persisting the review as consumed via
+            # save_stanford_review, permanently losing the chance to ever generate
+            # real tasks for that Stanford review cycle, on top of emailing the
+            # placeholder to the student as if it were their actual action plan.
+            # Returning None forces the caller to treat this exactly like a
+            # fetch-not-ready cycle: no file written, no email sent, no state
+            # transition — retried next run against the same already-fetched
+            # review_text.
             self.logger.error("LLM Generation failed: %s", str(e))
             self._alert_waterfall_exhausted("Stanford task-list generation", project_name)
-            return "⚠️ *System Note: The AI assistant was unable to generate actionable tasks at this time due to a temporary connection issue. Please review the raw feedback manually.*"
+            return None
 
     def _load_related_papers_from_csv(self, project_name: str) -> str:
         """
@@ -383,12 +399,19 @@ class ResearchEnhancementAgent(BaseAgent):
             self.logger.warning("Failed to load related papers CSV for '%s': %s", project_name, str(e))
             return ""
 
-    def _truncate_paper_text(self, paper_text: str, max_chars: int = 8000) -> str:
+    def _truncate_paper_text(self, paper_text: str, max_chars: int = None) -> str:
         """
         Intelligently truncates long paper text to fit within LLM context.
         Preserves beginning (introduction/abstract), middle (methodology/results),
         and end (conclusion/discussion) of the paper.
+
+        max_chars defaults to Config.INTERNAL_REVIEW_MAX_PAPER_CHARS (centralized,
+        consistent with every other truncation constant in this codebase) rather
+        than a hardcoded method-signature default — still overridable per-call if
+        a caller genuinely needs a different cap.
         """
+        if max_chars is None:
+            max_chars = getattr(Config, 'INTERNAL_REVIEW_MAX_PAPER_CHARS', 8000)
         if len(paper_text) <= max_chars:
             return paper_text
 
@@ -771,6 +794,28 @@ short or say "No blocking issues identified."
                         project_name=project,
                         md_content=tasks
                     )
+                else:
+                    # LLM failure policy: _generate_actionable_tasks returns None on
+                    # waterfall exhaustion (admin already alerted inside it). Do not
+                    # transition to REVIEW_COMPLETED and do not save_stanford_review —
+                    # both would mark this review cycle as permanently consumed with
+                    # no real tasks ever generated for it. Leave state as
+                    # WAITING_FOR_REVIEW so the next run retries
+                    # _fetch_review_from_stanford + task generation against this same
+                    # token (idempotent — Stanford's poll endpoint doesn't consume
+                    # anything) instead of silently losing this review cycle.
+                    self.logger.warning(
+                        "Skipping state update/email for '%s' this cycle: task generation "
+                        "unavailable (LLM waterfall exhausted). Will retry next run.", project
+                    )
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="FAILURE",
+                            finished_at=datetime.now().isoformat()
+                        )
+                    return
             else:
                 # Stanford themselves warn processing "can take hours or even longer" — a not-ready
                 # review here is the normal case, not a failure. Keep waiting; the 48h timeout above

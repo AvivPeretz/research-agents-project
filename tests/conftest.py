@@ -10,6 +10,47 @@ import pytest
 
 from utils.database_manager import DatabaseManager
 
+# Captured once, at collection time, before any test can monkeypatch
+# Config.LIBRARY_DIR -- the real, on-disk production DB path this repo actually
+# uses outside of tests. Used by _guard_production_db_untouched below to detect
+# ANY test (regardless of which fixture or mechanism it uses to isolate itself)
+# that ends up writing to production data.
+from config import Config as _RealConfig
+_REAL_PRODUCTION_DB_PATH = os.path.join(_RealConfig.LIBRARY_DIR, "system.db")
+
+
+@pytest.fixture(autouse=True)
+def _guard_production_db_untouched():
+    """Structural safeguard, independent of any specific test's isolation
+    mechanism: fails loudly if a normal (non-`live`-marked) test run leaves the
+    real production research_library/system.db modified. This is a generic
+    tripwire for the whole class of "a test's DB isolation didn't actually
+    take effect" bugs -- e.g. it would have caught the real incident where
+    importlib.reload(config) in a since-fixed test rebound config.Config to a
+    new class object, silently orphaning utils/database_manager.py's own
+    already-imported (and therefore never-repatched) reference, causing
+    DatabaseManager to fall back to this exact real path. Snapshotting
+    mtime+size is intentionally cheap and simple; it does not attempt to
+    intercept or prevent the write, only to catch it immediately after the
+    fact with a clear failure pointing at the offending test."""
+    def _snapshot():
+        try:
+            st = os.stat(_REAL_PRODUCTION_DB_PATH)
+            return (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            return None
+
+    before = _snapshot()
+    yield
+    after = _snapshot()
+    assert after == before, (
+        f"Production database at {_REAL_PRODUCTION_DB_PATH} was modified during "
+        f"this test (before={before}, after={after}). A test's DB isolation "
+        f"(Config.LIBRARY_DIR monkeypatch, db_in_memory fixture, etc.) failed to "
+        f"take effect somewhere, and real production data may have been written. "
+        f"Investigate this test's DB fixture usage before anything else."
+    )
+
 
 @pytest.fixture(autouse=True)
 def _reset_llm_provider_cooldowns(tmp_path, monkeypatch):

@@ -42,10 +42,20 @@ class Config:
     # Cheaper/faster Groq model used only for lightweight extraction calls (keyword
     # generation, paper relevance filtering) — synthesis calls that produce the actual
     # content a researcher reads (reviews, feedback, reports) keep LLM_MODEL_NAME.
-    # Groq deleted llama-3.1-8b-instant (~2026-08-17); reusing LLM_MODEL_NAME here
-    # until a dedicated lightweight replacement is confirmed still live in Groq's
-    # catalog. Verify this model id is still current before relying on it.
-    LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", LLM_MODEL_NAME)
+    # Groq deleted llama-3.1-8b-instant (~2026-08-17); this sat unresolved for a
+    # while, reusing LLM_MODEL_NAME (i.e. having zero real effect as an
+    # "extraction" override) until a replacement was confirmed. Resolved
+    # 2026-09-01: queried this account's own live GET
+    # https://api.groq.com/openai/v1/models (authoritative — this account's real,
+    # current catalog, not third-party aggregator data, some of which incorrectly
+    # still lists llama-3.1-8b-instant as available) and confirmed
+    # openai/gpt-oss-20b is live. Real-verified with an actual
+    # client.chat.completions.create(model="openai/gpt-oss-20b", ...) call the same
+    # day — returned a correct response in ~0.6s. Same model family/lineage as the
+    # primary LLM_MODEL_NAME (openai/gpt-oss-120b), just the smaller/faster sibling
+    # — lower behavioral-surprise risk than switching extraction calls to an
+    # unrelated model family (e.g. Qwen or Llama).
+    LLM_EXTRACTION_MODEL_NAME = os.getenv("LLM_EXTRACTION_MODEL_NAME", "openai/gpt-oss-20b")
     
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     # gemini-1.5-flash is retired (confirmed 2026-08-21 by calling the live
@@ -218,6 +228,11 @@ class Config:
     MAX_ABSTRACT_CHARS: int = 1200
     # Min chars of paper text required to run the internal peer review
     MIN_REVIEW_LENGTH: int = 3000
+    # Max chars of manuscript text fed to the LLM for the internal peer review
+    # (ResearchEnhancementAgent._truncate_paper_text). Was a hardcoded method-
+    # signature default (max_chars=8000) inconsistent with every other truncation
+    # constant living centrally here — moved for consistency, value unchanged.
+    INTERNAL_REVIEW_MAX_PAPER_CHARS: int = 8000
     # Consecutive Stanford upload failures tolerated before giving up and falling back
     # to the internal LLM review — avoids burning an LLM call on a transient rate-limit
     # or brief outage that would have succeeded on the next scheduled run.

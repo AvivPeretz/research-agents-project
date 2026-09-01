@@ -53,6 +53,87 @@ def _make_openalex_search_response(works):
 # ---------------------------------------------------------------------------
 
 
+class TestSemanticScholarExpandedFields:
+    """P3 follow-up: the Semantic Scholar query now requests authors, fieldsOfStudy,
+    openAccessPdf, tldr, and externalIds in addition to the original 6 fields — a
+    genuine metadata upgrade on the same free API call, previously proposed and
+    independently verified against api.semanticscholar.org's real documented fields
+    but not yet implemented. Covers both the request (fields= param) and the
+    response parsing (new dict keys populated correctly, including graceful
+    handling when the API omits an optional field)."""
+
+    def test_request_includes_all_expanded_fields(self, fetcher):
+        """The fields= query param must request every new field, not just the
+        original 6 — regression test against silently reverting the expansion."""
+        with patch(
+            "utils.literature_fetcher.requests.get", return_value=_make_ss_response()
+        ) as mock_get:
+            fetcher._fetch_from_semantic_scholar("test query")
+
+        requested_url = mock_get.call_args.args[0] if mock_get.call_args.args else mock_get.call_args.kwargs["url"]
+        for field in ("authors", "fieldsOfStudy", "openAccessPdf", "tldr", "externalIds",
+                      "title", "abstract", "year", "citationCount", "venue", "url"):
+            assert field in requested_url, f"'{field}' missing from Semantic Scholar fields= request"
+
+    def test_response_parsing_populates_new_fields(self, fetcher):
+        """When the API returns the new fields, they must be correctly extracted
+        into the paper dict under the expected keys."""
+        papers = [{
+            "title": "Deep Learning for X",
+            "url": "https://semanticscholar.org/paper/abc",
+            "abstract": "An abstract.",
+            "year": 2024,
+            "citationCount": 12,
+            "venue": "NeurIPS",
+            "authors": [{"name": "Jane Doe"}, {"name": "John Smith"}],
+            "fieldsOfStudy": ["Computer Science", "Mathematics"],
+            "openAccessPdf": {"url": "https://arxiv.org/pdf/1234.5678"},
+            "tldr": {"text": "This paper proposes a new method for X."},
+            "externalIds": {"DOI": "10.1000/xyz", "ArXiv": "1234.5678"},
+        }]
+        with patch(
+            "utils.literature_fetcher.requests.get",
+            return_value=_make_ss_response(papers),
+        ):
+            result = fetcher._fetch_from_semantic_scholar("test query")
+
+        assert len(result) == 1
+        paper = result[0]
+        assert paper["authors"] == ["Jane Doe", "John Smith"]
+        assert paper["fields_of_study"] == ["Computer Science", "Mathematics"]
+        assert paper["open_access_pdf_url"] == "https://arxiv.org/pdf/1234.5678"
+        assert paper["tldr"] == "This paper proposes a new method for X."
+        assert paper["external_ids"] == {"DOI": "10.1000/xyz", "ArXiv": "1234.5678"}
+
+    def test_response_parsing_handles_missing_optional_fields_gracefully(self, fetcher):
+        """A real API response often omits tldr/openAccessPdf/fieldsOfStudy for many
+        papers (they're not always available at the source) — missing fields must
+        not crash parsing, and must degrade to empty/falsy values, not None-typed
+        crashes downstream."""
+        papers = [{
+            "title": "Old Paper With Sparse Metadata",
+            "url": "https://semanticscholar.org/paper/def",
+            "abstract": "An abstract.",
+            "year": 2023,
+            "citationCount": 0,
+            "venue": "Unknown",
+            # authors, fieldsOfStudy, openAccessPdf, tldr, externalIds all absent
+        }]
+        with patch(
+            "utils.literature_fetcher.requests.get",
+            return_value=_make_ss_response(papers),
+        ):
+            result = fetcher._fetch_from_semantic_scholar("test query")
+
+        assert len(result) == 1
+        paper = result[0]
+        assert paper["authors"] == []
+        assert paper["fields_of_study"] == []
+        assert paper["open_access_pdf_url"] == ""
+        assert paper["tldr"] == ""
+        assert paper["external_ids"] == {}
+
+
 class TestSemanticScholarApiKeyHeader:
     """Tests that the API key is sent (or not) as a header in Semantic Scholar requests."""
 

@@ -207,7 +207,6 @@ class ProgressTrackingAgent(BaseAgent):
         Do NOT split the location, the quote, and the explanation into separate,
         disconnected parts. Format each bullet as: "- <connected narrative sentence(s)>".
         """
-        _error = "⚠️ *System Note: The AI assistant was unable to generate feedback at this time due to a temporary connection issue.*"
         try:
             response = self.ask_llm(prompt)
             parts = response.split("### SUGGESTIONS", 1)
@@ -222,10 +221,19 @@ class ProgressTrackingAgent(BaseAgent):
             print(f"\n💡 Targeted Suggestions on new changes:\n{suggestions}\n")
             return feedback, suggestions
         except RuntimeError as e:
+            # System-wide policy (see agents/base_agent.py module docstring "LLM
+            # FAILURE POLICY"): on waterfall exhaustion, a call site producing
+            # end-user-facing content must signal failure with a sentinel the
+            # caller cannot mistake for real content — never a placeholder string,
+            # since a truthy "unable to generate feedback" string reads exactly
+            # like real feedback to a student and was previously being saved and
+            # emailed unconditionally regardless of this failure. Returning
+            # (None, None) forces _process_project to actually check for failure
+            # rather than silently shipping degraded output.
             self.logger.error("LLM failed to generate analysis: %s", str(e))
             if project:
                 self._alert_waterfall_exhausted("delta analysis", project)
-            return _error, _error
+            return None, None
 
     def _get_writing_velocity(self, project: str, days: int = 7) -> str:
         """
@@ -311,6 +319,25 @@ class ProgressTrackingAgent(BaseAgent):
                 delta_text = delta_text[:MAX_DELTA_CHARS] + "\n\n[... truncated ...]"
 
             feedback, suggestions = self.analyze_delta(delta_text, project)
+
+            if feedback is None:
+                # LLM failure policy: analyze_delta signals waterfall exhaustion via
+                # (None, None) (admin already alerted inside analyze_delta). Do not
+                # save or email a placeholder as if it were real feedback — skip
+                # this cycle entirely and let the next scheduled run try again
+                # against the delta it will compute at that point.
+                self.logger.warning(
+                    "Skipping feedback save/email for %s this cycle: analysis unavailable "
+                    "(LLM waterfall exhausted).", project
+                )
+                if self.db:
+                    self.db.log_agent_run(
+                        agent_name=self.agent_name,
+                        project_name=project,
+                        status="FAILURE",
+                        finished_at=datetime.now().isoformat()
+                    )
+                return
 
             self.library.save_tracking_feedback(project, feedback, suggestions)
             self.logger.info("Saved focused feedback and suggestions for %s.", project)

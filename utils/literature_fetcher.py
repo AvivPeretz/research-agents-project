@@ -88,8 +88,20 @@ class LiteratureFetcher:
         self.logger.info("Attempting Semantic Scholar API for keywords: '%s'", keywords)
         query = urllib.parse.quote_plus(keywords)
 
-        # Searching for papers from 2023 onwards, fetching configurable number of results
-        url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={limit}&year=2023-&fields=title,abstract,year,citationCount,venue,url"
+        # Searching for papers from 2023 onwards, fetching configurable number of
+        # results. Fields expanded beyond the original 6 (title/abstract/year/
+        # citationCount/venue/url) to pull richer metadata this API already offers
+        # for free on the same call — no extra request, no extra cost — confirmed
+        # as real, currently-documented Graph API fields against api.semanticscholar.org
+        # docs (and independently re-verified by a separate reviewer) before adding:
+        # authors, fieldsOfStudy, openAccessPdf (a direct PDF link), tldr (a
+        # pre-computed one-sentence AI summary), externalIds (DOI/arXiv/PubMed IDs).
+        url = (
+            f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}"
+            f"&limit={limit}&year=2023-"
+            f"&fields=title,abstract,year,citationCount,venue,url,"
+            f"authors,fieldsOfStudy,openAccessPdf,tldr,externalIds"
+        )
 
         headers = {}
         if Config.SEMANTIC_SCHOLAR_API_KEY:
@@ -105,10 +117,14 @@ class LiteratureFetcher:
             return []
         response.raise_for_status() # Will trigger a retry if a non-429 HTTP error occurs
         data = response.json()
-        
+
         results = []
         if data.get('data'):
             for item in data['data']:
+                authors = [a.get('name') for a in (item.get('authors') or []) if a.get('name')]
+                tldr = (item.get('tldr') or {}).get('text') or ""
+                open_access_pdf = (item.get('openAccessPdf') or {}).get('url') or ""
+                external_ids = item.get('externalIds') or {}
                 results.append({
                     "title": item.get('title', 'Unknown Title'),
                     "link": item.get('url', ''),
@@ -116,7 +132,17 @@ class LiteratureFetcher:
                     "snippet": item.get('abstract') or "No abstract available.",
                     "year": str(item.get('year', 'N/A')),
                     "citationCount": str(item.get('citationCount', 'N/A')),
-                    "venue": item.get('venue') or "N/A"
+                    "venue": item.get('venue') or "N/A",
+                    # New fields (this pass): flow straight into the LLM summarization
+                    # prompt via the existing json.dumps(scholar_data) call in
+                    # process_results_with_llm — no separate wiring needed for the
+                    # LLM to see and use them; downstream consumers that don't care
+                    # about these keys are unaffected.
+                    "authors": authors,
+                    "fields_of_study": item.get('fieldsOfStudy') or [],
+                    "open_access_pdf_url": open_access_pdf,
+                    "tldr": tldr,
+                    "external_ids": external_ids,
                 })
         return results
 

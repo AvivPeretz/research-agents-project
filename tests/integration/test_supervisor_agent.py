@@ -86,6 +86,37 @@ class TestSupervisorStatusAgent:
             with pytest.raises(Exception):  # RuntimeError or ValueError
                 supervisor_agent._generate_report_via_llm("test@supervisor.com", [])
 
+    def test_generate_report_via_llm_uses_standardized_waterfall_alert(
+        self, supervisor_agent, mock_notifier
+    ):
+        """Consistency fix: on genuine LLM waterfall exhaustion (ask_llm raising
+        RuntimeError), _generate_report_via_llm must go through the same
+        _alert_waterfall_exhausted path every other LLM-calling agent uses — not a
+        bespoke alert only reachable via run()'s generic except block. Verifies via
+        the alert's standardized subject format (f"{agent_name} — LLM waterfall
+        exhausted: {project_name}", see BaseAgent._alert_waterfall_exhausted)."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
+            with pytest.raises(RuntimeError):
+                supervisor_agent._generate_report_via_llm("prof@university.edu", [])
+
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert "LLM waterfall exhausted" in kwargs["subject"]
+        assert "prof@university.edu" in kwargs["subject"]
+
+    def test_generate_report_via_llm_waterfall_alert_dedups_per_supervisor(
+        self, supervisor_agent, mock_notifier
+    ):
+        """Two waterfall-exhaustion failures for the SAME supervisor in one run
+        produce only one admin alert — same dedup guarantee every other agent's
+        _alert_waterfall_exhausted call sites already have."""
+        with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("exhausted")):
+            for _ in range(2):
+                with pytest.raises(RuntimeError):
+                    supervisor_agent._generate_report_via_llm("prof@university.edu", [])
+
+        mock_notifier.send_admin_alert.assert_called_once()
+
     def test_run_sends_report_to_supervisor(self, supervisor_agent, mock_notifier):
         """Asserts that run() calls send_supervisor_report with supervisor email."""
         supervisor_agent.run()

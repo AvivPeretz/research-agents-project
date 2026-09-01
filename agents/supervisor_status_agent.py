@@ -139,23 +139,38 @@ class SupervisorStatusAgent(BaseAgent):
         Do NOT wrap the JSON in markdown blocks (e.g., no ```json). Just output the raw JSON string.
         """
 
+        # We use the BaseAgent's waterfall ask_llm method. Its RuntimeError (full
+        # waterfall exhausted) is handled separately from a Pydantic ValidationError
+        # below — they're different failure classes (no providers available vs. a
+        # provider answered with a badly-shaped response) and this codebase's other
+        # agents keep that same distinction (e.g. LiteratureResearchAgent's
+        # _filter_relevant_papers has separate except RuntimeError / except
+        # Exception branches for exactly this reason). Standardized onto
+        # _alert_waterfall_exhausted (the same dedup-guarded, project/supervisor-
+        # scoped alert every other LLM-calling agent uses) instead of this agent's
+        # previous bespoke path, where the waterfall-exhaustion case was
+        # indistinguishable from any other failure by the time it reached run()'s
+        # generic except block.
         try:
-            # We use the BaseAgent's waterfall ask_llm method
             response_text = self.ask_llm(prompt)
-            
+        except RuntimeError as e:
+            self.logger.error(
+                "LLM failed to generate supervisor report for %s: %s", supervisor_email, str(e)
+            )
+            self._alert_waterfall_exhausted("supervisor report generation", supervisor_email)
+            raise
+
+        try:
             # Clean potential markdown wrapping from LLM just in case
             response_text = response_text.replace("```json", "").replace("```", "").strip()
-            
+
             # Validate and parse the JSON string into our strict Pydantic model
             report_data = SupervisorReport.model_validate_json(response_text)
             return report_data
-            
+
         except ValidationError as e:
             self.logger.error("LLM output failed Pydantic validation: %s", str(e))
             raise RuntimeError("LLM returned invalid schema format.") from e
-        except Exception as e:
-            self.logger.error("Failed to generate LLM report: %s", str(e))
-            raise RuntimeError(f"Failed to generate report: {str(e)}") from e
 
     def _format_to_markdown(self, report: SupervisorReport, metrics_list: list = None) -> str:
         """

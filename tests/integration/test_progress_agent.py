@@ -84,6 +84,35 @@ class TestProgressTrackingAgent:
                 progress_agent.run()
                 mock_notifier.send_progress_feedback.assert_called()
 
+    def test_run_skips_save_and_email_on_waterfall_exhaustion(self, progress_agent, mock_notifier, db_in_memory, sample_project_name):
+        """LLM failure policy end-to-end: when the LLM waterfall is exhausted during
+        analysis, run() must NOT save tracking feedback and must NOT send the
+        progress-feedback email — regression test for the real bug where a
+        "System Note" placeholder was unconditionally saved/emailed as if it were
+        genuine feedback. The run must still complete without crashing and log a
+        FAILURE agent_run row for this cycle."""
+        old_text = "Original"
+        new_text = "Original\nNew content added here which is long enough to exceed the fifty character minimum threshold."
+
+        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_text):
+            with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
+                with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
+                    with patch.object(progress_agent.library, "save_tracking_feedback") as mock_save:
+                        progress_agent.run()
+
+        mock_save.assert_not_called()
+        mock_notifier.send_progress_feedback.assert_not_called()
+        mock_notifier.send_admin_alert.assert_called_once()
+
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM agent_runs WHERE project_name = ? ORDER BY id DESC LIMIT 1",
+                (sample_project_name,)
+            )
+            row = cursor.fetchone()
+        assert row["status"] == "FAILURE"
+
     def test_run_with_missing_tex_file_does_not_crash(self, db_in_memory, mock_notifier):
         """Asserts that run() completes without exception when main.tex is missing."""
         with patch("agents.progress_tracking_agent.OverleafConnector.read_and_clean_tex_file", return_value=""):
@@ -96,14 +125,17 @@ class TestProgressTrackingAgent:
             agent.run()
 
     def test_analyze_delta_alerts_admin_on_waterfall_exhaustion(self, progress_agent, mock_notifier, sample_project_name):
-        """When ask_llm raises RuntimeError (full waterfall exhausted), analyze_delta
-        must still return the degraded-output placeholder (unchanged behavior) AND
-        send exactly one admin alert for the project."""
+        """LLM failure policy (agents/base_agent.py): when ask_llm raises RuntimeError
+        (full waterfall exhausted), analyze_delta must return (None, None) — a
+        sentinel the caller cannot mistake for real content — NOT a truthy
+        placeholder string, since a previous version's placeholder string was
+        silently saved/emailed to students as if it were real feedback. It must
+        still send exactly one admin alert for the project."""
         with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
             feedback, suggestions = progress_agent.analyze_delta("some delta text", sample_project_name)
 
-        assert "unable to generate feedback" in feedback
-        assert "unable to generate feedback" in suggestions
+        assert feedback is None
+        assert suggestions is None
         mock_notifier.send_admin_alert.assert_called_once()
         _, kwargs = mock_notifier.send_admin_alert.call_args
         assert sample_project_name in kwargs["subject"]

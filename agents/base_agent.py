@@ -20,6 +20,59 @@ class BaseAgent(ABC):
     Provides common functionality like logging and LLM integration.
     Features a Multi-LLM Waterfall strategy
     (Groq -> Gemini -> Gemma 4 -> NVIDIA NIM -> OpenAI) with built-in retries.
+
+    LLM FAILURE POLICY (system-wide, applies to every direct self.ask_llm(...) call
+    site across every agent in this codebase, audited 2026-09-01):
+
+    When the full waterfall is exhausted (ask_llm raises RuntimeError) for a call
+    that is meant to PRODUCE END-USER-FACING CONTENT — something a researcher,
+    student, or supervisor will read as if it were genuine analysis/feedback/review
+    output — the call site MUST:
+      1. Call self._alert_waterfall_exhausted(context, project_name) so an admin is
+         notified (this alert is already project+run deduplicated, see below).
+      2. Signal failure to its caller with a value the caller cannot mistake for
+         real content — None (or an equivalent explicit sentinel/exception), NEVER
+         a truthy placeholder string like "unable to generate feedback at this
+         time". A placeholder string reads exactly like real content to both the
+         caller's own truthiness checks (e.g. `if result:`) and to the human who
+         eventually reads it — the two real bugs this policy was written to close
+         (ProgressTrackingAgent.analyze_delta, ResearchEnhancementAgent.
+         _generate_actionable_tasks) were both caused by exactly this: a "system
+         note" string that was truthy, so it silently passed every downstream
+         guard and got saved/emailed as if it were genuine output.
+      3. The caller MUST check for that sentinel and skip saving/emailing entirely
+         for that cycle when it's present — never fall through to the normal
+         save/email path with degraded content.
+      4. If skipping means a piece of work-in-progress would otherwise be marked
+         "done" (a DB state transition, a review marked consumed, etc.), that
+         transition MUST NOT happen on the failure path — leave the state as-is so
+         a later run can retry against the same input. (Concretely:
+         ResearchEnhancementAgent's Stanford task generation must NOT transition to
+         REVIEW_COMPLETED or call save_stanford_review on failure — Stanford's poll
+         endpoint is idempotent, so leaving state at WAITING_FOR_REVIEW is safe and
+         correct, not just "acceptable".)
+
+    This policy deliberately does NOT apply to LLM outputs that are purely internal
+    inputs to further processing and are never presented to an end-user as if they
+    were genuine analysis — e.g. LiteratureResearchAgent.extract_keywords_from_text
+    degrading to the literal project name as a fallback search query on failure.
+    That's an internal, silent degradation of a search term, not a fabricated
+    user-facing deliverable, so it's out of scope for this policy and is left as-is.
+
+    Full call-site audit as of 2026-09-01 (grep every `self.ask_llm(` across
+    agents/): LiteratureResearchAgent.extract_keywords_from_text (2 call sites,
+    exempt per above), LiteratureResearchAgent._filter_relevant_papers (raises
+    RelevanceFilterExhausted, already compliant), LiteratureResearchAgent.
+    process_results_with_llm (already compliant — _process_project already checks
+    `if not research_data.get("papers"): return` before the email call),
+    ProgressTrackingAgent.analyze_delta (fixed this pass), ResearchEnhancementAgent.
+    _generate_actionable_tasks (fixed this pass), ResearchEnhancementAgent.
+    _run_internal_review (already compliant — returns False, no save/email),
+    SupervisorStatusAgent._generate_report_via_llm (already compliant on the
+    content-safety axis — a raised exception prevents any report, real or fake,
+    from being built at all; it does use its own bespoke alert path instead of
+    _alert_waterfall_exhausted, which is a separate, lower-stakes consistency gap,
+    not a content-safety violation).
     """
 
     # Class-level (shared across every agent instance/subclass in this process) so that
@@ -35,6 +88,17 @@ class BaseAgent(ABC):
     # touch a real on-disk database.
     _shared_db_manager = None
     _db_manager_lock = threading.Lock()
+
+    # Canonical waterfall order (maximal — independent of which keys happen to be
+    # configured in a given environment). This is the single source of truth for
+    # "what is the LLM waterfall, in what order" — _setup_llm() below filters this
+    # list down to whichever providers are actually configured to build the
+    # per-instance _providers_waterfall, and dashboard.py's "LLM Waterfall Status"
+    # table imports this same constant instead of maintaining its own separate
+    # hardcoded list, so the two structurally cannot drift apart the way they did
+    # before (the dashboard previously omitted Gemma 4 and NVIDIA NIM entirely and
+    # mislabeled OpenAI's fallback position — see tests/unit/test_dashboard_provider_sync.py).
+    PROVIDER_ORDER = ("groq", "gemini", "gemma", "nvidia_nim", "openai")
 
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
@@ -217,18 +281,20 @@ class BaseAgent(ABC):
                 self.logger.warning("Failed to configure OpenAI Fallback: %s", str(e))
 
         # Cache the provider waterfall once so ask_llm() doesn't rebuild it every call.
-        # Order: Groq (primary) -> Gemini -> Gemma 4 -> NVIDIA NIM -> OpenAI (last
-        # resort, kept intact despite currently failing with insufficient_quota — an
-        # external billing issue, not a code defect).
-        self._providers_waterfall = ["groq"]
-        if self.gemini_available:
-            self._providers_waterfall.append("gemini")
-        if self.gemma_available:
-            self._providers_waterfall.append("gemma")
-        if self.nvidia_nim_available:
-            self._providers_waterfall.append("nvidia_nim")
-        if self.openai_available:
-            self._providers_waterfall.append("openai")
+        # Filters the canonical PROVIDER_ORDER (class attribute above) down to
+        # whichever providers are actually configured/available in THIS instance —
+        # order itself always comes from PROVIDER_ORDER, never duplicated here, so
+        # there's only one place that ever needs updating if the waterfall order
+        # changes (last resort/OpenAI kept intact despite currently failing with
+        # insufficient_quota — an external billing issue, not a code defect).
+        _availability = {
+            "groq": True,  # mandatory — constructor already raised if this isn't available
+            "gemini": self.gemini_available,
+            "gemma": self.gemma_available,
+            "nvidia_nim": self.nvidia_nim_available,
+            "openai": self.openai_available,
+        }
+        self._providers_waterfall = [p for p in self.PROVIDER_ORDER if _availability.get(p)]
 
     def _ask_provider(self, provider_name: str, prompt: str, model_override: str = None) -> str:
         """

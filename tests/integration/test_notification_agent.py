@@ -222,3 +222,92 @@ class TestSendStanfordTasksTableRendering:
         )
         assert "<h2>Novelty" in html
         assert "<strong>bold</strong>" in html
+
+
+class TestRemainingMethodsTableRendering:
+    """P3 follow-up to the send_stanford_tasks table-rendering fix above: the other
+    three NotificationAgent methods (send_literature_update, send_progress_feedback,
+    send_supervisor_report) had the identical latent gap — markdown.markdown()
+    called without extensions=['tables'] — flagged but deliberately left unfixed in
+    the prior session pending explicit approval. This class covers all three now
+    that they've been fixed the same way. send_supervisor_report is the highest-
+    stakes of the three: SupervisorStatusAgent._format_to_markdown genuinely emits a
+    real Markdown table every time it runs, not just a theoretical possibility."""
+
+    MARKDOWN_WITH_TABLE = (
+        "## Summary\n\n"
+        "| Project | Active Days | Silent Streak |\n"
+        "|---|---|---|\n"
+        "| PQTrace | 5 | 2 |\n"
+    )
+
+    @pytest.fixture
+    def notification_agent(self, db_in_memory):
+        return NotificationAgent(db=db_in_memory)
+
+    def _captured_html(self, notification_agent, send_method_name, md_content, **extra_kwargs):
+        with patch.object(notification_agent, "_dispatch_email") as mock_dispatch:
+            mock_dispatch.return_value = True
+            send_method = getattr(notification_agent, send_method_name)
+            send_method(md_content=md_content, **extra_kwargs)
+            assert mock_dispatch.called
+            msg = mock_dispatch.call_args[0][0]
+            html_part = msg.get_body(preferencelist=("html",))
+            assert html_part is not None
+            return html_part.get_content()
+
+    @pytest.mark.parametrize(
+        "send_method_name,extra_kwargs",
+        [
+            ("send_literature_update", {"project_name": "Test"}),
+            ("send_progress_feedback", {"project_name": "Test"}),
+            ("send_supervisor_report", {"supervisor_email": "prof@university.edu"}),
+        ],
+    )
+    def test_pipe_table_renders_as_html_table(self, notification_agent, send_method_name, extra_kwargs):
+        html = self._captured_html(notification_agent, send_method_name, self.MARKDOWN_WITH_TABLE, **extra_kwargs)
+        assert "<table>" in html, f"{send_method_name} did not render a <table> for real Markdown table content"
+        assert "<th>" in html and "<td>" in html
+        assert "| PQTrace | 5 | 2 |" not in html, f"{send_method_name} leaked raw pipe-table syntax into the email body"
+
+    @pytest.mark.parametrize(
+        "send_method_name,extra_kwargs",
+        [
+            ("send_literature_update", {"project_name": "Test"}),
+            ("send_progress_feedback", {"project_name": "Test"}),
+            ("send_supervisor_report", {"supervisor_email": "prof@university.edu"}),
+        ],
+    )
+    def test_non_table_content_still_renders_normally(self, notification_agent, send_method_name, extra_kwargs):
+        html = self._captured_html(
+            notification_agent, send_method_name, "## Heading\n\nThis is **bold** text.\n", **extra_kwargs
+        )
+        assert "<h2>Heading" in html
+        assert "<strong>bold</strong>" in html
+
+    def test_real_supervisor_markdown_output_renders_table(self, notification_agent):
+        """End-to-end regression using SupervisorStatusAgent's actual
+        _format_to_markdown output, not a synthetic fixture."""
+        from domain.schemas import SupervisorReport
+        from agents.supervisor_status_agent import SupervisorStatusAgent
+
+        report = SupervisorReport(
+            executive_summary="The lab is doing well overall.",
+            evaluations=[],
+        )
+        metrics_list = [{
+            "project_name": "PQTrace", "total_active_days": 5,
+            "current_silent_streak": 2, "average_chars_per_active_day": 120,
+            "chars_this_week": 600, "chars_last_week": 400,
+        }]
+        # _format_to_markdown is a plain method with no LLM/DB dependency, so a
+        # bare instance without dependency injection is fine here.
+        agent = SupervisorStatusAgent.__new__(SupervisorStatusAgent)
+        real_md = agent._format_to_markdown(report, metrics_list)
+        assert "| Project |" in real_md  # sanity: confirms this really is a pipe table
+
+        html = self._captured_html(
+            notification_agent, "send_supervisor_report", real_md, supervisor_email="prof@university.edu"
+        )
+        assert "<table>" in html
+        assert "| Project |" not in html

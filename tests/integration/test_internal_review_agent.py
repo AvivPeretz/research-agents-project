@@ -210,6 +210,27 @@ class TestInternalReviewAgent:
         assert len(result) <= 8200  # 8000 content + ~200 chars of separator strings
         assert "[... middle section truncated" in result
 
+    def test_truncate_paper_text_default_comes_from_config_not_hardcoded_signature(self, enhancement_agent):
+        """P2 consistency fix: max_chars must now default to
+        Config.INTERNAL_REVIEW_MAX_PAPER_CHARS (centralized, like every other
+        truncation constant), not a hardcoded value baked into the method
+        signature — regression test that changing the config value actually
+        changes the real truncation behavior with no other code changes."""
+        from unittest.mock import patch
+        from config import Config
+
+        text = "c" * 20000
+        with patch.object(Config, "INTERNAL_REVIEW_MAX_PAPER_CHARS", 500):
+            result = enhancement_agent._truncate_paper_text(text)
+        assert len(result) <= 700  # 500 content + separator overhead, not the old 8000 default
+
+    def test_truncate_paper_text_explicit_max_chars_still_overrides(self, enhancement_agent):
+        """Per-call override must still work — the config value is only the
+        default, not a hardcoded ceiling."""
+        text = "d" * 20000
+        result = enhancement_agent._truncate_paper_text(text, max_chars=1000)
+        assert len(result) <= 1200
+
     # ------------------------------------------------------------------
     # 7. test_load_related_papers_missing_csv_returns_empty
     # ------------------------------------------------------------------

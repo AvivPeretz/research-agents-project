@@ -78,15 +78,19 @@ class TestResearchEnhancementAgent:
     def test_generate_actionable_tasks_alerts_admin_on_waterfall_exhaustion(
         self, enhancement_agent, mock_notifier, sample_project_name
     ):
-        """When ask_llm raises RuntimeError (full waterfall exhausted), the method must
-        still return the degraded system-note placeholder (unchanged behavior) AND send
-        exactly one admin alert for the project."""
+        """LLM failure policy (agents/base_agent.py): when ask_llm raises RuntimeError
+        (full waterfall exhausted), the method must return None — a sentinel the
+        caller cannot mistake for real content — NOT a truthy placeholder string.
+        A previous version's placeholder string was silently treated as success by
+        the caller's `if tasks is not None and tasks.strip():` guard, marking the
+        project REVIEW_COMPLETED and emailing the placeholder to the student as if
+        it were their real action plan. Must still send exactly one admin alert."""
         with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
             result = enhancement_agent._generate_actionable_tasks(
                 project_name=sample_project_name, review_text="Test review"
             )
 
-        assert "unable to generate actionable tasks" in result
+        assert result is None
         mock_notifier.send_admin_alert.assert_called_once()
         _, kwargs = mock_notifier.send_admin_alert.call_args
         assert sample_project_name in kwargs["subject"]
@@ -247,6 +251,45 @@ class TestStanfordReviewCycleComparison:
         assert "FIRST review cycle text" in captured["prompt"]
         # The new review must now be the latest in history (appended, not overwritten).
         assert db_in_memory.get_latest_stanford_review(sample_project_name) == "SECOND review cycle text"
+
+    def test_process_project_skips_completion_and_email_on_task_generation_failure(
+        self, enhancement_agent, db_in_memory, sample_project_name, mock_notifier
+    ):
+        """LLM failure policy end-to-end: when task generation waterfall-exhausts
+        during Phase 2, the project must NOT transition to REVIEW_COMPLETED, the
+        fetched review must NOT be saved to stanford_review_history (both would
+        permanently mark this review cycle as consumed with no real tasks ever
+        generated for it), and no email must be sent — regression test for the real
+        bug where a placeholder string was treated as success. State must remain
+        WAITING_FOR_REVIEW so the next run retries against the same token."""
+        from datetime import datetime
+
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        db_in_memory.update_project_state(
+            sample_project_name,
+            stanford_status="WAITING_FOR_REVIEW",
+            stanford_token="tok_123",
+            last_upload_time=datetime.now().isoformat(),
+        )
+
+        with patch.object(enhancement_agent, "_fetch_review_from_stanford", return_value="A real fetched review"), \
+             patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
+            enhancement_agent._process_project(sample_project_name)
+
+        state = db_in_memory.get_project_state_slim(sample_project_name)
+        assert state["stanford_status"] == "WAITING_FOR_REVIEW"
+        assert db_in_memory.get_latest_stanford_review(sample_project_name) is None
+        mock_notifier.send_stanford_tasks.assert_not_called()
+        mock_notifier.send_admin_alert.assert_called_once()
+
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM agent_runs WHERE project_name = ? ORDER BY id DESC LIMIT 1",
+                (sample_project_name,)
+            )
+            row = cursor.fetchone()
+        assert row["status"] == "FAILURE"
 
     def test_database_manager_review_history_is_append_only(self, db_in_memory, sample_project_name):
         """save_stanford_review appends; get_latest_stanford_review always returns the

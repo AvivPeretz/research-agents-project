@@ -1,7 +1,7 @@
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 class GarbageCollector:
     """
@@ -33,7 +33,7 @@ class GarbageCollector:
             return
         from config import Config
         ttl_days = Config.PROGRESS_SNAPSHOT_TTL_DAYS
-        threshold = datetime.utcnow() - timedelta(days=ttl_days)
+        threshold = datetime.now(timezone.utc) - timedelta(days=ttl_days)
         threshold_str = threshold.strftime('%Y-%m-%d %H:%M:%S')
         try:
             with self.db._get_connection() as conn:
