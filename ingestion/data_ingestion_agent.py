@@ -251,6 +251,10 @@ class DataIngestionAgent:
 
                 # Pre-fetch all known last-modified values in one DB query to avoid N+1
                 known_last_modified = self.db.get_all_last_modified() if self.db else {}
+                # Pre-fetch projects whose PDF compile is currently known to be failing
+                # on Overleaf's side, so we retry the PDF download for them below even
+                # though the dashboard's "last modified" text hasn't changed.
+                pending_pdf_projects = self.db.get_projects_with_pdf_pending() if self.db else set()
 
                 for row in rows:
                     link = row.locator('a[href^="/project/"]').first
@@ -274,10 +278,11 @@ class DataIngestionAgent:
 
                     is_new = db_last_modified is None
                     is_modified = not is_new and db_last_modified != last_modified_text
+                    is_pdf_retry = not is_new and not is_modified and project_name in pending_pdf_projects
 
-                    if is_new or is_modified:
+                    if is_new or is_modified or is_pdf_retry:
                       try:
-                        reason = "NEW" if is_new else "MODIFIED"
+                        reason = "NEW" if is_new else ("MODIFIED" if is_modified else "PDF_RETRY")
                         safe_project_name = project_name.replace(" ", "_")
                         href = link.get_attribute("href").rstrip('/')
 
@@ -326,7 +331,9 @@ class DataIngestionAgent:
                         os.remove(zip_path)
 
                         # --- 2. DOWNLOAD COMPILED PDF ---
+                        pdf_ok = False
                         print("   📄 Opening editor to download PDF via the 'File' menu...")
+                        self.logger.info("Opening editor to download PDF for project '%s'.", project_name)
                         try:
                             editor_url = f"https://www.overleaf.com{href}"
                             page.goto(editor_url)
@@ -342,10 +349,59 @@ class DataIngestionAgent:
                             download_menu.hover()
                             self._human_delay(600, 1000)
 
-                            print("   📥 Clicking 'Download as PDF'...")
                             pdf_btn = page.locator('text="Download as PDF"').first
                             page.wait_for_selector('text="Download as PDF"', timeout=5000)
 
+                            # Overleaf renders this menu item as disabled (a
+                            # "dropdown-item disabled" class, which also sets
+                            # pointer-events:none per Bootstrap/react-bootstrap
+                            # convention) until its server-side compile has
+                            # actually produced a PDF. A large multi-file
+                            # manuscript can still be mid-compile well after a
+                            # small single-file one would already be done, so a
+                            # bare click() here would sit inside Playwright's
+                            # actionability wait (visible+stable+receives-events
+                            # +enabled) and only surface as a generic 30s
+                            # click timeout once the compile is in fact still
+                            # running. Poll for the item's own disabled state to
+                            # clear -- a genuine "PDF is ready" signal -- before
+                            # clicking, with a generous ceiling for slow compiles
+                            # so we react the moment it's ready instead of
+                            # waiting a fixed period regardless.
+                            PDF_READY_POLL_TIMEOUT_MS = 180000  # 3 min ceiling for large-manuscript compiles
+                            print("   ⏳ Waiting for compile to finish ('Download as PDF' to become enabled)...")
+                            self.logger.info(
+                                "Waiting for Overleaf compile to finish for project '%s' (up to %ds).",
+                                project_name, PDF_READY_POLL_TIMEOUT_MS // 1000
+                            )
+                            try:
+                                page.wait_for_function(
+                                    """() => {
+                                        const el = [...document.querySelectorAll('[role="menuitem"]')]
+                                            .find(e => e.textContent.trim() === 'Download as PDF');
+                                        return !!el
+                                            && !el.classList.contains('disabled')
+                                            && el.getAttribute('aria-disabled') !== 'true';
+                                    }""",
+                                    timeout=PDF_READY_POLL_TIMEOUT_MS,
+                                )
+                            except PlaywrightTimeoutError:
+                                print(
+                                    f"   ⏱️ 'Download as PDF' was still disabled after "
+                                    f"{PDF_READY_POLL_TIMEOUT_MS // 1000}s -- Overleaf's "
+                                    f"compile for '{project_name}' did not finish (or is "
+                                    f"failing) in time. Giving up on this run; will retry "
+                                    f"on the next scheduled sync."
+                                )
+                                self.logger.warning(
+                                    "'Download as PDF' was still disabled after %ds -- Overleaf's "
+                                    "compile for '%s' did not finish (or is failing) in time. "
+                                    "Giving up on this run; will retry on the next scheduled sync.",
+                                    PDF_READY_POLL_TIMEOUT_MS // 1000, project_name
+                                )
+                                raise
+
+                            print("   📥 Clicking 'Download as PDF'...")
                             with page.expect_download(timeout=30000) as pdf_download_info:
                                 pdf_btn.click()
 
@@ -356,9 +412,12 @@ class DataIngestionAgent:
                                 self.logger.warning("PDF file missing or empty for '%s'.", project_name)
                             else:
                                 print("   ✅ PDF downloaded successfully.")
+                                self.logger.info("PDF downloaded successfully for project '%s'.", project_name)
+                                pdf_ok = True
 
                         except Exception as e:
                             print(f"   ⚠️ Exception during PDF download: {e}")
+                            self.logger.error("Exception during PDF download for project '%s': %s", project_name, str(e))
                         finally:
                             page.goto("https://www.overleaf.com/project")
                             self._human_delay(2000, 3500)
@@ -368,13 +427,118 @@ class DataIngestionAgent:
                                 timeout=Config.PLAYWRIGHT_TIMEOUT_MS
                             )
 
+                        # Still record the delta as seen so the ZIP/source portion (which
+                        # DID succeed) isn't endlessly re-downloaded on every future run —
+                        # the PDF-specific retry below is driven by pending_pdf_projects,
+                        # not by this text ever changing again.
                         self.db.update_sync_registry(project_name, last_modified_text)
                         self.db.add_project(project_name, Config.RESEARCHER_EMAIL)
-                        # Reset review state so the enhancement agent re-reviews the updated manuscript
-                        self.db.update_project_state(project_name, stanford_status="READY_FOR_UPLOAD")
 
-                        updated_projects.append(project_name)
-                        print(f"✅ Synced '{project_name}'.")
+                        if pdf_ok:
+                            # Full success: reset review state so the enhancement agent
+                            # re-reviews the updated manuscript, and clear any stale
+                            # pending-PDF marker from a previously failing compile. Also
+                            # clear pdf_alert_last_sent_at: if this project fails again
+                            # later, that is a genuinely new failure occurrence and
+                            # should alert immediately rather than inheriting a stale
+                            # cooldown from before it was ever fixed.
+                            self.db.update_project_state(
+                                project_name,
+                                stanford_status="READY_FOR_UPLOAD",
+                                pdf_sync_status=None,
+                                pdf_alert_last_sent_at=None,
+                            )
+                            updated_projects.append(project_name)
+                            print(f"✅ Synced '{project_name}'.")
+                        else:
+                            # Partial sync: source text updated, but no compiled PDF is
+                            # available. This is very likely Overleaf itself failing to
+                            # compile the project (e.g. "Download as PDF" disabled on
+                            # their dashboard) rather than a bug here — flag it distinctly
+                            # instead of reporting a clean sync, and alert an admin since
+                            # this needs a human (probably the student) to fix the LaTeX
+                            # compile error upstream on Overleaf.
+                            self.db.update_project_state(
+                                project_name,
+                                stanford_status="READY_FOR_UPLOAD",
+                                pdf_sync_status="FAILED_PDF_COMPILE"
+                            )
+                            updated_projects.append(project_name)
+                            print(
+                                f"⚠️ Partially synced '{project_name}': source text updated, "
+                                f"but no compiled PDF is available. Will retry the PDF "
+                                f"download next run."
+                            )
+                            if self.notifier:
+                                # Throttle: unlike the enhancement side (which self-limits
+                                # via STANFORD_MAX_UPLOAD_RETRIES and then goes quiet
+                                # behind an internal-review fallback), this failure mode
+                                # has no such give-up state — it can only be fixed by a
+                                # human pushing a LaTeX fix upstream on Overleaf, which
+                                # may take days. Left unthrottled, every single scheduled
+                                # run for a project stuck in FAILED_PDF_COMPILE would
+                                # re-send this alert with no ceiling. main.py is a fresh
+                                # process per scheduled invocation (see acquire_run_lock
+                                # in main.py — no long-running daemon loop), so an
+                                # in-memory dedup set (the pattern used by
+                                # BaseAgent._alert_waterfall_exhausted and
+                                # ResearchEnhancementAgent._stanford_cooldown_until) would
+                                # not survive across separate scheduled runs and would not
+                                # actually throttle anything beyond a single run — hence a
+                                # DB-persisted timestamp (pdf_alert_last_sent_at) instead.
+                                # Threshold is "at most once per rolling 24h", not merely
+                                # "once ever, then only on reason change": this failure
+                                # never self-resolves without a human, so a periodic
+                                # reminder (rather than going fully silent forever) is the
+                                # correct behavior, capped at one reminder per calendar day
+                                # regardless of how many times main.py happens to run in
+                                # that window.
+                                #
+                                # NOTE: a genuine DB-read failure here (self.db.get_pdf_
+                                # alert_last_sent_at raising) or a notifier failure
+                                # (send_admin_alert / update_project_state raising) is
+                                # intentionally NOT caught in this block. Those are
+                                # unrelated infrastructure failures, not the "unparseable
+                                # timestamp" case this throttle is designed to tolerate —
+                                # silently swallowing them would suppress a real,
+                                # unresolved-problem alert with zero visibility, which is
+                                # the opposite of "err toward alerting on any uncertainty".
+                                # They propagate to the per-project `except Exception as e:`
+                                # handler below, which already logs FAILURE via
+                                # log_agent_run for this project and continues the loop —
+                                # it does not crash the whole sync cycle.
+                                PDF_ALERT_COOLDOWN_HOURS = 24
+                                should_alert = True
+                                last_sent = self.db.get_pdf_alert_last_sent_at(project_name)
+                                if last_sent:
+                                    try:
+                                        elapsed_hours = (
+                                            datetime.now() - datetime.fromisoformat(last_sent)
+                                        ).total_seconds() / 3600.0
+                                        should_alert = elapsed_hours >= PDF_ALERT_COOLDOWN_HOURS
+                                    except (ValueError, TypeError):
+                                        should_alert = True  # unparseable timestamp — err toward alerting
+
+                                if should_alert:
+                                    self.notifier.send_admin_alert(
+                                        subject=f"Overleaf PDF Compile Failing: {project_name}",
+                                        message=(
+                                            f"Project '{project_name}' synced its source text "
+                                            f"successfully, but no compiled PDF could be downloaded. "
+                                            f"This looks like the project is failing to compile on "
+                                            f"Overleaf's side (e.g. 'Download as PDF' disabled on its "
+                                            f"dashboard), not a bug in this pipeline. The manuscript "
+                                            f"likely needs a LaTeX fix upstream before a real review "
+                                            f"can be produced. This pipeline will automatically retry "
+                                            f"the PDF download on the next scheduled sync. (This alert "
+                                            f"is throttled to at most once every "
+                                            f"{PDF_ALERT_COOLDOWN_HOURS}h while the failure persists.)"
+                                        )
+                                    )
+                                    self.db.update_project_state(
+                                        project_name,
+                                        pdf_alert_last_sent_at=datetime.now().isoformat(),
+                                    )
 
                       except Exception as e:
                         self.logger.error("Failed to sync project '%s': %s", project_name, str(e))

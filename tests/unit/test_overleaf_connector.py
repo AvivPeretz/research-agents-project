@@ -236,6 +236,147 @@ class TestReadAllTexFilesRaw:
         assert r"\usepackage" not in result
 
 
+class TestReadManuscriptTexFilesRaw:
+    """Tests for read_manuscript_tex_files_raw(): the fix for a real data-corruption
+    bug where read_all_tex_files_raw()'s blind os.walk concatenated a stale,
+    unreferenced .tex file (old_version.tex, a leftover draft never referenced by
+    \\input/\\include from main.tex) as if it were live manuscript content, and
+    corrupted a real delta calculation for the PQTrace project. This method must
+    only include files actually reachable from main.tex via \\input/\\include."""
+
+    def test_excludes_unreferenced_stray_tex_file(self, tmp_path):
+        """Reproduces the exact PQTrace bug: a self-contained main.tex (no
+        \\input/\\include at all) sitting alongside an unreferenced stray .tex file
+        (old_version.tex). Only main.tex's content must be returned."""
+        (tmp_path / "main.tex").write_text(
+            r"\section{Introduction} This is the current, live manuscript text."
+        )
+        (tmp_path / "old_version.tex").write_text(
+            r"\section{Introduction} This is stale content from an old draft."
+        )
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+
+        assert "current, live manuscript text" in result
+        assert "stale content from an old draft" not in result
+
+    def test_includes_referenced_input_file(self, tmp_path):
+        """A file legitimately pulled in via \\input{...} (Udi Aharon's PhD book's
+        real chapter-file structure) must be included, unlike an unreferenced
+        stray file."""
+        (tmp_path / "main.tex").write_text(
+            "\\documentclass{book}\n"
+            "\\begin{document}\n"
+            "\\input{chapter1}\n"
+            "\\end{document}\n"
+        )
+        (tmp_path / "chapter1.tex").write_text("This is real chapter one content.")
+        (tmp_path / "unused_draft.tex").write_text("This is an unreferenced stray draft.")
+
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+
+        assert "real chapter one content" in result
+        assert "unreferenced stray draft" not in result
+
+    def test_resolves_include_without_tex_extension_in_subdirectory(self, tmp_path):
+        """\\input/\\include targets may omit the .tex extension and point into a
+        subdirectory (e.g. Udi Aharon's real \\input{ft-ann/ft-ann})."""
+        (tmp_path / "main.tex").write_text(r"\input{chapters/intro}")
+        subdir = tmp_path / "chapters"
+        subdir.mkdir()
+        (subdir / "intro.tex").write_text("Introduction chapter body.")
+
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+
+        assert "Introduction chapter body" in result
+
+    def test_ignores_commented_out_include(self, tmp_path):
+        """A \\include commented out with a leading % (as in Udi Aharon's real
+        main.tex, e.g. `%\\include{eg-tgn/eg-tgn}`) must NOT be followed."""
+        (tmp_path / "main.tex").write_text(
+            "Live content here.\n"
+            "%\\input{commented_out}\n"
+        )
+        (tmp_path / "commented_out.tex").write_text("Should never be included.")
+
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+
+        assert "Live content here" in result
+        assert "Should never be included" not in result
+
+    def test_falls_back_to_legacy_behavior_when_main_tex_missing(self, tmp_path):
+        """If main.tex doesn't exist, there's no known entry point to resolve a
+        reachable-file tree from, so this must fall back to the legacy
+        read-every-.tex-file behavior instead of silently losing all content."""
+        (tmp_path / "onlychapter.tex").write_text("Some manuscript content.")
+
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+
+        assert "Some manuscript content" in result
+
+    def test_self_contained_main_tex_returns_only_main_tex(self, tmp_path):
+        """A main.tex with no \\input/\\include structure at all (fully
+        self-contained, like PQTrace's real main.tex) must return exactly its own
+        content — nothing more, nothing less."""
+        (tmp_path / "main.tex").write_text("Fully self-contained manuscript.")
+        (tmp_path / "stray.tex").write_text("Irrelevant stray file.")
+
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+
+        assert result.strip() == "Fully self-contained manuscript."
+
+    def test_missing_project_dir_returns_empty(self, tmp_path):
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path / "does_not_exist"))
+        assert result == ""
+
+    def test_alerts_admin_when_falling_back_to_legacy_behavior(self, tmp_path, mock_notifier):
+        """Real gap this closes: previously, falling back to the legacy
+        read-every-.tex-file behavior (because the expected root document isn't
+        present) only logged a warning, with no signal visible to an operator that
+        a future project could silently reintroduce the exact stray-file
+        contamination bug read_manuscript_tex_files_raw() exists to fix. When a
+        notifier is supplied and the fallback is taken, an admin alert must be
+        sent naming the project and the missing root document, and stating the
+        contamination risk plainly."""
+        (tmp_path / "chapter1.tex").write_text("Some manuscript content.")
+        project_name = tmp_path.name
+
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path), notifier=mock_notifier)
+
+        # Fallback path was genuinely taken (legacy behavior: reads every .tex file).
+        assert "Some manuscript content" in result
+
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert project_name in kwargs["subject"]
+        assert project_name in kwargs["message"]
+        assert "main.tex" in kwargs["message"]
+        assert "stray" in kwargs["message"] or "unreferenced" in kwargs["message"]
+
+    def test_no_alert_when_notifier_not_supplied(self, tmp_path):
+        """Backward compatibility: omitting notifier (the default) must not raise
+        even when the fallback path is taken."""
+        (tmp_path / "chapter1.tex").write_text("Some manuscript content.")
+        connector = OverleafConnector()
+        result = connector.read_manuscript_tex_files_raw(str(tmp_path))
+        assert "Some manuscript content" in result
+
+    def test_no_alert_when_root_document_found(self, tmp_path, mock_notifier):
+        """The fallback path is not taken when main.tex exists, so no alert should
+        be sent even though a notifier was supplied."""
+        (tmp_path / "main.tex").write_text("Fully self-contained manuscript.")
+        connector = OverleafConnector()
+        connector.read_manuscript_tex_files_raw(str(tmp_path), notifier=mock_notifier)
+        mock_notifier.send_admin_alert.assert_not_called()
+
+
 class TestExtractRepresentativeSample:
     """Tests for structure-aware manuscript sampling."""
 

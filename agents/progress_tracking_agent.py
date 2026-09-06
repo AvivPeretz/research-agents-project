@@ -88,7 +88,20 @@ class ProgressTrackingAgent(BaseAgent):
         # inserted in between. The strip logic itself now lives on OverleafConnector
         # (shared with LiteratureResearchAgent and ResearchEnhancementAgent, which
         # need the identical protection) rather than duplicated here.
-        raw_text = self.connector.read_all_tex_files_raw(project_path)
+        #
+        # Also deliberately not self.connector.read_all_tex_files_raw() — that method
+        # blindly concatenates EVERY .tex file physically present anywhere under the
+        # project directory, including stray/unreferenced files (e.g. a stale
+        # old_version.tex left in a project after a rewrite) that aren't actually
+        # part of the compiled manuscript. That real bug corrupted a real delta
+        # calculation for the PQTrace project. read_manuscript_tex_files_raw()
+        # instead resolves \input{...}/\include{...} starting from main.tex and only
+        # reads files actually reachable from the root document (see its docstring
+        # for the fallback behavior when main.tex is missing or self-contained).
+        # notifier=self.notifier so an admin is alerted if this ever falls back to
+        # the legacy read_all_tex_files_raw() behavior for a project whose root
+        # document isn't main.tex — see read_manuscript_tex_files_raw's docstring.
+        raw_text = self.connector.read_manuscript_tex_files_raw(project_path, notifier=self.notifier)
         raw_text = self.connector.strip_editorial_annotations(raw_text)
         current_text = self.connector.clean_latex_text(raw_text) if raw_text else ""
 

@@ -38,10 +38,10 @@ class TestProgressTrackingAgent:
 
     def test_check_text_changes_first_run_returns_has_changes_true(self, progress_agent, sample_project_name):
         """Asserts that on first run with no prior state, has_changes is True."""
-        # check_text_changes reads via read_all_tex_files_raw (not read_all_tex_files)
+        # check_text_changes reads via read_manuscript_tex_files_raw (not read_all_tex_files)
         # so OverleafConnector.strip_editorial_annotations() can run on raw text
         # before LaTeX cleaning — see that method's docstring.
-        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value="New content"):
+        with patch.object(progress_agent.connector, "read_manuscript_tex_files_raw", return_value="New content"):
             result = progress_agent.check_text_changes(sample_project_name)
             assert result["has_changes"] is True
 
@@ -57,7 +57,7 @@ class TestProgressTrackingAgent:
         """Asserts that delta contains new content when text changes."""
         old_text = "Original content"
         new_text = "Original content\nNew addition here"
-        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_manuscript_tex_files_raw", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 result = progress_agent.check_text_changes(sample_project_name)
                 assert result["has_changes"] is True
@@ -79,7 +79,7 @@ class TestProgressTrackingAgent:
         old_text = "Original"
         new_text = "Original\nNew content added here which is long enough to exceed the fifty character minimum threshold."
 
-        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_manuscript_tex_files_raw", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 progress_agent.run()
                 mock_notifier.send_progress_feedback.assert_called()
@@ -94,7 +94,7 @@ class TestProgressTrackingAgent:
         old_text = "Original"
         new_text = "Original\nNew content added here which is long enough to exceed the fifty character minimum threshold."
 
-        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_text):
+        with patch.object(progress_agent.connector, "read_manuscript_tex_files_raw", return_value=new_text):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 with patch("agents.base_agent.BaseAgent.ask_llm", side_effect=RuntimeError("All providers exhausted")):
                     with patch.object(progress_agent.library, "save_tracking_feedback") as mock_save:
@@ -180,7 +180,7 @@ class TestEditorialAnnotationStripping:
             "Introduction paragraph.\n"
             r"New real sentence about the methodology. \hl{A: reviewer note, ignore this}"
         )
-        with patch.object(progress_agent.connector, "read_all_tex_files_raw", return_value=new_raw):
+        with patch.object(progress_agent.connector, "read_manuscript_tex_files_raw", return_value=new_raw):
             with patch.object(progress_agent.db, "get_project_state", return_value={"last_seen_text": old_text}):
                 result = progress_agent.check_text_changes(sample_project_name)
 

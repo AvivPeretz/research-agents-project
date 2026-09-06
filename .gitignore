@@ -45,4 +45,7 @@ run_tests.py
 .claude
 
 # graphify generated graph/cache output
-graphify-out/ 
+graphify-out/
+
+# Private forensic system audit (local use only, not for GitHub)
+.system-audit/ 

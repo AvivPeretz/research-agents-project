@@ -113,6 +113,42 @@ class DatabaseManager:
                 self._ensure_column_exists(cursor, "project_state", "created_at", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "stanford_token", "TEXT")
                 self._ensure_column_exists(cursor, "project_state", "stanford_upload_failures", "INTEGER DEFAULT 0")
+                # Tracks whether the most recent Overleaf sync attempt for this project
+                # failed to obtain a compiled PDF (e.g. Overleaf's own "Download as PDF"
+                # is disabled because the project doesn't compile). NULL/absent means the
+                # last attempt either succeeded or has not been retried yet. Set to
+                # 'FAILED_PDF_COMPILE' by DataIngestionAgent so the next ingestion cycle
+                # retries the PDF download specifically for this project even if
+                # Overleaf's dashboard "last modified" text hasn't changed (delta
+                # detection alone would otherwise never revisit it).
+                self._ensure_column_exists(cursor, "project_state", "pdf_sync_status", "TEXT")
+                # Persisted (DB-backed, not in-memory) throttle for the ingestion-side
+                # "PDF Compile Failing" admin alert. Unlike BaseAgent's
+                # _waterfall_exhausted_alerted set or ResearchEnhancementAgent's
+                # _stanford_cooldown_until, both of which are per-process instance
+                # state that dies when main.py exits (a fresh process per scheduled
+                # run — see main.py, no long-running daemon loop), this needs to
+                # survive across separate scheduled invocations. NULL/absent means no
+                # alert has been sent yet (or it was cleared after a successful PDF
+                # sync). Set to the ISO timestamp of the most recent alert actually
+                # sent for this project; cleared back to NULL when the PDF sync
+                # subsequently succeeds so a later, genuinely new failure alerts
+                # immediately instead of inheriting a stale cooldown.
+                self._ensure_column_exists(cursor, "project_state", "pdf_alert_last_sent_at", "TEXT")
+                # Persisted (DB-backed, not in-memory) throttle for the ENHANCEMENT-side
+                # "No PDF Available For Review" admin alert (ResearchEnhancementAgent).
+                # Deliberately a separate column from pdf_alert_last_sent_at above, even
+                # though both alerts are triggered by the same underlying root cause (a
+                # PDF that never got compiled/downloaded on the Overleaf side): this one
+                # is set/cleared by ResearchEnhancementAgent while pdf_alert_last_sent_at
+                # is set/cleared by DataIngestionAgent, on different schedules and
+                # different code paths. Sharing one column would let either agent's
+                # throttle state incorrectly suppress or reset the other's. NULL/absent
+                # means no alert has been sent yet (or it was cleared after the project's
+                # upload-failure count was reset back to 0 — a successful upload, or the
+                # internal-review fallback taking over). Set to the ISO timestamp of the
+                # most recent alert actually sent for this project.
+                self._ensure_column_exists(cursor, "project_state", "no_pdf_review_alert_last_sent_at", "TEXT")
 
                 conn.commit()
             self.logger.info("Database tables verified/created successfully.")
@@ -232,6 +268,66 @@ class DatabaseManager:
             self.logger.error("Failed to get all last modified: %s", str(e))
             return {}
 
+    def get_projects_with_pdf_pending(self) -> set:
+        """Returns the set of project names whose last ingestion sync got the ZIP
+        source but failed to obtain a compiled PDF (pdf_sync_status =
+        'FAILED_PDF_COMPILE'). DataIngestionAgent uses this — alongside the normal
+        NEW/MODIFIED delta check — to retry the PDF download specifically on the
+        next cycle even when Overleaf's dashboard "last modified" text is unchanged
+        (a stuck PDF compile failure never changes that text on its own)."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT project_name FROM project_state WHERE pdf_sync_status = 'FAILED_PDF_COMPILE'"
+                )
+                return {row['project_name'] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get projects with pending PDF: %s", str(e))
+            return set()
+
+    def get_pdf_alert_last_sent_at(self, project_name: str) -> str:
+        """Returns the ISO timestamp of the most recent 'PDF Compile Failing' admin
+        alert actually sent for this project, or None if one has never been sent (or
+        was cleared after a subsequent successful PDF sync). Used by
+        DataIngestionAgent to throttle that alert across separate scheduled runs —
+        see the pdf_alert_last_sent_at column comment in _create_tables for why this
+        must be persisted rather than kept as in-memory instance state."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT pdf_alert_last_sent_at FROM project_state WHERE project_name = ?",
+                    (project_name,)
+                )
+                row = cursor.fetchone()
+                return row['pdf_alert_last_sent_at'] if row else None
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get pdf_alert_last_sent_at for '%s': %s", project_name, str(e))
+            return None
+
+    def get_no_pdf_review_alert_last_sent_at(self, project_name: str) -> str:
+        """Returns the ISO timestamp of the most recent 'No PDF Available For Review'
+        admin alert actually sent for this project, or None if one has never been sent
+        (or was cleared after the project's upload-failure count was subsequently reset
+        to 0). Used by ResearchEnhancementAgent to throttle that alert across separate
+        scheduled runs — see the no_pdf_review_alert_last_sent_at column comment in
+        _create_tables for why this must be persisted rather than kept as in-memory
+        instance state, and for why it is a distinct column from the ingestion-side
+        pdf_alert_last_sent_at."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT no_pdf_review_alert_last_sent_at FROM project_state WHERE project_name = ?",
+                    (project_name,)
+                )
+                row = cursor.fetchone()
+                return row['no_pdf_review_alert_last_sent_at'] if row else None
+        except sqlite3.Error as e:
+            self.logger.error("Failed to get no_pdf_review_alert_last_sent_at for '%s': %s", project_name, str(e))
+            return None
+
     def update_sync_registry(self, project_name: str, last_modified_text: str):
         # Using SQLite 'UPSERT' (ON CONFLICT) to insert or update seamlessly
         query = """
@@ -327,7 +423,8 @@ class DatabaseManager:
         VALID_COLUMNS = {
             "stanford_status", "last_upload_time", "last_seen_text", "stanford_token",
             "researcher_email", "student_status", "update_frequency",
-            "supervisor_email", "student_name", "created_at", "stanford_upload_failures"
+            "supervisor_email", "student_name", "created_at", "stanford_upload_failures",
+            "pdf_sync_status", "pdf_alert_last_sent_at", "no_pdf_review_alert_last_sent_at"
         }
 
         invalid_keys = set(kwargs.keys()) - VALID_COLUMNS

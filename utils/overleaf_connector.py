@@ -198,6 +198,142 @@ class OverleafConnector:
         text_content = self.read_all_tex_files_raw(project_path)
         return self.clean_latex_text(text_content) if text_content else ""
 
+    # Matches \input{target} and \include{target}, where target may or may not
+    # include the .tex extension and may include a relative subdirectory path
+    # (e.g. \input{ft-ann/ft-ann}). Deliberately does NOT match \includegraphics
+    # (a common false-positive risk for a naive \\include.* pattern) because the
+    # alternation is anchored to the literal end of "input"/"include" via the
+    # opening brace immediately following it.
+    _INPUT_INCLUDE_RE = re.compile(r'\\(?:input|include)\{([^}]+)\}')
+
+    def _resolve_input_include_target(self, project_path: str, target: str) -> str:
+        """Resolves an \\input/\\include target (as written in the LaTeX source) to
+        an absolute file path under project_path, or None if no such file exists.
+        Real LaTeX resolves \\input/\\include paths relative to the root document's
+        directory (i.e. project_path here), not relative to the including file's own
+        directory — so every target is resolved against project_path regardless of
+        how deeply nested the file doing the including is."""
+        target = target.strip()
+        candidates = [target] if target.endswith('.tex') else [f"{target}.tex", target]
+        for candidate in candidates:
+            candidate_path = os.path.normpath(os.path.join(project_path, candidate))
+            if os.path.isfile(candidate_path):
+                return candidate_path
+        return None
+
+    def read_manuscript_tex_files_raw(self, project_path: str, main_file: str = "main.tex", notifier=None) -> str:
+        """Reads only the .tex files actually reachable from main_file (default
+        "main.tex", matching this codebase's existing entry-point convention — see
+        read_and_clean_tex_file()'s default and LiteratureResearchAgent's use of
+        extract_representative_sample()), by recursively resolving \\input{...} and
+        \\include{...} directives, and concatenates their raw content in traversal
+        order (root file first, then each referenced file in the order it is
+        referenced, depth-first).
+
+        This is the fix for a real data-corruption bug: read_all_tex_files_raw()
+        blindly concatenates EVERY .tex file physically present anywhere under
+        project_path, with no regard for whether it's actually part of the compiled
+        manuscript. A stale, unreferenced file left in the project directory (e.g.
+        an old draft renamed to old_version.tex) was silently treated as new
+        manuscript content and corrupted a real delta calculation. This method
+        instead treats "the manuscript" as exactly the set of files reachable from
+        the root document, so an unreferenced stray .tex file is correctly excluded.
+
+        \\input/\\include directives inside LaTeX comments (e.g. a chapter
+        commented out with a leading %, as in Udi Aharon's real main.tex where
+        `%\\include{eg-tgn/eg-tgn}` and `%\\input{Chapters/Appendix}` are both
+        commented out) are correctly ignored — those files are not part of the
+        currently-compiled document and must not be pulled in.
+
+        Fallback behavior:
+        - If main_file doesn't exist under project_path at all, there's no known
+          entry point to resolve a reachable-file tree from, so this falls back to
+          the legacy "read every .tex file found" behavior (read_all_tex_files_raw)
+          rather than silently returning empty text and losing real content. Taking
+          this fallback silently reintroduces the exact contamination bug this
+          method exists to fix (a stray/unreferenced file getting counted as new
+          manuscript content), so an optional `notifier` (an object exposing
+          send_admin_alert(subject=..., message=...), e.g. NotificationAgent) can be
+          passed in to have an admin alerted whenever it happens — see the
+          ProgressTrackingAgent.check_text_changes call site, which passes its own
+          self.notifier through here for exactly this reason.
+        - If main_file exists but has no resolvable \\input/\\include structure at
+          all (i.e. it's a fully self-contained document, like PQTrace's real
+          main.tex), the correct manuscript is exactly main_file's own content —
+          this falls out naturally from the traversal below with no special-casing
+          needed, and correctly excludes any other unreferenced .tex file (like
+          PQTrace's stale old_version.tex) since nothing in main.tex references it.
+        """
+        if not os.path.exists(project_path):
+            return ""
+
+        main_path = os.path.join(project_path, main_file)
+        if not os.path.isfile(main_path):
+            project_name = os.path.basename(os.path.normpath(project_path))
+            self.logger.warning(
+                "%s not found under %s; no entry point available to resolve "
+                "\\input/\\include structure from. Falling back to reading every "
+                ".tex file found (legacy behavior).",
+                main_file, project_path
+            )
+            if notifier:
+                try:
+                    notifier.send_admin_alert(
+                        subject=f"OverleafConnector — root document not found: {project_name}",
+                        message=(
+                            f"Expected root document '{main_file}' was not found for "
+                            f"project '{project_name}' (looked under {project_path}). "
+                            f"Because there is no known entry point to resolve "
+                            f"\\input/\\include structure from, this run fell back to "
+                            f"reading every .tex file found anywhere in the project "
+                            f"directory (the legacy, contamination-prone behavior). As "
+                            f"a result, this project's progress-tracking output may "
+                            f"currently include stray/unreferenced file content — e.g. "
+                            f"old chapter drafts or renamed files may be counted as new "
+                            f"content.\n\n"
+                            f"To fix: rename/create the project's actual root document "
+                            f"to '{main_file}', or update the caller to pass the "
+                            f"correct main_file for this project."
+                        )
+                    )
+                except Exception:
+                    pass  # do not let alert failure mask the fallback read itself
+            return self.read_all_tex_files_raw(project_path)
+
+        visited = set()
+        ordered_contents = []
+
+        def _visit(file_path: str):
+            real_path = os.path.realpath(file_path)
+            if real_path in visited:
+                return
+            visited.add(real_path)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw = f.read()
+            except OSError as e:
+                self.logger.warning("Failed to read %s: %s", file_path, str(e))
+                return
+
+            ordered_contents.append(raw)
+
+            # Strip comments before scanning for \input/\include targets (but NOT
+            # from the raw content appended above) so a commented-out directive like
+            # `%\include{eg-tgn/eg-tgn}` is never followed.
+            scan_text = re.sub(r'%.*$', '', raw, flags=re.MULTILINE)
+            for target in self._INPUT_INCLUDE_RE.findall(scan_text):
+                resolved = self._resolve_input_include_target(project_path, target)
+                if resolved:
+                    _visit(resolved)
+                else:
+                    self.logger.debug(
+                        "Could not resolve \\input/\\include target '%s' referenced "
+                        "from %s; skipping.", target, file_path
+                    )
+
+        _visit(main_path)
+        return "".join(content + "\n" for content in ordered_contents)
+
     # Markers that conventionally start an appendix in LaTeX. clean_latex_text() strips
     # all command syntax, so this split MUST happen on the raw (uncleaned) source —
     # by the time text is cleaned there is no reliable trace left that a section was

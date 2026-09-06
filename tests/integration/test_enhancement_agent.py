@@ -311,6 +311,205 @@ class TestStanfordReviewCycleComparison:
             )
             assert cursor.fetchone()[0] == 2  # both cycles preserved, not overwritten
 
+class TestNoPdfAvailableForReviewFallback:
+    """A1 regression tests: README/silent-failure fix — when a project is
+    READY_FOR_UPLOAD but _get_project_pdf_path() finds no PDF on disk (almost
+    always a symptom of DataIngestionAgent failing to obtain a compiled PDF
+    upstream), _process_project must increment upload_failures, alert an admin
+    with wording distinct from a generic Stanford-upload-failure alert, and
+    either retry later (below threshold, SKIPPED) or fall back to the internal
+    review pipeline (at/above threshold)."""
+
+    @pytest.fixture
+    def enhancement_agent(self, db_in_memory, mock_notifier, sample_project_name):
+        agent = ResearchEnhancementAgent(
+            overleaf_projects=[sample_project_name],
+            db=db_in_memory,
+            notifier=mock_notifier,
+        )
+        return agent
+
+    def test_no_pdf_below_threshold_increments_failures_and_alerts_skipped(
+        self, enhancement_agent, db_in_memory, sample_project_name, mock_notifier
+    ):
+        """Below Config.STANFORD_MAX_UPLOAD_RETRIES: upload_failures increments by
+        exactly 1, a 'No PDF Available' admin alert fires (distinct wording from a
+        generic Stanford-upload-failure alert), and log_agent_run is called with
+        status=SKIPPED (not SUCCESS) for this project this run."""
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        db_in_memory.update_project_state(
+            sample_project_name, stanford_status="READY_FOR_UPLOAD", stanford_upload_failures=0
+        )
+        assert Config.STANFORD_MAX_UPLOAD_RETRIES >= 2  # otherwise this scenario can't be "below threshold"
+
+        with patch.object(enhancement_agent, "_get_project_pdf_path", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review") as mock_fallback:
+            enhancement_agent._process_project(sample_project_name)
+
+        mock_fallback.assert_not_called()
+
+        state = db_in_memory.get_project_state_slim(sample_project_name)
+        assert state["stanford_status"] == "READY_FOR_UPLOAD"
+        assert state["stanford_upload_failures"] == 1
+
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert "No PDF Available" in kwargs["subject"]
+        assert sample_project_name in kwargs["subject"]
+        # Wording must point at the ingestion side, distinguishing this from a
+        # generic Stanford-upload-failure alert.
+        assert "Overleaf" in kwargs["message"] or "ingestion" in kwargs["message"].lower() \
+            or "DataIngestionAgent" in kwargs["message"]
+
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM agent_runs WHERE project_name = ? ORDER BY id DESC LIMIT 1",
+                (sample_project_name,)
+            )
+            row = cursor.fetchone()
+        assert row["status"] == "SKIPPED"
+
+    def test_no_pdf_at_threshold_resets_failures_and_triggers_internal_review(
+        self, enhancement_agent, db_in_memory, sample_project_name, mock_notifier
+    ):
+        """At/above Config.STANFORD_MAX_UPLOAD_RETRIES: upload_failures resets to 0,
+        a second/different admin alert fires, and _run_internal_review is actually
+        invoked for the project."""
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        starting_failures = Config.STANFORD_MAX_UPLOAD_RETRIES - 1
+        db_in_memory.update_project_state(
+            sample_project_name,
+            stanford_status="READY_FOR_UPLOAD",
+            stanford_upload_failures=starting_failures,
+        )
+
+        with patch.object(enhancement_agent, "_get_project_pdf_path", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review", return_value=True) as mock_fallback:
+            enhancement_agent._process_project(sample_project_name)
+
+        mock_fallback.assert_called_once_with(sample_project_name)
+
+        state = db_in_memory.get_project_state_slim(sample_project_name)
+        assert state["stanford_upload_failures"] == 0
+
+        mock_notifier.send_admin_alert.assert_called_once()
+        _, kwargs = mock_notifier.send_admin_alert.call_args
+        assert "No PDF Available" in kwargs["subject"]
+        assert sample_project_name in kwargs["subject"]
+        # This alert's message must differ from the below-threshold one (mentions
+        # the internal fallback being activated, not just "will retry").
+        assert "internal" in kwargs["message"].lower()
+
+        # Falls through to the bottom-of-method SUCCESS log (mirrors the sibling
+        # genuine-Stanford-failure branch's existing pattern), since
+        # _run_internal_review itself is mocked here.
+        with db_in_memory._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM agent_runs WHERE project_name = ? ORDER BY id DESC LIMIT 1",
+                (sample_project_name,)
+            )
+            row = cursor.fetchone()
+        assert row["status"] == "SUCCESS"
+
+    # ─── no-PDF-review alert throttle tests (mirrors the ingestion-side
+    #     pdf_alert_last_sent_at throttle test structure exactly, but against
+    #     the distinct no_pdf_review_alert_last_sent_at column) ─────────────
+
+    def test_no_pdf_alert_throttled_within_window_then_resent_after_window(
+        self, enhancement_agent, db_in_memory, sample_project_name, mock_notifier, monkeypatch
+    ):
+        """First no-PDF failure sends the admin alert. An immediate second no-PDF
+        failure within the 24h throttle window must NOT re-send it. A failure
+        occurring after the window has elapsed (simulated by moving the stored
+        no_pdf_review_alert_last_sent_at timestamp into the past) DOES re-send it.
+
+        Config.STANFORD_MAX_UPLOAD_RETRIES is monkeypatched up so this test can
+        exercise multiple below-threshold ("SKIPPED, will retry") runs in a row —
+        the default (2) only allows a single below-threshold run before the
+        internal-review fallback takes over, which isn't enough to demonstrate
+        the throttle across repeated below-threshold failures."""
+        from datetime import datetime, timedelta
+        from config import Config
+
+        monkeypatch.setattr(Config, "STANFORD_MAX_UPLOAD_RETRIES", 5)
+
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        db_in_memory.update_project_state(
+            sample_project_name, stanford_status="READY_FOR_UPLOAD", stanford_upload_failures=0
+        )
+
+        # --- Run 1: first detection -> alert sent, timestamp persisted ---
+        with patch.object(enhancement_agent, "_get_project_pdf_path", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review"):
+            enhancement_agent._process_project(sample_project_name)
+
+        assert mock_notifier.send_admin_alert.call_count == 1
+        state = db_in_memory.get_project_state(sample_project_name)
+        persisted_ts = state["no_pdf_review_alert_last_sent_at"]
+        assert persisted_ts is not None, (
+            "Expected no_pdf_review_alert_last_sent_at to be persisted after the first alert"
+        )
+
+        # --- Run 2: still failing, WITHIN the throttle window ---
+        with patch.object(enhancement_agent, "_get_project_pdf_path", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review"):
+            enhancement_agent._process_project(sample_project_name)
+
+        assert mock_notifier.send_admin_alert.call_count == 1, (
+            "Alert must NOT be re-sent within the throttle window"
+        )
+
+        # --- Run 3: same failure, but the stored timestamp is now > 24h old ---
+        stale_ts = (datetime.now() - timedelta(hours=25)).isoformat()
+        db_in_memory.update_project_state(
+            sample_project_name, no_pdf_review_alert_last_sent_at=stale_ts
+        )
+        with patch.object(enhancement_agent, "_get_project_pdf_path", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review"):
+            enhancement_agent._process_project(sample_project_name)
+
+        assert mock_notifier.send_admin_alert.call_count == 2, (
+            "Alert MUST be re-sent once the throttle window has elapsed"
+        )
+
+    def test_no_pdf_alert_clears_on_internal_review_fallback(
+        self, enhancement_agent, db_in_memory, sample_project_name, mock_notifier
+    ):
+        """When the failure count reaches the internal-review fallback threshold,
+        the stored no_pdf_review_alert_last_sent_at timestamp is cleared back to
+        None -- a later, genuinely new no-PDF occurrence should alert immediately
+        rather than inheriting a stale cooldown."""
+        from datetime import datetime
+        from config import Config
+
+        db_in_memory.add_project(sample_project_name, "researcher@example.com")
+        db_in_memory.update_project_state(
+            sample_project_name,
+            stanford_status="READY_FOR_UPLOAD",
+            stanford_upload_failures=0,
+            no_pdf_review_alert_last_sent_at=datetime.now().isoformat(),
+        )
+
+        starting_failures = Config.STANFORD_MAX_UPLOAD_RETRIES - 1
+        db_in_memory.update_project_state(
+            sample_project_name, stanford_upload_failures=starting_failures
+        )
+
+        with patch.object(enhancement_agent, "_get_project_pdf_path", return_value=None), \
+             patch.object(enhancement_agent, "_run_internal_review", return_value=True):
+            enhancement_agent._process_project(sample_project_name)
+
+        state = db_in_memory.get_project_state(sample_project_name)
+        assert state["no_pdf_review_alert_last_sent_at"] is None
+
+
+class TestGetLatestStanfordReviewScopedPerProject:
     def test_get_latest_stanford_review_scoped_per_project(self, db_in_memory):
         """Review history for one project must never leak into another project's
         comparison."""

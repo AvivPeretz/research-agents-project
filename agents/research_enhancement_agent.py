@@ -106,11 +106,18 @@ class ResearchEnhancementAgent(BaseAgent):
         return {"status": "READY_FOR_UPLOAD", "last_upload_time": None, "token": None, "upload_failures": 0}
 
     def _update_stanford_state(self, project_name: str, status: str, upload_time: str = None, token: str = None,
-                                upload_failures: int = None) -> bool:
+                                upload_failures: int = None, clear_no_pdf_alert: bool = False) -> bool:
         """Updates Stanford status in SQLite database. Returns True on success, False
         on failure — callers persisting something irreplaceable (a review token) in
         the same breath as this call must check the return value rather than assume
-        success just because nothing raised."""
+        success just because nothing raised.
+
+        clear_no_pdf_alert=True clears no_pdf_review_alert_last_sent_at back to NULL —
+        pass it whenever upload_failures is being reset to 0, mirroring the
+        ingestion-side pattern of clearing its own alert throttle timestamp on
+        resolution (see pdf_alert_last_sent_at). A later, genuinely new no-PDF
+        occurrence should then alert immediately rather than inheriting a stale
+        cooldown from before this one was resolved."""
         if not self.db:
             return True
 
@@ -121,6 +128,8 @@ class ResearchEnhancementAgent(BaseAgent):
             fields["stanford_token"] = token
         if upload_failures is not None:
             fields["stanford_upload_failures"] = upload_failures
+        if clear_no_pdf_alert:
+            fields["no_pdf_review_alert_last_sent_at"] = None
 
         try:
             return bool(self.db.update_project_state(project_name, **fields))
@@ -670,7 +679,116 @@ short or say "No blocking issues identified."
         elif state["status"] == "READY_FOR_UPLOAD":
             pdf_path = self._get_project_pdf_path(project)
             if not pdf_path:
-                self.logger.warning("No PDF found for %s. Cannot upload.", project)
+                # No compiled PDF on disk. This is almost always a symptom of
+                # DataIngestionAgent failing to download the PDF upstream (e.g.
+                # Overleaf's own "Download as PDF" disabled because the project
+                # doesn't compile) rather than anything wrong in this agent —
+                # treat it exactly like a genuine Stanford upload failure so it
+                # eventually reaches the internal-review fallback instead of
+                # silently doing nothing forever.
+                failures = state.get("upload_failures", 0) + 1
+                if failures < Config.STANFORD_MAX_UPLOAD_RETRIES:
+                    self.logger.warning(
+                        "No PDF found for '%s' (%d/%d) — likely an upstream Overleaf "
+                        "PDF compile failure. Will retry next scheduled run before "
+                        "falling back to internal review.",
+                        project, failures, Config.STANFORD_MAX_UPLOAD_RETRIES
+                    )
+                    self._update_stanford_state(project, "READY_FOR_UPLOAD", upload_failures=failures)
+                    if self.notifier:
+                        try:
+                            # Throttle: STANFORD_MAX_UPLOAD_RETRIES only incidentally bounds
+                            # this alert today (default 2, so it fires at most once before
+                            # falling back to internal review). If that config value is ever
+                            # raised, this would re-fire on every scheduled run for the same
+                            # unresolved condition with no ceiling — the identical problem
+                            # already solved on the ingestion side's "PDF Compile Failing"
+                            # alert via a DB-persisted timestamp (pdf_alert_last_sent_at).
+                            # Mirrored here with a distinct column
+                            # (no_pdf_review_alert_last_sent_at) since this alert and the
+                            # ingestion one are triggered by different agents on different
+                            # schedules for semantically different events (an enhancement
+                            # upload-attempt failure vs. an ingestion sync failure), even
+                            # though both stem from the same underlying root cause — sharing
+                            # one column would let either agent's throttle state incorrectly
+                            # suppress or reset the other's. Same 24h cooldown and
+                            # "unparseable timestamp errs toward alerting" behavior as the
+                            # ingestion side: this agent runs on the same per-scheduled-run
+                            # cadence (a fresh main.py process per invocation, no daemon
+                            # loop), so nothing about this call site's cadence justifies a
+                            # different threshold.
+                            NO_PDF_ALERT_COOLDOWN_HOURS = 24
+                            should_alert = True
+                            last_sent = self.db.get_no_pdf_review_alert_last_sent_at(project) if self.db else None
+                            if last_sent:
+                                try:
+                                    elapsed_hours = (
+                                        datetime.now() - datetime.fromisoformat(last_sent)
+                                    ).total_seconds() / 3600.0
+                                    should_alert = elapsed_hours >= NO_PDF_ALERT_COOLDOWN_HOURS
+                                except (ValueError, TypeError):
+                                    should_alert = True  # unparseable timestamp — err toward alerting
+
+                            if should_alert:
+                                self.notifier.send_admin_alert(
+                                    subject=f"No PDF Available For Review: {project}",
+                                    message=(
+                                        f"Project '{project}' is ready for review but no compiled "
+                                        f"PDF was found on disk. This is likely a symptom of the "
+                                        f"Overleaf sync failing to obtain a compiled PDF for this "
+                                        f"project (e.g. it doesn't currently compile on Overleaf) — "
+                                        f"check DataIngestionAgent's logs/alerts for this same "
+                                        f"project before investigating this agent separately. "
+                                        f"Attempt {failures}/{Config.STANFORD_MAX_UPLOAD_RETRIES}; "
+                                        f"will fall back to an internal review if the PDF is still "
+                                        f"missing after {Config.STANFORD_MAX_UPLOAD_RETRIES} attempts. "
+                                        f"(This alert is throttled to at most once every "
+                                        f"{NO_PDF_ALERT_COOLDOWN_HOURS}h while the failure persists.)"
+                                    )
+                                )
+                                if self.db:
+                                    self.db.update_project_state(
+                                        project,
+                                        no_pdf_review_alert_last_sent_at=datetime.now().isoformat(),
+                                    )
+                        except Exception:
+                            pass  # do not let alert failure mask the underlying condition
+                    if self.db:
+                        self.db.log_agent_run(
+                            agent_name=self.agent_name,
+                            project_name=project,
+                            status="SKIPPED",
+                            error_message=(
+                                f"No PDF available for upload (attempt {failures}/"
+                                f"{Config.STANFORD_MAX_UPLOAD_RETRIES}); likely an upstream "
+                                f"Overleaf PDF compile failure."
+                            ),
+                            finished_at=datetime.now().isoformat()
+                        )
+                    return
+                else:
+                    self.logger.warning(
+                        "No PDF found for '%s' after %d attempts. Activating internal fallback.",
+                        project, failures
+                    )
+                    self._update_stanford_state(project, "READY_FOR_UPLOAD", upload_failures=0, clear_no_pdf_alert=True)
+                    if self.notifier:
+                        try:
+                            self.notifier.send_admin_alert(
+                                subject=f"No PDF Available For Review: {project}",
+                                message=(
+                                    f"Project '{project}' still has no compiled PDF after "
+                                    f"{failures} attempts — this is likely a symptom of the "
+                                    f"Overleaf sync failing to obtain a compiled PDF for this "
+                                    f"project (e.g. it doesn't currently compile on Overleaf). "
+                                    f"An internal (non-Stanford) review is being generated from "
+                                    f"the manuscript's LaTeX source instead, since Stanford "
+                                    f"review requires a compiled PDF that isn't available."
+                                )
+                            )
+                        except Exception:
+                            pass  # do not let alert failure mask the underlying condition
+                    self._run_internal_review(project)
             else:
                 cooldown = self._stanford_cooldown_remaining()
                 if cooldown > 0:
@@ -687,7 +805,7 @@ short or say "No blocking issues identified."
                 if token:
                     saved = self._update_stanford_state(
                         project, "WAITING_FOR_REVIEW", datetime.now().isoformat(),
-                        token=token, upload_failures=0
+                        token=token, upload_failures=0, clear_no_pdf_alert=True
                     )
                     if saved:
                         self.logger.info("✅ Project state changed to WAITING_FOR_REVIEW in DB.")
@@ -735,7 +853,7 @@ short or say "No blocking issues identified."
                             "Stanford upload failed for '%s' %d times in a row. Activating internal fallback.",
                             project, failures
                         )
-                        self._update_stanford_state(project, "READY_FOR_UPLOAD", upload_failures=0)
+                        self._update_stanford_state(project, "READY_FOR_UPLOAD", upload_failures=0, clear_no_pdf_alert=True)
                         self._run_internal_review(project)
 
         elif state["status"] == "WAITING_FOR_REVIEW":
